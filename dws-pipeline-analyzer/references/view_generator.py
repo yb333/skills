@@ -104,6 +104,7 @@ def build_report_data(knowledge):
         target_table = _schema_table(ts, tt)
 
     cm = quality.get("complexity_metrics", {})
+    scenarios = topo.get("scenarios", [])
     summary = {
         "target_table": target_table,
         "table_cn_name": bl.get("summary", "").split("，")[0] if bl.get("summary") else "",
@@ -111,8 +112,12 @@ def build_report_data(knowledge):
         "rule_count": len(steps_list),
         "field_count": len(fields_list),
         "source_count": len(df.get("tables", [])),
+        "scenario_count": len([s for s in scenarios if not s.get("is_common", False)]),
+        "is_multi_scenario": len(scenarios) > 1,
         "generated_at": meta.get("analysis_time", datetime.now().strftime("%Y-%m-%d %H:%M")),
         "patterns": patterns,
+        "scenarios": [{"id": s["id"], "name": s["name"], "rule_count": s["rule_count"],
+                       "is_common": s.get("is_common", False)} for s in scenarios],
         "complexity": {
             "max_join_count": cm.get("max_join_count", 0),
             "max_cte_count": cm.get("max_cte_count", 0),
@@ -149,31 +154,26 @@ def build_report_data(knowledge):
     for s in steps_list:
         step_id = s["step_id"]
         df_step = next((d for d in data_flow_steps if d.get("step_id") == step_id), {})
+        # 优先用 AI 的 description，没有则用脚本兜底的（来自 business_logic.step_descriptions）
+        all_step_descs = bl.get("step_descriptions", [])
         ai_step = next(
-            (d for d in bl.get("step_descriptions", []) if d.get("step_id") == step_id),
+            (d for d in all_step_descs if d.get("step_id") == step_id),
             {}
         )
-        src_tables = s.get("source_tables_from_sql", [])
-        write_mode = "TRUNCATE+INSERT" if s.get("delete_mode") == "1" else "APPEND"
-
-        step_fields = [f for f in fields_list if f.get("producing_step") == step_id]
 
         steps_out.append({
             "step_id": step_id,
             "rule_code": s.get("rule_code", ""),
             "exec_sequence": s.get("exec_sequence", 0),
-            "source_tables": src_tables,
+            "scenario_id": s.get("scenario_id", ""),
+            "scenario_name": s.get("scenario_name", ""),
+            "is_common_step": s.get("is_common_step", False),
+            "delete_mode_label": s.get("delete_mode_label", ""),
+            "delete_condition": s.get("delete_condition", ""),
+            "source_tables": s.get("source_tables_from_sql", []),
             "target_table": s.get("target_table", ""),
-            "write_mode": write_mode,
-            "field_count": len(step_fields),
             "purpose": ai_step.get("purpose", ""),
             "logic": ai_step.get("logic", ""),
-            "joins_summary": ", ".join(
-                _format_join(j.get("join_type", ""), j.get("source_table", ""))
-                for j in df_step.get("joins", [])
-            ),
-            "where_summary": _clean(df_step.get("where_clause", "")),
-            "group_by": df_step.get("group_by", []),
             "raw_sql": df_step.get("raw_sql", ""),
             "ctes": [
                 {
@@ -499,9 +499,18 @@ def _build_lineage_layout(topo, df, bl=None):
             label = name
             step_data = None
             if node_type == "step":
-                step_idx = int(name.split("_")[1]) - 1 if "_" in name else 0
-                if step_idx < len(steps_list):
+                # 安全解析 step_N 格式
+                step_idx = None
+                if name.startswith("step_"):
+                    try:
+                        step_idx = int(name.split("_")[1]) - 1
+                    except (ValueError, IndexError):
+                        step_idx = None
+                # 从 steps_list 找匹配的 step
+                s = next((st for st in steps_list if st.get("step_id") == name), None)
+                if s is None and step_idx is not None and step_idx < len(steps_list):
                     s = steps_list[step_idx]
+                if s:
                     ai_step = next(
                         (d for d in bl.get("step_descriptions", []) if d.get("step_id") == name),
                         {}
@@ -926,77 +935,84 @@ def generate_mapping(knowledge, output_dir):
     ws2 = wb.create_sheet("属性级mapping")
     # 源表别名放在源表物理表名后面
     headers2 = [
-        "源表schema", "源表物理表名", "源表别名", "源字段名", "源字段类型",
+        "场景", "源表schema", "源表物理表名", "源表别名", "源字段名", "源字段类型",
         "映射规则", "映射表达式",
         "目标字段名", "目标字段中文名", "目标字段类型"
     ]
     ws2.append(headers2)
 
-    # 过滤视图步骤：只取真正写数据的步骤（TRUNCATE+INSERT），
-    # 排除纯投影视图步骤（CREATE VIEW / APPEND 且 SQL 含 CREATE VIEW）
+    # 过滤视图步骤
     def _is_view_step(step_id: str) -> bool:
         df_step = next((d for d in data_flow_steps if d.get("step_id") == step_id), {})
-        topo_step = next((s for s in steps_list if s.get("step_id") == step_id), {})
         raw_sql = (df_step.get("raw_sql", "") or "").upper()
-        delete_mode = topo_step.get("delete_mode", "1")
-        # 视图步骤特征：delete_mode != "1" 且 SQL 含 CREATE VIEW
         if "CREATE VIEW" in raw_sql or "CREATE OR REPLACE VIEW" in raw_sql:
             return True
         return False
 
-    # 去重：同一目标字段名只保留一次（优先保留非 direct 的加工版本）
-    seen_target_fields = {}
-    filtered_fields = []
+    # 构建 step_id → scenario_name 映射
+    step_scenario = {}
+    for s in steps_list:
+        sid = s.get("step_id", "")
+        step_scenario[sid] = s.get("scenario_name", "")
+
+    # 字段按场景分组，同场景内字段去重（优先保留加工版本）
+    # 不同场景可以有相同字段名（各自独立映射）
+    scenario_fields: dict[str, list] = {}  # {scenario: [fields]}
+    seen_in_scenario: dict[str, set] = {}   # {scenario: {field_names}}
+
     for f in fields_list:
         fname = f.get("target_field", "")
         step_id = f.get("producing_step", "")
-        # 跳过视图步骤的字段
-        if _is_view_step(step_id):
+        if _is_view_step(step_id) or not fname:
             continue
-        if not fname:
-            continue
-        # 同名字段去重：优先保留有加工逻辑的
-        if fname in seen_target_fields:
-            existing_idx = seen_target_fields[fname]
-            existing_tt = filtered_fields[existing_idx].get("transform_type", "expression")
-            new_tt = f.get("transform_type", "expression")
-            priority = {"unknown": -1, "value": 0, "direct": 1, "expression": 2, "fallback": 3, "case_when": 4, "aggregate": 5, "pivot": 6, "window": 7}
-            if priority.get(new_tt, 0) > priority.get(existing_tt, 0):
-                filtered_fields[existing_idx] = f
+
+        scenario = step_scenario.get(step_id, "默认场景")
+        if scenario not in scenario_fields:
+            scenario_fields[scenario] = []
+            seen_in_scenario[scenario] = set()
+
+        # 同场景内去重
+        if fname in seen_in_scenario[scenario]:
+            # 找到已有的，优先保留加工版本
+            for i, existing in enumerate(scenario_fields[scenario]):
+                if existing.get("target_field") == fname:
+                    existing_tt = existing.get("transform_type", "expression")
+                    new_tt = f.get("transform_type", "expression")
+                    priority = {"unknown": -1, "value": 0, "direct": 1, "expression": 2, "fallback": 3, "case_when": 4, "aggregate": 5, "pivot": 6, "window": 7}
+                    if priority.get(new_tt, 0) > priority.get(existing_tt, 0):
+                        scenario_fields[scenario][i] = f
+                    break
         else:
-            seen_target_fields[fname] = len(filtered_fields)
-            filtered_fields.append(f)
+            seen_in_scenario[scenario].add(fname)
+            scenario_fields[scenario].append(f)
 
-    for f in filtered_fields:
-        tt = f.get("transform_type", "expression")
-        rule_map = {"direct": "直取", "value": "赋值"}
-        rule = rule_map.get(tt, "加工")
+    # 按场景顺序输出
+    for scenario, sc_fields in scenario_fields.items():
+        for f in sc_fields:
+            tt = f.get("transform_type", "expression")
+            rule_map = {"direct": "直取", "value": "赋值"}
+            rule = rule_map.get(tt, "加工")
 
-        target_field_name = f.get("target_field", "")
-        # 字段中文名：优先 DDL COMMENT，留空而非瞎写
-        field_cn = ddl_comments.get(target_field_name.lower(), "")
-        # 字段类型：以 DDL 为准
-        field_type = ddl_types.get(target_field_name.lower(), "")
+            target_field_name = f.get("target_field", "")
+            field_cn = ddl_comments.get(target_field_name.lower(), "")
+            field_type = ddl_types.get(target_field_name.lower(), "")
 
-        lineages = f.get("lineage", [])
+            lineages = f.get("lineage", [])
+            physical_sources = _resolve_physical_sources(lineages, cte_index, cte_names_upper, set())
 
-        # ── 穿透 CTE 到物理源表 ──
-        physical_sources = _resolve_physical_sources(lineages, cte_index, cte_names_upper, set())
-
-        if not physical_sources:
-            # 无来源（审计字段 value 类型等）
-            ws2.append([
-                "", "", "", "", "",
-                rule, "",
-                target_field_name, field_cn, field_type,
-            ])
-        else:
-            for ps in physical_sources:
+            if not physical_sources:
                 ws2.append([
-                    ps["schema"], ps["table"], ps.get("alias", ""), ps["field"], "",
-                    rule, ps.get("raw_sql", ""),
+                    scenario, "", "", "", "", "",
+                    rule, "",
                     target_field_name, field_cn, field_type,
                 ])
+            else:
+                for ps in physical_sources:
+                    ws2.append([
+                        scenario, ps["schema"], ps["table"], ps.get("alias", ""), ps["field"], "",
+                        rule, ps.get("raw_sql", ""),
+                        target_field_name, field_cn, field_type,
+                    ])
 
     # 写入
     output_path = Path(output_dir) / "mapping.xlsx"

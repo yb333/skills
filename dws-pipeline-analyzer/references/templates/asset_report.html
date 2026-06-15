@@ -1502,10 +1502,14 @@ function renderOverview() {
     }, 0);
   }
 
-  // Metric cards
+  // Metric cards — 多场景时第2个卡片显示场景数
+  var stepMetric = s.is_multi_scenario
+    ? { label: '加工场景', value: s.scenario_count || 0 }
+    : { label: '加工步骤', value: s.rule_count || (REPORT_DATA.steps ? REPORT_DATA.steps.length : 0) };
+
   var metrics = [
     { label: '来源表', value: s.source_count || complexity.total_source_tables || 0 },
-    { label: '加工步骤', value: s.rule_count || (REPORT_DATA.steps ? REPORT_DATA.steps.length : 0) },
+    stepMetric,
     { label: '目标字段', value: s.field_count || (REPORT_DATA.schema_fields ? REPORT_DATA.schema_fields.length : 0) },
     { label: 'CTE 数', value: cteCount }
   ];
@@ -1547,6 +1551,22 @@ function renderOverview() {
     });
   }
   document.getElementById('patternTags').innerHTML = patternsHtml;
+
+  // 场景标签（多场景时显示）
+  var scenarios = s.scenarios || [];
+  if (s.is_multi_scenario && scenarios.length > 0) {
+    var scHtml = '<div style="margin-top:8px;"><span class="pattern-tags-label">加工场景:</span>';
+    scenarios.forEach(function(sc) {
+      var color = sc.is_common ? '#6b7280' : '#8b5cf6';
+      scHtml += '<span style="display:inline-block;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600;color:white;background:' + color + ';margin-right:6px;cursor:default;">';
+      scHtml += escapeHtml(sc.name);
+      scHtml += '<span style="opacity:0.7;margin-left:4px;font-weight:400;">(' + sc.rule_count + '规则)</span>';
+      scHtml += '</span>';
+    });
+    scHtml += '</div>';
+    var pt = document.getElementById('patternTags');
+    pt.innerHTML += scHtml;
+  }
 }
 
 // ================================================================
@@ -1769,18 +1789,21 @@ function renderSteps() {
     html += '<div class="step-card-header" onclick="toggleStepCard(this)">';
     html += '<span class="step-toggle">&#9654;</span>';
     html += '<div class="step-title-block">';
-    html += '<div class="step-title">' + escapeHtml(step.step_id || '?');
+    // 场景标签
+    var scenarioLabel = step.scenario_name || '';
+    var scenarioColor = step.is_common_step ? '#6b7280' : (scenarioLabel.includes('1') ? '#8b5cf6' : '#3b82f6');
+    if (scenarioLabel) {
+      html += '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;color:white;background:' + scenarioColor + ';margin-right:8px;vertical-align:middle;">' + escapeHtml(scenarioLabel) + '</span>';
+    }
+    html += '<span class="step-title">' + escapeHtml(step.step_id || '?');
     if (step.rule_code) html += ' <span style="color:var(--text-muted);font-weight:400;font-size:12px;">(' + escapeHtml(step.rule_code) + ')</span>';
+    html += '</span>';
     html += '</div>';
-    if (step.purpose) {
-      html += '<div class="step-purpose">' + escapeHtml(step.purpose) + '</div>';
+    // Right side: delete_mode_label + exec_sequence
+    if (step.delete_mode_label) {
+      html += '<span class="write-mode-tag">' + escapeHtml(step.delete_mode_label) + '</span>';
     }
-    html += '</div>';
-    // Right side: write_mode + exec_sequence
-    if (step.write_mode) {
-      html += '<span class="write-mode-tag">' + escapeHtml(step.write_mode) + '</span>';
-    }
-    html += '<span class="exec-seq">#' + (step.exec_sequence || (idx + 1)) + '</span>';
+    html += '<span class="exec-seq">seq=' + (step.exec_sequence || 0) + '</span>';
     html += '</div>';
 
     // Body
