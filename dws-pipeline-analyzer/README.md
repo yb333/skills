@@ -54,8 +54,7 @@ pip install openpyxl sqlglot
 ```
 dws-pipeline-analyzer/
 ├── SKILL.md                          # Skill 定义（AI 读取）
-├── run.py                            # 脚本分发器（dws-run 调用入口）
-├── dws_analyzer.py                   # 独立入口（不依赖 dws-run）
+├── run.py                            # 脚本分发器（统一入口）
 ├── requirements.txt                  # Python 依赖
 ├── user-guide.md                     # 用户指南
 └── references/
