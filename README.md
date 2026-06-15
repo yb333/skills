@@ -10,8 +10,8 @@
 # macOS / Linux
 bash install.sh
 
-# Windows (PowerShell)
-powershell -ExecutionPolicy Bypass -File install.ps1
+# Windows（双击 install.bat 或命令行执行）
+install.bat
 ```
 
 安装命令会自动：扫描所有 skill → 创建 venv → 装依赖 → 复制 skill + 命令到 opencode 目录。
@@ -34,7 +34,8 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 | [frontend-slides/](frontend-slides/) | HTML 演示文稿生成器 |
 | [commands/](commands/) | 命令定义（/analyze 等） |
 | [install.sh](install.sh) | macOS/Linux 安装器 |
-| [install.ps1](install.ps1) | Windows 安装器 |
+| [install.bat](install.bat) | Windows 安装器（双击即可执行） |
+| [install.ps1](install.ps1) | Windows 安装器（PowerShell 版，备用） |
 
 ## 手工安装
 
