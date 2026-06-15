@@ -45,6 +45,8 @@
   /* lineage node colors */
   --node-source-fill: #dbeafe;
   --node-source-stroke: #3b82f6;
+  --node-intermediate-fill: #f1f5f9;
+  --node-intermediate-stroke: #64748b;
   --node-cte-fill: #ffedd5;
   --node-cte-stroke: #f97316;
   --node-step-fill: #ede9fe;
@@ -332,11 +334,12 @@ body {
   filter: drop-shadow(0 2px 6px rgba(0,0,0,0.2));
 }
 
-.lineage-svg .node-rect.source     { fill: var(--node-source-fill); stroke: var(--node-source-stroke); }
-.lineage-svg .node-rect.cte        { fill: var(--node-cte-fill); stroke: var(--node-cte-stroke); }
-.lineage-svg .node-rect.step       { fill: var(--node-step-fill); stroke: var(--node-step-stroke); }
-.lineage-svg .node-rect.target     { fill: var(--node-target-fill); stroke: var(--node-target-stroke); }
-.lineage-svg .node-rect.downstream { fill: var(--node-downstream-fill); stroke: var(--node-downstream-stroke); }
+.lineage-svg .node-rect.source      { fill: var(--node-source-fill); stroke: var(--node-source-stroke); }
+.lineage-svg .node-rect.intermediate { fill: var(--node-intermediate-fill); stroke: var(--node-intermediate-stroke); }
+.lineage-svg .node-rect.cte         { fill: var(--node-cte-fill); stroke: var(--node-cte-stroke); }
+.lineage-svg .node-rect.step        { fill: var(--node-step-fill); stroke: var(--node-step-stroke); }
+.lineage-svg .node-rect.target      { fill: var(--node-target-fill); stroke: var(--node-target-stroke); }
+.lineage-svg .node-rect.downstream  { fill: var(--node-downstream-fill); stroke: var(--node-downstream-stroke); }
 
 .lineage-svg .edge-path {
   fill: none;
