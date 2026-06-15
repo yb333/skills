@@ -47,19 +47,16 @@ python -c "import openpyxl, sqlglot; print('OK')"
 
 #### 1a. 执行分析脚本
 
-```bash
-# 通过 dws-run（opencode 平台）
-dws-run analyzer analyze \
-    --input {input_xlsx} \
-    --output {output_dir} \
-    [--ddl-dir {ddl_dir}]
+**核心分析脚本是 `references/analyzer.py`**，通过 `run.py` 分发器调用：
 
-# 或直接调用（独立环境）
+```bash
 python {skill_dir}/run.py analyze \
     --input {input_xlsx} \
     --output {output_dir} \
     [--ddl-dir {ddl_dir}]
 ```
+
+如果已安装 dws-run（opencode 平台），也可以用 `dws-run analyzer analyze ...`，效果一样。
 
 DDL 目录自动检测：同级的 `04_ddl/` 有则传入，没有则跳过。
 
@@ -82,7 +79,7 @@ DDL 目录自动检测：同级的 `04_ddl/` 有则传入，没有则跳过。
 #### 1c. 生成全部视图
 
 ```bash
-dws-run analyzer view_generator \
+python {skill_dir}/run.py view_generator \
     --input knowledge_final.json \
     --output {output_dir} \
     --views all
