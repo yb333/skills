@@ -2083,39 +2083,6 @@ function openDetail(fieldName, scenario) {
     html += '</div>';
   }
 
-  // Meaning
-  }
-
-  // Fallback: show field-level lineage from old format
-  if (chain.length === 0 && detail.lineage && detail.lineage.length > 0) {
-    html += '<div class="detail-section"><h4>字段级血缘</h4>';
-    html += '<div class="penetration-chain">';
-    detail.lineage.forEach(function(l) {
-      var srcParts = [];
-      if (l.source_table) srcParts.push(l.source_table);
-      if (l.source_field) srcParts.push(l.source_field);
-      var srcText = srcParts.join('.') || '?';
-
-      html += '<div class="chain-node" data-level="0">';
-      html += '<div class="chain-node-type">&#128229; 来源</div>';
-      html += '<div class="chain-node-field">' + escapeHtml(srcText) + '</div>';
-      if (l.transform) html += '<div style="margin-top:4px;">' + tagHtml(l.transform) + '</div>';
-      html += '</div>';
-
-      html += '<div class="chain-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg></div>';
-
-      html += '<div class="chain-node" data-level="1">';
-      html += '<div class="chain-node-type">&#9733; 目标</div>';
-      html += '<div class="chain-node-field">' + escapeHtml(detail.target_field) + '</div>';
-      html += '</div>';
-
-      if (l.raw_sql) {
-        html += '<div style="margin-top:8px;"><pre class="sql-block" style="max-height:200px;"><code>' + highlightSQL(l.raw_sql) + '</code></pre></div>';
-      }
-    });
-    html += '</div></div>';
-  }
-
   document.getElementById('detailBody').innerHTML = html;
   panel.classList.add('open');
   overlay.classList.add('open');
