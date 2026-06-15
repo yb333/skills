@@ -116,6 +116,8 @@ _DIST_BY_PATTERN = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _TO_GROUP_PATTERN = re.compile(r"\bTO\s+GROUP\s+\S+", re.IGNORECASE)
+# PARTITION(part_name) 语法（DWS/GaussDB 分区查询，sqlglot 不支持）
+_PARTITION_PATTERN = re.compile(r"\s+PARTITION\s*\([^)]+\)", re.IGNORECASE)
 _WITH_PARAMS_PATTERN = re.compile(
     r"\)\s*WITH\s*\(\s*"
     r"(?:ORIENTATION\s*=\s*(?:COLUMN|ROW)\s*,?\s*)?"
@@ -242,6 +244,7 @@ def _strip_dws_clauses(sql: str) -> str:
     """移除 DWS 特有语法，供 sqlglot 解析"""
     sql = _DIST_BY_PATTERN.sub("", sql)
     sql = _TO_GROUP_PATTERN.sub("", sql)
+    sql = _PARTITION_PATTERN.sub("", sql)
     sql = _WITH_PARAMS_PATTERN.sub(")", sql)
     return sql
 

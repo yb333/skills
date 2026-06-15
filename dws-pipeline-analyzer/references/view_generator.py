@@ -1404,8 +1404,8 @@ def main():
     with open(input_path, "r", encoding="utf-8") as f:
         knowledge = json.load(f)
 
-    # 输出目录: {output}/analyzer/views/
-    views_dir = Path(args.output) / "analyzer" / "views"
+    # 输出目录: 直接用用户指定的 output 目录
+    views_dir = Path(args.output)
     views_dir.mkdir(parents=True, exist_ok=True)
     views_str = args.views.strip().lower()
     if views_str == "all":
