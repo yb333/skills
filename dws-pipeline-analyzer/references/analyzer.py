@@ -345,10 +345,12 @@ def read_excel(excel_path: str) -> dict:
         except (ValueError, TypeError):
             rt = 0
 
-        # 只处理取数类规则，跳过参数变量/SP/API/维护等
-        # 1=取数 2=删数 3=备份 4=查询 5=逻辑视图 6=物理视图
-        # 7=度量 8=物理表 9=分区交换 14=Spark数据处理
-        if rt not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 14):
+        # 跳过非 SQL 类规则，处理所有有 SQL 的规则
+        # 规则类型: 1=取数 2=删数 3=备份 4=查询 5=逻辑视图 6=物理视图
+        #           7=度量 8=物理表 9=分区交换 14=Spark数据处理 → 处理
+        #           10=SP规则 11=API规则 12=参数变量 13=维护类 15=判断类 → 跳过
+        SKIP_RULE_TYPES = {10, 11, 12, 13, 15}
+        if rt in SKIP_RULE_TYPES:
             continue
 
         query = _get_val(row, ci.get("query_sql"))
