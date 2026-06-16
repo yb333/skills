@@ -317,9 +317,9 @@ def _replace_placeholders(sql: str) -> str:
 
 
 def _normalize_table_name(schema: str, table: str) -> str:
-    """标准化表名为 schema.table"""
-    s = _clean_name(schema)
-    t = _clean_name(table)
+    """标准化表名为 schema.table（统一小写）"""
+    s = _clean_name(schema).lower()
+    t = _clean_name(table).lower()
     if s:
         return f"{s}.{t}"
     return t
@@ -757,7 +757,7 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
         # from_.this 是主表
         main_table = from_clause.this
         if isinstance(main_table, exp.Table):
-            table_name = ".".join(_clean_name(p.name) for p in main_table.parts)
+            table_name = ".".join(_clean_name(p.name) for p in main_table.parts).lower()
             alias = _clean_name(main_table.alias) if main_table.alias else ""
             joins.append(ParsedJoin(
                 source_table=table_name,
@@ -768,7 +768,7 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
         # from_.expressions 是逗号 JOIN 的额外表（FROM a, b）
         for extra in from_clause.expressions:
             if isinstance(extra, exp.Table):
-                table_name = ".".join(_clean_name(p.name) for p in extra.parts)
+                table_name = ".".join(_clean_name(p.name) for p in extra.parts).lower()
                 alias = _clean_name(extra.alias) if extra.alias else ""
                 joins.append(ParsedJoin(
                     source_table=table_name,
@@ -781,11 +781,13 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
     # 不使用 find_all(exp.Join) 以避免递归进入 CTE 内部
     joins_list = select_node.args.get("joins", [])
     for join_node in joins_list:
-        table = join_node.find(exp.Table)
+        # 用 join_node.this 取 JOIN 表（不用 find 避免取到 ON 条件里的表）
+        join_expr = join_node.this
+        table = join_expr if isinstance(join_expr, exp.Table) else (join_expr.find(exp.Table) if join_expr else None)
         if not table:
             continue
-        table_name = ".".join(_clean_name(p.name) for p in table.parts)
-        alias = _clean_name(table.alias) if table.alias else ""
+        table_name = ".".join(_clean_name(p.name) for p in table.parts).lower()
+        alias = _clean_name(table.alias).lower() if table.alias else ""
 
         # 过滤 CTE 引用（CTE 名作为表名出现在 JOIN 中）
         short_name = table_name.split(".")[-1] if "." in table_name else table_name
@@ -968,19 +970,19 @@ def _extract_ctes(tree, sqlglot_dialect: str) -> list[ParsedCTE]:
             # FROM
             cte_from = cte_select.args.get("from_")
             if cte_from and isinstance(cte_from.this, exp.Table):
-                tname = ".".join(_clean_name(p.name) for p in cte_from.this.parts)
+                tname = ".".join(_clean_name(p.name) for p in cte_from.this.parts).lower()
                 talias = _clean_name(cte_from.this.alias) if cte_from.this.alias else ""
                 cte_tables.append({"name": tname, "alias": talias, "join_type": "FROM"})
             for extra in cte_from.expressions if cte_from else []:
                 if isinstance(extra, exp.Table):
-                    tname = ".".join(_clean_name(p.name) for p in extra.parts)
+                    tname = ".".join(_clean_name(p.name) for p in extra.parts).lower()
                     talias = _clean_name(extra.alias) if extra.alias else ""
                     cte_tables.append({"name": tname, "alias": talias, "join_type": "FROM"})
             # JOIN（不递归进入 CTE 内的嵌套子查询）
             for cte_join in cte_select.args.get("joins", []):
                 t = cte_join.find(exp.Table)
                 if t:
-                    tname = ".".join(_clean_name(p.name) for p in t.parts)
+                    tname = ".".join(_clean_name(p.name) for p in t.parts).lower()
                     talias = _clean_name(t.alias) if t.alias else ""
                     # JOIN 类型
                     jk = cte_join.args.get("kind", "")
@@ -996,7 +998,7 @@ def _extract_ctes(tree, sqlglot_dialect: str) -> list[ParsedCTE]:
             # fallback: find_all（覆盖非标准结构）
             for table in cte_query.find_all(exp.Table):
                 tname = ".".join(_clean_name(p.name) for p in table.parts)
-                talias = _clean_name(table.alias) if table.alias else ""
+                talias = _clean_name(table.alias).lower() if table.alias else ""
                 cte_tables.append({"name": tname, "alias": talias})
 
         # CTE 输出字段（含 transform_type 和 source_fields）
@@ -1783,11 +1785,11 @@ def build_field_mappings(
         for tf in target_fields_map.get(rc, []):
             tf_index[tf.target_field.lower()] = tf
 
-        # SQL SELECT 列按 alias 匹配
-        sql_aliases = set()
+        # SQL SELECT 列按 alias 匹配（大小写归一化）
+        sql_aliases_lower = set()  # 小写集合，用于 only_in_excel 检查
         for col in parsed.select_columns:
             alias = col.alias
-            sql_aliases.add(alias)
+            sql_aliases_lower.add(alias.lower())
 
             tf_data = tf_index.get(alias.lower())
 
@@ -1818,10 +1820,10 @@ def build_field_mappings(
             }
             all_fields.append(field_entry)
 
-        # TargetFields 里有但 SQL 没匹配到的
+        # TargetFields 里有但 SQL 没匹配到的（大小写不敏感比较）
         only_in_excel = []
         for tf in target_fields_map.get(rc, []):
-            if tf.target_field not in sql_aliases:
+            if tf.target_field.lower() not in sql_aliases_lower:
                 only_in_excel.append(tf.target_field)
                 all_fields.append({
                     "target_field": tf.target_field,
