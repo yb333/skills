@@ -157,6 +157,8 @@ _WITH_PARAMS_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _PARAM_PLACEHOLDER = re.compile(r"\$\{[^}]+\}")
+# 平台变量替换语法: #var_name = value# （成对的 # 包裹）
+_PLATFORM_VAR_PATTERN = re.compile(r"#[^#]*?#", re.DOTALL)
 _INLINE_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 
 
@@ -303,8 +305,15 @@ def _strip_dws_clauses(sql: str) -> str:
 
 
 def _replace_placeholders(sql: str) -> str:
-    """替换 ${XXX} 占位符为合法 SQL 值"""
-    return _PARAM_PLACEHOLDER.sub("NULL", sql)
+    """替换平台变量占位符为合法 SQL 值
+
+    支持两种语法:
+    1. ${XXX}        → NULL
+    2. #var = value# → NULL（成对的 # 包裹）
+    """
+    sql = _PARAM_PLACEHOLDER.sub("NULL", sql)
+    sql = _PLATFORM_VAR_PATTERN.sub("NULL", sql)
+    return sql
 
 
 def _normalize_table_name(schema: str, table: str) -> str:
@@ -1542,6 +1551,23 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
     # ── 数据依赖图（SQL 交叉比对，大小写不敏感）──
     data_dependencies = []
     for s in steps:
+        # 交换分区步骤：依赖写入临时表的步骤
+        if s.get("is_exchange") and s.get("exchange_temp_table"):
+            temp_table_upper = s["exchange_temp_table"].upper()
+            # 也可能带 schema
+            temp_full = s.get("target_schema", "") + "." + temp_table_upper if s.get("target_schema") else temp_table_upper
+            for tbl_key in [temp_table_upper, temp_full]:
+                if tbl_key in target_writers:
+                    for writer_step in target_writers[tbl_key]:
+                        if writer_step != s["step_id"]:
+                            data_dependencies.append({
+                                "from": writer_step,
+                                "to": s["step_id"],
+                                "type": "exchange",
+                                "intermediate_table": s.get("exchange_temp_table", ""),
+                            })
+            continue  # 交换分区不再走常规来源表匹配
+
         for src_table in s["source_tables_from_sql"]:
             src_upper = src_table.upper()
             if src_upper in target_writers:
@@ -1752,10 +1778,10 @@ def build_field_mappings(
         if not parsed:
             continue
 
-        # TargetFields 按 target_field 建索引
+        # TargetFields 按 target_field 小写建索引（大小写不敏感）
         tf_index = {}
         for tf in target_fields_map.get(rc, []):
-            tf_index[tf.target_field] = tf
+            tf_index[tf.target_field.lower()] = tf
 
         # SQL SELECT 列按 alias 匹配
         sql_aliases = set()
@@ -1763,7 +1789,7 @@ def build_field_mappings(
             alias = col.alias
             sql_aliases.add(alias)
 
-            tf_data = tf_index.get(alias)
+            tf_data = tf_index.get(alias.lower())
 
             field_entry = {
                 "target_field": alias,

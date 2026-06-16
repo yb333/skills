@@ -733,17 +733,15 @@ def _build_lineage_layout(topo, df, bl=None):
             else:
                 node_col[nid] = -0.5
 
-    # 计算实际渲染列（只算非隐藏节点的列，隐藏的不占位）
-    visible_cols = sorted(set(node_col[n] for n in nodes if not nodes[n].get("hidden", False)))
+    # 计算实际渲染列（包含所有节点，隐藏节点也占位以便开关打开时有坐标）
+    visible_cols = sorted(set(node_col.values()))
     col_to_x = {}
     for i, col in enumerate(visible_cols):
         col_to_x[col] = MARGIN_LEFT + i * LAYER_WIDTH
 
-    # 计算每个节点的 Y 坐标（同列垂直排列）
+    # 计算每个节点的 Y 坐标（同列垂直排列，隐藏节点也分配坐标）
     col_nodes = {}
     for nid in nodes:
-        if nodes[nid].get("hidden", False):
-            continue
         col = node_col[nid]
         col_nodes.setdefault(col, []).append(nid)
 
