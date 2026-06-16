@@ -541,13 +541,15 @@ def _build_penetration_chain(lineages, cte_index, cte_names_upper, visited=None,
 
 
 def _build_lineage_layout(topo, df, bl=None):
-    """构建拓扑排序分层布局的血缘图数据。
+    """构建数据流向图布局。
 
-    按数据依赖链路分层，而不是固定 4 层。
-    每个节点按其拓扑深度确定 X 坐标，从左到右线性排列。
-
-    示例: 源表 → step_1 → 中间表 → step_2 → 目标表
-    每个节点独立的 X 坐标，不换行。
+    布局策略：
+    - 步骤按 exec_sequence 分列（同 seq 同列）
+    - 中间表放在产出步骤和消费步骤之间
+    - 目标表放在最后一列
+    - 来源表标记 hidden=true（默认不显示，可切换）
+    - 来源表标注引用次数（被几个步骤使用）
+    - 交互高亮：点击步骤高亮直接前后关系
     """
     tables = df.get("tables", [])
     steps_list = topo.get("steps", [])
@@ -555,16 +557,12 @@ def _build_lineage_layout(topo, df, bl=None):
     data_flow_steps = df.get("steps", [])
     bl = bl or {}
 
-    # ── 1. 构建所有节点和边的关系图 ──
-    # 节点类型: source(物理源表) / step(步骤) / intermediate(中间表) / target(最终目标表)
-
-    # 收集所有表名
-    all_target_tables = {}  # {table_full: step_id}
+    # ── 1. 分类节点 ──
+    all_target_tables = {}  # {table_full(UPPER): step_id}
     for s in steps_list:
         tf = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
-        all_target_tables[tf] = s["step_id"]
+        all_target_tables[tf.upper()] = s["step_id"]
 
-    # 最终目标表 = 最后一个 exec_sequence 的目标表
     final_targets = set()
     if steps_list:
         max_seq = max(s.get("exec_sequence", 0) for s in steps_list)
@@ -573,9 +571,9 @@ def _build_lineage_layout(topo, df, bl=None):
                 tf = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
                 final_targets.add(tf)
 
-    # CTE 名（不算节点）
+    # CTE 名
     cte_names = set()
-    cte_source_map = {}  # {cte_name: [physical_tables]}
+    cte_source_map = {}
     for s in data_flow_steps:
         for cte in s.get("ctes", []):
             cn = cte.get("name", "")
@@ -588,163 +586,182 @@ def _build_lineage_layout(topo, df, bl=None):
                         phys.append(tname)
                 cte_source_map[cn] = phys
 
-    # 构建节点列表
-    nodes = {}  # {name: {type, label, step_data}}
-    edges_list = []  # [{from, to, label}]
+    # 来源表引用计数
+    source_ref_count = {}  # {table_name(UPPER): count}
+    for s in steps_list:
+        for src in s.get("source_tables_from_sql", []):
+            su = src.upper()
+            source_ref_count[su] = source_ref_count.get(su, 0) + 1
+    # CTE 内部表也算
+    for cte_name, phys_list in cte_source_map.items():
+        for p in phys_list:
+            pu = p.upper()
+            source_ref_count[pu] = source_ref_count.get(pu, 0) + 1
 
-    # 添加步骤节点
+    # ── 2. 构建节点 ──
+    nodes = {}
+    edges_list = []
+
+    # 步骤节点
+    step_seq_map = {}  # {step_id: seq}
     for s in steps_list:
         sid = s["step_id"]
+        seq = s.get("exec_sequence", 0)
+        step_seq_map[sid] = seq
         rule_name = s.get("rule_name", "")
         scenario_name = s.get("scenario_name", "")
-        # 节点标签：优先规则中文名 → step_id
         label = rule_name if rule_name else sid
         if scenario_name:
             label = f"[{scenario_name}] {label}"
         nodes[sid] = {
             "type": "step",
             "label": label,
+            "hidden": False,
             "step_data": {
                 "rule_code": s.get("rule_code", ""),
-                "exec_sequence": s.get("exec_sequence", 0),
+                "exec_sequence": seq,
                 "scenario_name": scenario_name,
             },
         }
 
-    # 添加表节点（源表/中间表/目标表）
+    # 表节点
     seen_tables = set()
     for t in tables:
         tname = _schema_table(t.get("schema", ""), t.get("name", ""))
         if not tname or tname in seen_tables:
             continue
         seen_tables.add(tname)
-
         if tname in cte_names:
-            continue  # CTE 不作为节点
+            continue
 
         if tname in final_targets:
             node_type = "target"
             cn = bl.get("summary", "").split("，")[0] if bl.get("summary") else ""
             label = tname if not cn else f"{tname} ({cn})"
-        elif tname in all_target_tables:
-            node_type = "intermediate"  # 中间表（某个步骤的产出，但不是最终目标）
+            hidden = False
+        elif tname.upper() in all_target_tables:
+            node_type = "intermediate"
             label = tname
+            hidden = False
         else:
             node_type = "source"
-            label = tname
+            ref_count = source_ref_count.get(tname.upper(), 1)
+            label = f"{tname} (×{ref_count})" if ref_count > 1 else tname
+            hidden = True  # 来源表默认隐藏
 
-        nodes[tname] = {"type": node_type, "label": label, "step_data": None}
+        nodes[tname] = {"type": node_type, "label": label, "hidden": hidden, "step_data": None}
 
-    # 添加 CTE 内部物理表
+    # CTE 内部物理表
     for cte_name, phys_list in cte_source_map.items():
         for p in phys_list:
             if p not in seen_tables and p not in cte_names:
                 seen_tables.add(p)
-                nodes[p] = {"type": "source", "label": p, "step_data": None}
+                ref_count = source_ref_count.get(p.upper(), 1)
+                label = f"{p} (×{ref_count})" if ref_count > 1 else p
+                nodes[p] = {"type": "source", "label": label, "hidden": True, "step_data": None}
 
-    # ── 2. 构建边 ──
-    # 步骤 → 目标表
+    # ── 3. 构建边 ──
+    # 步骤 → 目标表/中间表
+    step_to_table = {}  # {step_id: table_name}
     for s in steps_list:
         sid = s["step_id"]
         tf = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
         if tf in nodes:
-            edges_list.append({"from": sid, "to": tf, "label": sid})
+            edges_list.append({"from": sid, "to": tf, "label": "", "type": "step_to_table"})
+            step_to_table[sid] = tf
 
-    # 源表 → 步骤（主查询 JOIN）
+    # 来源表 → 步骤
+    table_to_steps = {}  # {table: [step_ids]}
     for s in steps_list:
         sid = s["step_id"]
         for src in s.get("source_tables_from_sql", []):
             if src in nodes and src != sid:
-                edges_list.append({"from": src, "to": sid, "label": ""})
+                edges_list.append({"from": src, "to": sid, "label": "", "type": "source_to_step"})
+                table_to_steps.setdefault(src, []).append(sid)
         # CTE 内部源表 → 步骤
         df_step = next((d for d in data_flow_steps if d.get("step_id") == sid), {})
         for cte in df_step.get("ctes", []):
             for st in cte.get("source_tables", []):
                 tname = st.get("name", "")
                 if tname in nodes and tname != sid:
-                    edges_list.append({"from": tname, "to": sid, "label": f"CTE:{cte.get('name','')}"})
+                    edges_list.append({"from": tname, "to": sid, "label": f"CTE:{cte.get('name','')}", "type": "source_to_step"})
+                    table_to_steps.setdefault(tname, []).append(sid)
 
     # 数据依赖（中间表 → 后续步骤）
     for dep in data_deps:
         from_step = dep.get("from", "")
         to_step = dep.get("to", "")
         # from_step 写的表 → to_step 读
-        from_rule = next((s for s in steps_list if s["step_id"] == from_step), None)
-        if from_rule:
-            tf = _schema_table(from_rule.get("target_schema", ""), from_rule.get("target_table", ""))
-            if tf in nodes and to_step in nodes:
-                edges_list.append({"from": tf, "to": to_step, "label": ""})
+        intermediate_table = step_to_table.get(from_step, "")
+        if intermediate_table and intermediate_table in nodes and to_step in nodes:
+            edges_list.append({"from": intermediate_table, "to": to_step, "label": "", "type": "dep"})
 
-    # ── 3. 拓扑排序分层 ──
-    # 步骤/中间表节点取最大上游深度+1（确保步骤严格从左到右）
-    # 源表深度=0，不影响步骤排序
-    adj = {}  # {node: [downstream_nodes]}
-    in_degree = {}
-    for nid in nodes:
-        adj[nid] = []
-        in_degree[nid] = 0
-
-    for e in edges_list:
-        f, t = e["from"], e["to"]
-        if f in adj and t in adj and t not in adj[f]:
-            adj[f].append(t)
-            in_degree[t] = in_degree.get(t, 0) + 1
-
-    # BFS 拓扑排序，步骤/中间表取最大深度（保证严格顺序）
-    from collections import deque
-    depth = {}
-    queue = deque()
-    for nid in nodes:
-        if in_degree.get(nid, 0) == 0:
-            depth[nid] = 0
-            queue.append(nid)
-
-    while queue:
-        curr = queue.popleft()
-        for downstream in adj.get(curr, []):
-            new_depth = depth[curr] + 1
-            # 步骤和中间表取最大深度（严格从左到右）
-            if downstream not in depth or new_depth > depth[downstream]:
-                depth[downstream] = new_depth
-            in_degree[downstream] -= 1
-            if in_degree[downstream] == 0:
-                queue.append(downstream)
-
-    # 没有深度的节点（循环引用等）放在最后一层
-    max_depth = max(depth.values()) if depth else 0
-    for nid in nodes:
-        if nid not in depth:
-            depth[nid] = max_depth + 1
-
-    # 按深度分组
-    layers = {}
-    for nid, d in depth.items():
-        layers.setdefault(d, []).append(nid)
-    layer_depths = sorted(layers.keys())
-
-    # ── 4. 计算坐标 ──
-    LAYER_WIDTH = 260
+    # ── 4. 按 exec_sequence 分列计算坐标 ──
+    LAYER_WIDTH = 280
     NODE_HEIGHT = 36
-    NODE_GAP = 12
+    NODE_GAP = 10
     MARGIN_TOP = 30
     MARGIN_LEFT = 20
 
-    max_nodes_in_layer = max(len(v) for v in layers.values()) if layers else 0
-    total_width = MARGIN_LEFT * 2 + len(layer_depths) * LAYER_WIDTH
-    total_height = MARGIN_TOP * 2 + max_nodes_in_layer * (NODE_HEIGHT + NODE_GAP)
+    # 步骤的列 = exec_sequence
+    # 中间表的列 = 产出步骤的列 + 0.5（放在步骤右边、下一步骤左边）
+    # 目标表的列 = max_seq + 1
+    # 来源表的列 = 使用它的步骤的列 - 0.5（放在步骤左边），但默认隐藏不渲染
+
+    max_seq = max(step_seq_map.values()) if step_seq_map else 0
+
+    # 计算每个节点的列号（浮点数，整数列放步骤，小数列放表）
+    node_col = {}
+    for nid, ninfo in nodes.items():
+        if ninfo["type"] == "step":
+            node_col[nid] = step_seq_map.get(nid, 0)
+        elif ninfo["type"] == "target":
+            node_col[nid] = max_seq + 1
+        elif ninfo["type"] == "intermediate":
+            # 找产出它的步骤
+            producer_step = all_target_tables.get(nid.upper())
+            if producer_step:
+                node_col[nid] = step_seq_map.get(producer_step, 0) + 0.5
+            else:
+                node_col[nid] = max_seq + 0.5
+        else:  # source
+            # 放在使用它的第一个步骤的列 - 0.5
+            using_steps = table_to_steps.get(nid, [])
+            if using_steps:
+                first_step = using_steps[0]
+                node_col[nid] = step_seq_map.get(first_step, 0) - 0.5
+            else:
+                node_col[nid] = -0.5
+
+    # 计算实际渲染列（只算非隐藏节点的列，隐藏的不占位）
+    visible_cols = sorted(set(node_col[n] for n in nodes if not nodes[n].get("hidden", False)))
+    col_to_x = {}
+    for i, col in enumerate(visible_cols):
+        col_to_x[col] = MARGIN_LEFT + i * LAYER_WIDTH
+
+    # 计算每个节点的 Y 坐标（同列垂直排列）
+    col_nodes = {}
+    for nid in nodes:
+        if nodes[nid].get("hidden", False):
+            continue
+        col = node_col[nid]
+        col_nodes.setdefault(col, []).append(nid)
+
+    max_nodes_in_col = max(len(v) for v in col_nodes.values()) if col_nodes else 0
+    total_height = MARGIN_TOP * 2 + max_nodes_in_col * (NODE_HEIGHT + NODE_GAP)
 
     positions = {}
     node_meta = {}
     node_id_counter = 0
 
-    for di, d in enumerate(layer_depths):
-        layer_nodes = sorted(layers[d])  # 同层节点排序（稳定）
-        x = MARGIN_LEFT + di * LAYER_WIDTH
-        layer_count = len(layer_nodes)
-        total_h = layer_count * (NODE_HEIGHT + NODE_GAP) - NODE_GAP
+    for col in sorted(col_nodes.keys()):
+        x = col_to_x.get(col, MARGIN_LEFT)
+        col_nids = sorted(col_nodes[col], key=lambda n: (nodes[n]["type"] != "step", n))
+        col_count = len(col_nids)
+        total_h = col_count * (NODE_HEIGHT + NODE_GAP) - NODE_GAP
         start_y = max(MARGIN_TOP, (total_height - total_h) / 2)
 
-        for ni, name in enumerate(layer_nodes):
+        for ni, name in enumerate(col_nids):
             y = start_y + ni * (NODE_HEIGHT + NODE_GAP)
             node_id = f"n_{node_id_counter}"
             node_id_counter += 1
@@ -760,8 +777,32 @@ def _build_lineage_layout(topo, df, bl=None):
                 "width": 220,
                 "height": NODE_HEIGHT,
                 "type": ninfo.get("type", "source"),
-                "layer": di,
+                "layer": visible_cols.index(col) if col in visible_cols else 0,
+                "hidden": ninfo.get("hidden", False),
                 "step_data": ninfo.get("step_data"),
+                "source_ref_count": source_ref_count.get(name.upper(), 1) if ninfo.get("type") == "source" else 0,
+            }
+
+    # 隐藏节点也需要 id（用于交互高亮时显示）
+    for nid in nodes:
+        if nid not in positions:
+            node_id = f"n_{node_id_counter}"
+            node_id_counter += 1
+            positions[nid] = node_id
+            ninfo = nodes[nid]
+            node_meta[node_id] = {
+                "id": node_id,
+                "name": nid,
+                "label": ninfo.get("label", nid),
+                "x": 0,
+                "y": 0,
+                "width": 220,
+                "height": NODE_HEIGHT,
+                "type": ninfo.get("type", "source"),
+                "layer": -1,
+                "hidden": True,
+                "step_data": None,
+                "source_ref_count": source_ref_count.get(nid.upper(), 1),
             }
 
     # ── 5. 构建边输出 ──
@@ -773,7 +814,9 @@ def _build_lineage_layout(topo, df, bl=None):
                 "from": positions[f],
                 "to": positions[t],
                 "label": e.get("label", ""),
-                "type": "data_flow",
+                "type": e.get("type", "data_flow"),
+                "from_hidden": nodes.get(f, {}).get("hidden", False),
+                "to_hidden": nodes.get(t, {}).get("hidden", False),
             })
 
     self_ref_ids = []
@@ -782,6 +825,7 @@ def _build_lineage_layout(topo, df, bl=None):
         if target in positions:
             self_ref_ids.append(positions[target])
 
+    total_width = MARGIN_LEFT * 2 + len(visible_cols) * LAYER_WIDTH
     return {
         "nodes": list(node_meta.values()),
         "edges": edges_out,
@@ -789,9 +833,10 @@ def _build_lineage_layout(topo, df, bl=None):
         "layout": {
             "width": total_width,
             "height": total_height,
-            "layer_count": len(layer_depths),
-            "compact": max_nodes_in_layer > 8,
+            "layer_count": len(visible_cols),
+            "compact": max_nodes_in_col > 8,
             "layer_width": LAYER_WIDTH,
+            "has_hidden_sources": any(n.get("hidden") for n in node_meta.values()),
         },
         "schedule_groups": [
             {"sequence": g.get("sequence", 0), "steps": g.get("parallel_steps", [])}
