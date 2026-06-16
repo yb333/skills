@@ -79,6 +79,34 @@ RULE_COLUMNS_MAP = {
     "rule_name": "规则中文名称",
 }
 
+# 规则类型语义映射
+RULE_TYPE_MAP = {
+    1: "取数规则",
+    2: "删数规则",
+    3: "备份规则",
+    4: "查询规则",
+    5: "逻辑视图",
+    6: "物理视图",
+    7: "度量规则",
+    8: "物理表规则",
+    9: "分区交换",
+    10: "SP规则",
+    11: "API规则",
+    12: "参数变量",
+    13: "维护类",
+    14: "Spark取数",
+    15: "判断类",
+}
+
+# SELECT 类规则（需要完整解析 SQL + 字段映射 + 血缘）
+SELECT_RULE_TYPES = {1, 14}
+
+# 记录类规则（不解析 SQL，但记录操作信息）
+RECORD_RULE_TYPES = {2, 9}
+
+# 参数变量（记录到 variables，不算 step）
+VARIABLE_RULE_TYPES = {12}
+
 # 删除模式语义映射
 DELETE_MODE_MAP = {
     "1": "TRUNCATE TABLE",
@@ -140,6 +168,7 @@ class RawRule:
     """RULE sheet 单行数据"""
     rule_code: str = ""
     rule_name: str = ""
+    rule_type: int = 0
     exec_sequence: int = 0
     target_schema: str = ""
     target_table: str = ""
@@ -340,43 +369,52 @@ def read_excel(excel_path: str) -> dict:
 
         rule_type_str = _get_val(row, col_rule_type)
         try:
-            # 兼容文本存储的数字（'1', '1.0', 1, 1.0）
             rt = int(float(rule_type_str)) if rule_type_str else 0
         except (ValueError, TypeError):
             rt = 0
 
-        # 跳过非 SQL 类规则，处理所有有 SQL 的规则
-        # 规则类型: 1=取数 2=删数 3=备份 4=查询 5=逻辑视图 6=物理视图
-        #           7=度量 8=物理表 9=分区交换 14=Spark数据处理 → 处理
-        #           10=SP规则 11=API规则 12=参数变量 13=维护类 15=判断类 → 跳过
-        SKIP_RULE_TYPES = {10, 11, 12, 13, 15}
-        if rt in SKIP_RULE_TYPES:
-            continue
-
         query = _get_val(row, ci.get("query_sql"))
-        if not query or not isinstance(query, str) or not query.strip():
-            continue
-
         exec_seq_str = _get_val(row, ci.get("exec_sequence"))
         try:
             exec_seq = int(exec_seq_str) if exec_seq_str else 0
         except (ValueError, TypeError):
             exec_seq = 0
 
+        # 类型 12（参数变量）→ 记录到 variables
+        if rt in VARIABLE_RULE_TYPES:
+            var_name = _get_val(row, ci.get("rule_name")) or _get_val(row, ci.get("rule_code"))
+            if var_name:
+                result["variables"].append(var_name)
+            continue
+
+        # 类型 10/11/13/15（SP/API/维护/判断）→ 完全跳过
+        if rt in {10, 11, 13, 15}:
+            continue
+
+        # 类型 1/14（取数/Spark取数）→ 完整解析，必须有 SQL
+        # 类型 2/9（删数/分区交换）→ 记录操作，SQL 可选
+        # 其他类型 → 记录但不解析
+
         rule = RawRule(
             rule_code=_get_val(row, ci.get("rule_code")),
             rule_name=_get_val(row, ci.get("rule_name")),
+            rule_type=rt,
             exec_sequence=exec_seq,
             target_schema=_get_val(row, ci.get("target_schema")),
             target_table=_get_val(row, ci.get("target_table")),
             delete_mode=_get_val(row, ci.get("delete_mode")),
             delete_condition=_get_val(row, ci.get("delete_condition")),
-            query_sql=query.strip(),
+            query_sql=query.strip() if query else "",
             project_code=_get_val(row, ci.get("project_code")),
             data_source=_get_val(row, ci.get("data_source")),
             business_owner=_get_val(row, ci.get("business_owner")),
             rule_group_code=_get_val(row, ci.get("rule_group_code")),
         )
+
+        # SELECT 类规则必须有 SQL
+        if rt in SELECT_RULE_TYPES and not rule.query_sql:
+            continue
+
         result["rules"].append(rule)
 
         if rule.rule_group_code and not result["rule_group_code"]:
@@ -1350,15 +1388,30 @@ def generate_step_description(rule: RawRule, parsed, scenarios: list[dict], all_
     if scenario and scenario.get("is_multi_scenario") and not scenario.get("is_common"):
         scenario_desc = f"[{scenario['name']}] "
 
-    purpose = f"{scenario_desc}{write_mode}{partition_desc} 写入 {target}"
+    # 规则类型语义
+    rule_type_label = RULE_TYPE_MAP.get(rule.rule_type, "")
+    type_prefix = f"[{rule_type_label}] " if rule_type_label and rule.rule_type not in SELECT_RULE_TYPES else ""
+
+    purpose = f"{scenario_desc}{type_prefix}{write_mode}{partition_desc} 写入 {target}"
 
     # logic — 基于加工模式生成
     parts = []
-    if source_tables:
-        if len(source_tables) == 1:
-            parts.append(f"从 {source_tables[0]} 加载")
-        else:
-            parts.append(f"从 {len(source_tables)} 张表关联加载: {', '.join(source_tables[:3])}")
+
+    # 非 SELECT 类规则的 logic（删数/分区交换等）
+    if rule.rule_type not in SELECT_RULE_TYPES:
+        if rule.rule_type == 2:
+            parts.append("删除操作")
+        elif rule.rule_type == 9:
+            parts.append("分区交换操作")
+        if rule.query_sql:
+            parts.append(f"SQL: {rule.query_sql[:60]}...")
+    else:
+        # SELECT 类规则的正常 logic
+        if source_tables:
+            if len(source_tables) == 1:
+                parts.append(f"从 {source_tables[0]} 加载")
+            else:
+                parts.append(f"从 {len(source_tables)} 张表关联加载: {', '.join(source_tables[:3])}")
 
     # CTE
     cte_count = len(parsed.ctes) if parsed else 0
@@ -2561,20 +2614,27 @@ def main():
     print(f"Step 2: 方言 = {dialect}")
     print()
 
-    # ── Step 3: SQL 解析 ──
+    # ── Step 3: SQL 解析（分层：SELECT类深度解析，其他记录） ──
     print("Step 3: 解析 SQL...")
     parsed_map = {}
     for rule in rules:
-        if not rule.query_sql:
-            parsed_map[rule.rule_code] = ParsedSQL(parse_error="空 SQL")
-            continue
-        parsed = parse_single_sql(rule.query_sql, dialect)
-        parsed_map[rule.rule_code] = parsed
-        if parsed.parse_error:
-            print(f"  [!] {rule.rule_code}: {parsed.parse_error}")
+        if rule.rule_type in SELECT_RULE_TYPES and rule.query_sql:
+            # SELECT 类规则：完整解析
+            parsed = parse_single_sql(rule.query_sql, dialect)
+            parsed_map[rule.rule_code] = parsed
+            if parsed.parse_error:
+                print(f"  [!] {rule.rule_code}: {parsed.parse_error}")
+            else:
+                print(f"  {rule.rule_code} [{RULE_TYPE_MAP.get(rule.rule_type, '?')}]: "
+                      f"{len(parsed.select_columns)} 列, "
+                      f"{len(parsed.source_tables)} 表, {len(parsed.ctes)} CTE")
+        elif rule.query_sql:
+            # 非 SELECT 类但有 SQL（删数/分区交换等）：记录但不深度解析
+            parsed_map[rule.rule_code] = ParsedSQL(raw_sql=rule.query_sql)
+            print(f"  {rule.rule_code} [{RULE_TYPE_MAP.get(rule.rule_type, '?')}]: "
+                  f"记录操作（不深度解析）")
         else:
-            print(f"  {rule.rule_code}: {len(parsed.select_columns)} 列, "
-                  f"{len(parsed.source_tables)} 表, {len(parsed.ctes)} CTE")
+            parsed_map[rule.rule_code] = ParsedSQL(parse_error="空 SQL")
     print()
 
     # ── Step 4: 拓扑构建 ──
