@@ -110,7 +110,7 @@ def build_report_data(knowledge):
         "table_cn_name": bl.get("summary", "").split("，")[0] if bl.get("summary") else "",
         "description": bl.get("summary", ""),
         "rule_count": len(steps_list),
-        "field_count": len(fields_list),
+        "field_count": len(set(f.get("target_field", "") for f in fields_list if f.get("target_field"))),
         "source_count": len(df.get("tables", [])),
         "scenario_count": len([s for s in scenarios if not s.get("is_common", False)]),
         "is_multi_scenario": len(scenarios) > 1,
