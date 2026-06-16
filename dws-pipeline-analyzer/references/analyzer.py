@@ -295,12 +295,19 @@ def _get_val(row: tuple, idx: int | None) -> str:
     return _safe_str(val)
 
 
+_SYSDATE_PATTERN = re.compile(r"\bSYSDATE\s*\(\s*\)", re.IGNORECASE)
+_SYSDATE_NOPAREN_PATTERN = re.compile(r"\bSYSDATE\b(?!\s*\()", re.IGNORECASE)
+
+
 def _strip_dws_clauses(sql: str) -> str:
     """移除 DWS 特有语法，供 sqlglot 解析"""
     sql = _DIST_BY_PATTERN.sub("", sql)
     sql = _TO_GROUP_PATTERN.sub("", sql)
     sql = _PARTITION_PATTERN.sub("", sql)
     sql = _WITH_PARAMS_PATTERN.sub(")", sql)
+    # sysdate() / sysdate → CURRENT_TIMESTAMP（sqlglot oracle 方言不兼容）
+    sql = _SYSDATE_PATTERN.sub("CURRENT_TIMESTAMP", sql)
+    sql = _SYSDATE_NOPAREN_PATTERN.sub("CURRENT_TIMESTAMP", sql)
     return sql
 
 
@@ -757,7 +764,7 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
         # from_.this 是主表
         main_table = from_clause.this
         if isinstance(main_table, exp.Table):
-            table_name = ".".join(_clean_name(p.name) for p in main_table.parts).lower()
+            table_name = ".".join(_clean_name(p.name) for p in main_table.parts)
             alias = _clean_name(main_table.alias) if main_table.alias else ""
             joins.append(ParsedJoin(
                 source_table=table_name,
@@ -768,7 +775,7 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
         # from_.expressions 是逗号 JOIN 的额外表（FROM a, b）
         for extra in from_clause.expressions:
             if isinstance(extra, exp.Table):
-                table_name = ".".join(_clean_name(p.name) for p in extra.parts).lower()
+                table_name = ".".join(_clean_name(p.name) for p in extra.parts)
                 alias = _clean_name(extra.alias) if extra.alias else ""
                 joins.append(ParsedJoin(
                     source_table=table_name,
@@ -781,13 +788,11 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
     # 不使用 find_all(exp.Join) 以避免递归进入 CTE 内部
     joins_list = select_node.args.get("joins", [])
     for join_node in joins_list:
-        # 用 join_node.this 取 JOIN 表（不用 find 避免取到 ON 条件里的表）
-        join_expr = join_node.this
-        table = join_expr if isinstance(join_expr, exp.Table) else (join_expr.find(exp.Table) if join_expr else None)
+        table = join_node.find(exp.Table)
         if not table:
             continue
-        table_name = ".".join(_clean_name(p.name) for p in table.parts).lower()
-        alias = _clean_name(table.alias).lower() if table.alias else ""
+            table_name = ".".join(_clean_name(p.name) for p in table.parts).lower()
+        alias = _clean_name(table.alias) if table.alias else ""
 
         # 过滤 CTE 引用（CTE 名作为表名出现在 JOIN 中）
         short_name = table_name.split(".")[-1] if "." in table_name else table_name
@@ -998,7 +1003,7 @@ def _extract_ctes(tree, sqlglot_dialect: str) -> list[ParsedCTE]:
             # fallback: find_all（覆盖非标准结构）
             for table in cte_query.find_all(exp.Table):
                 tname = ".".join(_clean_name(p.name) for p in table.parts)
-                talias = _clean_name(table.alias).lower() if table.alias else ""
+                talias = _clean_name(table.alias) if table.alias else ""
                 cte_tables.append({"name": tname, "alias": talias})
 
         # CTE 输出字段（含 transform_type 和 source_fields）
