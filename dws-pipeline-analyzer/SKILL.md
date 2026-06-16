@@ -98,7 +98,7 @@ python {skill_dir}/run.py view_generator \
 - asset_report.html  — 资产说明书
 - tech_design.md     — 技术设计文档
 
-路径：{output_dir}/analyzer/views/
+路径：{output_dir}/
 ```
 
 ## 三视图说明

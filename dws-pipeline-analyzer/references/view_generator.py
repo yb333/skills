@@ -189,7 +189,35 @@ def build_report_data(knowledge):
             ],
         })
 
+    # ── 构建 alias→物理表名 映射（用于字段来源翻译）──
+    alias_table_map = {}  # {step_id: {alias(UPPER): physical_table}}
+    for s in data_flow_steps:
+        sid = s.get("step_id", "")
+        amap = {}
+        for j in s.get("joins", []):
+            alias = (j.get("alias") or "").upper()
+            tbl = j.get("source_table", "")
+            if alias and tbl:
+                amap[alias] = tbl
+        alias_table_map[sid] = amap
+
     # ── fields (按场景分组，同场景内按目标表+字段名去重) ──
+    def _resolve_sources(field_data, step_id):
+        """构建字段来源列表，把别名翻译成物理表名"""
+        amap = alias_table_map.get(step_id, {})
+        sources = []
+        for l in field_data.get("lineage", []):
+            src_alias = l.get("source_table", "") or l.get("alias", "")
+            if src_alias and src_alias.upper() not in ("NULL", "NONE"):
+                # 别名 → 物理表名
+                physical_table = amap.get(src_alias.upper(), src_alias)
+                sources.append({
+                    "table": physical_table,
+                    "alias": src_alias,
+                    "field": l.get("source_field", ""),
+                })
+        return sources
+
     step_info_map = {}
     for s in steps_list:
         step_info_map[s["step_id"]] = {
@@ -223,24 +251,14 @@ def build_report_data(knowledge):
                 new_tt = f.get("transform_type", "expression")
                 priority = {"unknown": -1, "value": 0, "direct": 1, "expression": 2, "fallback": 3, "case_when": 4, "aggregate": 5, "pivot": 6, "window": 7}
                 if priority.get(new_tt, 0) > priority.get(existing_tt, 0):
-                    sources = []
-                    for l in f.get("lineage", []):
-                        src_tbl = l.get("source_table", "")
-                        if src_tbl and src_tbl.upper() not in ("NULL", "NONE"):
-                            sources.append({"table": src_tbl, "alias": l.get("alias", ""), "field": l.get("source_field", "")})
                     fields_out[existing_idx] = {
                         "target_field": fname, "producing_step": f.get("producing_step", ""),
                         "target_table": target_table, "scenario": scenario,
                         "transform_type": new_tt, "in_target_fields": f.get("in_target_fields", False),
-                        "sources": sources,
+                        "sources": _resolve_sources(f, f.get("producing_step", "")),
                     }
                 continue
             seen[key] = len(fields_out)
-            sources = []
-            for l in f.get("lineage", []):
-                src_tbl = l.get("source_table", "")
-                if src_tbl and src_tbl.upper() not in ("NULL", "NONE"):
-                    sources.append({"table": src_tbl, "alias": l.get("alias", ""), "field": l.get("source_field", "")})
             fields_out.append({
                 "target_field": fname,
                 "producing_step": f.get("producing_step", ""),
@@ -250,7 +268,7 @@ def build_report_data(knowledge):
                 "in_target_fields": f.get("in_target_fields", False),
                 "excel_source_field": f.get("excel_source_field", ""),
                 "validation": f.get("validation", None),
-                "sources": sources,
+                "sources": _resolve_sources(f, f.get("producing_step", "")),
             })
 
     # ── field_details (CTE 穿透血缘链) ──

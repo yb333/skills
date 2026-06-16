@@ -36,12 +36,31 @@ python {skill_dir}/run.py analyzer \
     --output {output_dir} \
     [--ddl-dir {ddl_dir}]
 
-# 4. AI 读取 knowledge_draft.json，补充 L4 业务逻辑 + L5 洞察
-# 5. 保存为 knowledge_final.json
+# 输出: {output_dir}/knowledge_draft.json
+```
 
-# 6. 生成全部 3 个视图
+### Step 1b: AI 补充业务理解（必做，不能跳过）
+
+读取 `{output_dir}/knowledge_draft.json`，**必须**补充以下内容并保存为 `knowledge_final.json`：
+
+**business_logic 补充**：
+- `summary`：整体概述（这张表是什么、干什么、什么粒度、怎么更新，2-3句话）
+- `step_descriptions`：遍历已有数组，为每个 step 补充：
+  - `purpose`：这步的业务目的（如"构建合同pu分析事实表"）
+  - `logic`：加工逻辑描述（如"以合同pu指标表为主表，通过3个CTE预处理..."）
+  - 如果脚本已自动生成兜底描述，AI 可以优化但不可以删除
+- `key_transforms`：关键字段的业务含义（把 SQL 表达式翻成人话）
+
+**quality.ai_insights 补充**：
+- 只补充有实际问题的洞察（severity 非 info）
+- 正面观察不需要写
+
+**保存**：将补充后的完整 JSON 写入 `{output_dir}/knowledge_final.json`
+
+```bash
+# Step 1c: 生成全部 3 个视图（用 knowledge_final.json 不是 draft）
 python {skill_dir}/run.py view_generator \
-    --input knowledge_final.json \
+    --input {output_dir}/knowledge_final.json \
     --output {output_dir} \
     --views all
 ```
@@ -62,16 +81,17 @@ python {skill_dir}/run.py view_generator \
 - asset_report.html     — 资产说明书（交互式，含血缘图+SQL高亮）
 - tech_design.md        — 技术设计文档（9 章节）
 
-路径：{output_dir}/analyzer/views/
+路径：{output_dir}/
 ```
 
 ## 关键规则
 
 1. **第一步必须执行分析脚本**，不能跳过直接用 AI 分析
-2. **视图全部自动生成**，不询问用户选哪些
-3. **DDL 自动检测**，同级 04_ddl/ 有就读，没有就跳过
-4. **AI 补充的是业务理解**（L4+L5），不能修改脚本产出的事实数据（L1-L3）
-5. **输出目录**与输入文件同级（`{input_dir}/analyzer/`）
+2. **Step 1b（AI 增强）不能跳过**，弱模型也要执行，即使只是复制 draft 加少量修改
+3. **视图用 knowledge_final.json 生成**（不是 draft）
+4. **视图全部自动生成**，不询问用户选哪些
+5. **DDL 自动检测**，同级 04_ddl/ 有就读，没有就跳过
+6. **输出目录**直接用 --output 指定的目录，不嵌套子目录
 
 ## SKILL 加载
 

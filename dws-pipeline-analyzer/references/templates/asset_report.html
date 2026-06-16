@@ -1243,6 +1243,12 @@ body {
       数据流向图
     </div>
     <div class="section-body">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <button onclick="lineageZoom(1.2)" style="padding:4px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg-card);cursor:pointer;font-size:14px;">+</button>
+        <button onclick="lineageZoom(0.8)" style="padding:4px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg-card);cursor:pointer;font-size:14px;">-</button>
+        <button onclick="lineageZoomReset()" style="padding:4px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg-card);cursor:pointer;font-size:12px;">重置</button>
+        <span style="font-size:11px;color:var(--text-muted);">滚轮缩放 · 拖拽平移</span>
+      </div>
       <div class="lineage-wrapper" id="lineageWrapper"></div>
       <div class="lineage-legend" id="lineageLegend"></div>
     </div>
@@ -1272,9 +1278,12 @@ body {
       <div class="section-body">
         <input type="text" class="field-search-box" id="fieldSearch"
                placeholder="搜索字段名、来源表、加工类型...">
-        <div style="overflow-x:auto;">
+        <div style="overflow:auto;max-height:600px;">
           <table class="field-table" id="fieldMappingTable"></table>
         </div>
+        <div class="no-results" id="fieldNoResults" style="display:none;">未找到匹配的字段</div>
+      </div>
+    </div>
         <div class="no-results" id="fieldNoResults" style="display:none;">未找到匹配的字段</div>
       </div>
     </div>
@@ -1687,6 +1696,83 @@ function renderLineage() {
   }
 
   document.getElementById('lineageLegend').innerHTML = legendHtml;
+
+  // 初始化缩放和拖拽
+  initLineageZoom(wrapper, svg);
+}
+
+// ── 数据流向图缩放/拖拽 ──
+var lineageScale = 1;
+var lineagePanX = 0;
+var lineagePanY = 0;
+
+function lineageZoom(factor) {
+  lineageScale = Math.max(0.3, Math.min(3, lineageScale * factor));
+  applyLineageTransform();
+}
+
+function lineageZoomReset() {
+  lineageScale = 1;
+  lineagePanX = 0;
+  lineagePanY = 0;
+  applyLineageTransform();
+}
+
+function applyLineageTransform() {
+  var svg = document.querySelector('#lineageWrapper svg');
+  if (!svg) return;
+  var content = svg.querySelector('#lineageContent');
+  if (content) {
+    content.setAttribute('transform', 'translate(' + lineagePanX + ',' + lineagePanY + ') scale(' + lineageScale + ')');
+  }
+}
+
+function initLineageZoom(wrapper, svg) {
+  if (!svg) return;
+  // 给 SVG 内容加一个 g 容器（如果没有的话）
+  var content = svg.querySelector('#lineageContent');
+  if (!content) {
+    content = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    content.setAttribute('id', 'lineageContent');
+    while (svg.firstChild) {
+      content.appendChild(svg.firstChild);
+    }
+    svg.appendChild(content);
+  }
+
+  // 滚轮缩放
+  wrapper.addEventListener('wheel', function(e) {
+    e.preventDefault();
+    var factor = e.deltaY < 0 ? 1.1 : 0.9;
+    lineageZoom(factor);
+  }, { passive: false });
+
+  // 拖拽平移
+  var isDragging = false;
+  var startX = 0, startY = 0;
+  var startPanX = 0, startPanY = 0;
+
+  svg.style.cursor = 'grab';
+  svg.addEventListener('mousedown', function(e) {
+    isDragging = true;
+    startX = e.clientX;
+    startY = e.clientY;
+    startPanX = lineagePanX;
+    startPanY = lineagePanY;
+    svg.style.cursor = 'grabbing';
+  });
+
+  document.addEventListener('mousemove', function(e) {
+    if (!isDragging) return;
+    lineagePanX = startPanX + (e.clientX - startX);
+    lineagePanY = startPanY + (e.clientY - startY);
+    applyLineageTransform();
+  });
+
+  document.addEventListener('mouseup', function() {
+    isDragging = false;
+    svg.style.cursor = 'grab';
+  });
 }
 
 // ================================================================
