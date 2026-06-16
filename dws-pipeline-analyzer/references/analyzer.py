@@ -1534,17 +1534,18 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
         for seq, sids in sorted(schedule_groups.items())
     ]
 
-    # ── 索引：目标表 → 写入它的步骤 ──
-    target_writers = {}  # table_full → [step_id, ...]
+    # ── 索引：目标表 → 写入它的步骤（大写归一化，避免大小写不匹配）──
+    target_writers = {}  # table_full(UPPER) → [step_id, ...]
     for s in steps:
-        target_writers.setdefault(s["target_table_full"], []).append(s["step_id"])
+        target_writers.setdefault(s["target_table_full"].upper(), []).append(s["step_id"])
 
-    # ── 数据依赖图（SQL 交叉比对）──
+    # ── 数据依赖图（SQL 交叉比对，大小写不敏感）──
     data_dependencies = []
     for s in steps:
         for src_table in s["source_tables_from_sql"]:
-            if src_table in target_writers:
-                for writer_step in target_writers[src_table]:
+            src_upper = src_table.upper()
+            if src_upper in target_writers:
+                for writer_step in target_writers[src_upper]:
                     if writer_step != s["step_id"]:
                         data_dependencies.append({
                             "from": writer_step,
@@ -1556,9 +1557,9 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
     # ── 自引用检测 ──
     self_references = []
     for s in steps:
-        target = s["target_table_full"]
+        target = s["target_table_full"].upper()
         # 用 all_tables_from_sql（含子查询）检测自引用
-        all_tables = s.get("all_tables_from_sql", s["source_tables_from_sql"])
+        all_tables = [t.upper() for t in s.get("all_tables_from_sql", s["source_tables_from_sql"])]
         if target in all_tables:
             # 检测具体模式
             parsed = parsed_map.get(s["rule_code"])
