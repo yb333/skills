@@ -1378,9 +1378,10 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
         sql_source_tables = []
         all_sql_tables = []  # 含子查询内表（用于自引用检测）
         if parsed and parsed.raw_sql:
-            # 主查询源表
+            # 主查询源表（同表名去重，自连接不重复计）
             for j in parsed.source_tables:
-                sql_source_tables.append(j.source_table)
+                if j.source_table not in sql_source_tables:
+                    sql_source_tables.append(j.source_table)
             # 全树扫描所有表（含子查询），用于自引用检测
             # 限定在 SELECT 子树内，避免把 CREATE VIEW 的定义表名误判为引用
             # 对 UNION/INTERSECT/EXCEPT，扫描所有分支

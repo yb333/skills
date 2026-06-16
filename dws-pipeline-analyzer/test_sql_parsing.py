@@ -37,8 +37,12 @@ def col_types(parsed):
     return {c.alias: c.transform_type for c in parsed.select_columns}
 
 def source_tables(parsed):
-    """提取来源表名列表"""
-    return [j.source_table for j in parsed.source_tables]
+    """提取来源表名列表（去重）"""
+    seen = []
+    for j in parsed.source_tables:
+        if j.source_table not in seen:
+            seen.append(j.source_table)
+    return seen
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -226,7 +230,6 @@ SELECT cte.id FROM cte"""
         assert "table_a" not in tables, f"CTE内部表 table_a 不应出现在主查询来源表中: {tables}"
         assert "table_b" not in tables
 
-    @pytest.mark.xfail(reason="自连接同表去重尚未实现，来源表出现2次", strict=True)
     def test_self_join(self):
         """自连接（同表两个别名）"""
         sql = """SELECT a.id, b.parent_id
