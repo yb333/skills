@@ -230,8 +230,28 @@ def _safe_str(val) -> str:
 
 
 def _find_col(col_idx: dict, name: str) -> int | None:
-    """查找列索引"""
-    return col_idx.get(name)
+    """查找列索引。先精确匹配，再模糊匹配（去空格+全角半角归一化）。"""
+    # 精确匹配
+    if name in col_idx:
+        return col_idx[name]
+    # 模糊匹配：去空格、全角括号转半角
+    import unicodedata
+    def normalize(s):
+        # 全角括号 → 半角
+        s = s.replace("（", "(").replace("）", ")")
+        # 去所有空格
+        s = s.replace(" ", "").replace("\u3000", "")
+        return s
+    norm_name = normalize(name)
+    for actual, idx in col_idx.items():
+        if normalize(actual) == norm_name:
+            return idx
+    # 包含匹配（期望列名是实际列名的子串，或反过来）
+    for actual, idx in col_idx.items():
+        na = normalize(actual)
+        if norm_name in na or na in norm_name:
+            return idx
+    return None
 
 
 def _get_val(row: tuple, idx: int | None) -> str:
@@ -2453,7 +2473,75 @@ def main():
     rules = raw["rules"]
 
     if not rules:
-        print("错误: 未找到有效的 RULE 行（需要有 SQL 的取数类规则，类型 1/2/3）", file=sys.stderr)
+        # 详细诊断
+        print("错误: 未找到有效的 RULE 行", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("诊断信息:", file=sys.stderr)
+
+        # 检查 RULE sheet 是否存在
+        import openpyxl
+        wb_diag = openpyxl.load_workbook(str(input_path), read_only=True, data_only=True)
+        if "RULE" not in wb_diag.sheetnames:
+            print(f"  - Excel 中没有 'RULE' sheet，实际 sheet: {wb_diag.sheetnames}", file=sys.stderr)
+        else:
+            ws_diag = wb_diag["RULE"]
+            diag_headers = []
+            for cell in next(ws_diag.iter_rows(min_row=1, max_row=1, values_only=False)):
+                if cell.value:
+                    diag_headers.append(str(cell.value).strip())
+
+            data_rows = 0
+            skipped_no_sql = 0
+            skipped_rule_type = []
+            for row in ws_diag.iter_rows(min_row=2, values_only=True):
+                if not row:
+                    continue
+                data_rows += 1
+
+            # 找规则类型列
+            rt_col_idx = None
+            for h_idx, h in enumerate(diag_headers):
+                if "规则类型" in h:
+                    rt_col_idx = h_idx
+                    break
+
+            # 找查询语句列
+            sql_col_idx = None
+            for h_idx, h in enumerate(diag_headers):
+                if "查询语句" in h:
+                    sql_col_idx = h_idx
+                    break
+
+            print(f"  - RULE sheet 存在，数据行数: {data_rows}", file=sys.stderr)
+            print(f"  - 表头列数: {len(diag_headers)}", file=sys.stderr)
+
+            if rt_col_idx is None:
+                print(f"  - ✗ 找不到 '规则类型' 列！表头: {diag_headers[:10]}", file=sys.stderr)
+            else:
+                print(f"  - 规则类型列 idx={rt_col_idx} ('{diag_headers[rt_col_idx]}')", file=sys.stderr)
+                # 检查规则类型值
+                rt_values = set()
+                for row in ws_diag.iter_rows(min_row=2, values_only=True):
+                    if row and rt_col_idx < len(row):
+                        rt_val = row[rt_col_idx]
+                        rt_values.add(str(rt_val) if rt_val is not None else "None")
+                print(f"  - 规则类型值: {rt_values}", file=sys.stderr)
+
+            if sql_col_idx is None:
+                print(f"  - ✗ 找不到 '查询语句' 列！表头含'查询': {[h for h in diag_headers if '查询' in h or 'sql' in h.lower()]}", file=sys.stderr)
+            else:
+                print(f"  - 查询语句列 idx={sql_col_idx} ('{diag_headers[sql_col_idx]}')", file=sys.stderr)
+                # 检查 SQL 是否为空
+                empty_sql = 0
+                for row in ws_diag.iter_rows(min_row=2, values_only=True):
+                    if row and sql_col_idx < len(row):
+                        sql_val = row[sql_col_idx]
+                        if not sql_val or not str(sql_val).strip():
+                            empty_sql += 1
+                if empty_sql > 0:
+                    print(f"  - ⚠ {empty_sql} 行的 SQL 为空", file=sys.stderr)
+
+        wb_diag.close()
         sys.exit(1)
 
     print(f"  RULE 行: {len(rules)}")
