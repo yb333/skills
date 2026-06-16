@@ -201,15 +201,42 @@ def build_report_data(knowledge):
                 amap[alias] = tbl
         alias_table_map[sid] = amap
 
+    # ── 构建 CTE 索引（用于字段来源 CTE 穿透）──
+    cte_index = _build_cte_index(data_flow_steps)
+    cte_names_upper = set(cte_index.keys())
+
     # ── fields (按场景分组，同场景内按目标表+字段名去重) ──
     def _resolve_sources(field_data, step_id):
-        """构建字段来源列表，把别名翻译成物理表名"""
+        """构建字段来源列表，把别名翻译成物理表名，CTE 穿透到物理源表"""
         amap = alias_table_map.get(step_id, {})
         sources = []
         for l in field_data.get("lineage", []):
             src_alias = l.get("source_table", "") or l.get("alias", "")
-            if src_alias and src_alias.upper() not in ("NULL", "NONE"):
-                # 别名 → 物理表名
+            if not src_alias or src_alias.upper() in ("NULL", "NONE"):
+                continue
+
+            # 检查是否来自 CTE
+            cte_name = l.get("cte_name", "")
+            if cte_name and cte_name.upper() in cte_index:
+                # CTE 穿透：从 lineage 的 cte_source_fields 取物理表字段
+                cte_info = cte_index[cte_name.upper()]
+                cte_field_info = cte_info["fields_map"].get(
+                    (l.get("source_field", "") or "").upper(), {}
+                )
+                cte_alias_to_table = cte_info["alias_to_table"]
+                cte_source_fields = cte_field_info.get("source_fields", l.get("cte_source_fields", []))
+                for csf in cte_source_fields:
+                    csf_alias = (csf.get("alias", "") or "").upper()
+                    csf_field = csf.get("field", "")
+                    physical_table = cte_alias_to_table.get(csf_alias, "")
+                    if physical_table:
+                        sources.append({
+                            "table": physical_table,
+                            "alias": csf.get("alias", ""),
+                            "field": csf_field,
+                        })
+            else:
+                # 普通字段：别名 → 物理表名
                 physical_table = amap.get(src_alias.upper(), src_alias)
                 sources.append({
                     "table": physical_table,
