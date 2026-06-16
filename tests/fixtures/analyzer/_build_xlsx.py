@@ -219,6 +219,7 @@ def _build_rule_row(r: dict) -> list:
         "目标表": r.get("target_table", ""),
         "删除模式": r.get("delete_mode", "1"),
         "删除条件": r.get("delete_condition", ""),
+        "交换分区来源表": r.get("exchange_source_table", ""),
         "规则中文名称": r.get("rule_name", r.get("rule_code", "")),
         "业务责任人": r.get("owner", "tester"),
         "行迁移开关": 0,

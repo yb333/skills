@@ -591,7 +591,8 @@ def _build_lineage_layout(topo, df, bl=None):
                 edges_list.append({"from": tf, "to": to_step, "label": ""})
 
     # ── 3. 拓扑排序分层 ──
-    # 计算每个节点的深度（最长路径）
+    # 步骤/中间表节点取最大上游深度+1（确保步骤严格从左到右）
+    # 源表深度=0，不影响步骤排序
     adj = {}  # {node: [downstream_nodes]}
     in_degree = {}
     for nid in nodes:
@@ -600,11 +601,11 @@ def _build_lineage_layout(topo, df, bl=None):
 
     for e in edges_list:
         f, t = e["from"], e["to"]
-        if f in adj and t in adj:
+        if f in adj and t in adj and t not in adj[f]:
             adj[f].append(t)
             in_degree[t] = in_degree.get(t, 0) + 1
 
-    # BFS 拓扑排序，计算深度
+    # BFS 拓扑排序，步骤/中间表取最大深度（保证严格顺序）
     from collections import deque
     depth = {}
     queue = deque()
@@ -617,6 +618,7 @@ def _build_lineage_layout(topo, df, bl=None):
         curr = queue.popleft()
         for downstream in adj.get(curr, []):
             new_depth = depth[curr] + 1
+            # 步骤和中间表取最大深度（严格从左到右）
             if downstream not in depth or new_depth > depth[downstream]:
                 depth[downstream] = new_depth
             in_degree[downstream] -= 1

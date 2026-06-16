@@ -77,6 +77,7 @@ RULE_COLUMNS_MAP = {
     "rule_group_code": "规则组编码",
     "rule_type": "规则类型",
     "rule_name": "规则中文名称",
+    "exchange_source_table": "交换分区来源表",
 }
 
 # 规则类型语义映射
@@ -179,6 +180,7 @@ class RawRule:
     data_source: str = ""
     business_owner: str = ""
     rule_group_code: str = ""
+    exchange_source_table: str = ""
 
 
 @dataclass
@@ -338,7 +340,8 @@ def read_excel(excel_path: str) -> dict:
         "rule_group_code": "GR123456",
     }
     """
-    wb = openpyxl.load_workbook(excel_path, read_only=True, data_only=True)
+    # read_only=False 更可靠（部分 Excel 文件在 read_only=True 时列读取不完整）
+    wb = openpyxl.load_workbook(excel_path, read_only=False, data_only=True)
     result = {
         "rules": [],
         "target_fields": {},
@@ -409,6 +412,7 @@ def read_excel(excel_path: str) -> dict:
             data_source=_get_val(row, ci.get("data_source")),
             business_owner=_get_val(row, ci.get("business_owner")),
             rule_group_code=_get_val(row, ci.get("rule_group_code")),
+            exchange_source_table=_get_val(row, ci.get("exchange_source_table")),
         )
 
         # SELECT 类规则必须有 SQL
@@ -1402,7 +1406,9 @@ def generate_step_description(rule: RawRule, parsed, scenarios: list[dict], all_
         if rule.rule_type == 2:
             parts.append("删除操作")
         elif rule.rule_type == 9:
-            parts.append("分区交换操作")
+            temp = rule.target_table or ""
+            target = rule.exchange_source_table or ""
+            parts.append(f"分区交换: 临时表 {temp} → 目标表 {target}")
         if rule.query_sql:
             parts.append(f"SQL: {rule.query_sql[:60]}...")
     else:
@@ -1489,16 +1495,32 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
             except Exception:
                 all_sql_tables = sql_source_tables  # fallback
 
+        # 分区交换（类型9）特殊处理：
+        # target_table 是临时表，exchange_source_table 是真正的目标表（分区表）
+        real_target_table = rule.target_table
+        real_target_full = target_full
+        is_exchange = rule.rule_type == 9
+        if is_exchange and rule.exchange_source_table:
+            # 交换分区来源表才是真正的目标表
+            real_target_table = rule.exchange_source_table
+            # 解析 schema.table
+            parts = real_target_table.split(".")
+            real_target_full = real_target_table if "." in real_target_table else f"{rule.target_schema}.{real_target_table}" if rule.target_schema else real_target_table
+
         steps.append({
             "step_id": step_id,
             "rule_code": rule.rule_code,
+            "rule_type": rule.rule_type,
             "exec_sequence": rule.exec_sequence,
             "target_schema": rule.target_schema,
-            "target_table": rule.target_table,
-            "target_table_full": target_full,
+            "target_table": real_target_table,
+            "target_table_full": real_target_full,
             "delete_mode": rule.delete_mode,
+            "delete_condition": rule.delete_condition,
             "source_tables_from_sql": sql_source_tables,
             "all_tables_from_sql": all_sql_tables,
+            "is_exchange": is_exchange,
+            "exchange_temp_table": rule.target_table if is_exchange else "",  # 临时表名
         })
 
     # ── 调度图（执行序列直接读取）──
@@ -2536,7 +2558,7 @@ def main():
 
         # 检查 RULE sheet 是否存在
         import openpyxl
-        wb_diag = openpyxl.load_workbook(str(input_path), read_only=True, data_only=True)
+        wb_diag = openpyxl.load_workbook(str(input_path), read_only=False, data_only=True)
         if "RULE" not in wb_diag.sheetnames:
             print(f"  - Excel 中没有 'RULE' sheet，实际 sheet: {wb_diag.sheetnames}", file=sys.stderr)
         else:

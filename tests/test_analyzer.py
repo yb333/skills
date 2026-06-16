@@ -48,7 +48,8 @@ def ensure_xlsx_generated():
         "case_14_audit_fields", "case_15_comment_alias",
         "case_16_many_joins", "case_17_many_ctes", "case_18_many_case_when",
     "case_19_multi_scenario_2", "case_20_multi_scenario_3",
-    "case_21_scenario_with_common", "case_22_scenario_chain",
+        "case_21_scenario_with_common", "case_22_scenario_chain",
+        "case_23_exchange_partition",
     ]
     for case_name in cases:
         xlsx_path = FIXTURES_DIR / case_name / "execution_tasks.xlsx"
@@ -362,3 +363,21 @@ class TestTier5MultiScenario:
         # 同目标表写入组（3个规则写同一张表）
         write_groups = r["topology"]["target_write_groups"]
         assert len(write_groups) >= 1, "应检测到同表多次写入组"
+
+    def test_case_23_exchange_partition(self, ensure_xlsx_generated):
+        """分区交换：临时表 → 真正目标表。"""
+        r = run_analysis("case_23_exchange_partition")
+        steps = r["topology"]["steps"]
+        assert len(steps) == 2
+
+        # step_2 是分区交换，目标表应该是 exchange_source_table（不是临时表）
+        exchange_step = steps[1]
+        assert exchange_step.get("is_exchange") == True
+        assert exchange_step["target_table"] == "dwl_real_f", \
+            f"分区交换目标表应为 dwl_real_f，实际 {exchange_step['target_table']}"
+        assert exchange_step.get("exchange_temp_table") == "dwl_temp_f"
+
+        # 兜底描述应包含分区交换信息
+        descs = r["topology"]["scenarios"]
+        # step_2 应标注为分区交换类型
+        assert exchange_step.get("rule_type") == 9
