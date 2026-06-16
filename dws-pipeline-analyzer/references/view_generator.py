@@ -336,6 +336,7 @@ def build_report_data(knowledge):
             "target_table": s.get("target_table", ""),
             "scenario_name": s.get("scenario_name", "默认"),
             "rule_name": s.get("rule_name", ""),
+            "exec_sequence": s.get("exec_sequence", 0),
         }
 
     # ── fields (全局去重，不按场景分组；保留全部步骤链路供详情面板) ──

@@ -2247,26 +2247,26 @@ function openDetail(fieldName, scenario) {
       var ttColor = ttColorMap[tt] || '#6b7280';
       var scTag = '';
       if (c.scenario && c.scenario !== '默认') {
-        scTag = '<span style="display:inline-block;padding:1px 7px;border-radius:8px;font-size:10px;font-weight:600;color:white;background:#8b5cf6;margin-right:6px;">' + escapeHtml(c.scenario) + '</span>';
+        scTag = '<span style="display:inline-block;padding:1px 6px;border-radius:6px;font-size:9px;font-weight:600;color:white;background:#8b5cf6;margin-right:4px;">' + escapeHtml(c.scenario) + '</span>';
       }
       var s = '';
-      s += '<div style="display:inline-block;padding:6px 12px;background:var(--bg-secondary);border:1px solid ' + ttColor + ';border-radius:8px;min-width:160px;">';
-      s += '<div style="font-weight:600;font-size:13px;margin-bottom:2px;">' + scTag + escapeHtml(c.rule_name || c.step_id) + '</div>';
+      s += '<div style="padding:6px 10px;background:var(--bg-secondary);border:1px solid ' + ttColor + ';border-radius:6px;min-width:180px;">';
+      s += '<div style="font-weight:600;font-size:12px;margin-bottom:2px;">' + scTag + escapeHtml(c.rule_name || c.step_id) + '</div>';
       if (c.sources && c.sources.length > 0) {
         c.sources.forEach(function(src) {
-          s += '<div style="font-size:11px;color:var(--text-secondary);line-height:1.5;">';
+          s += '<div style="font-size:10px;color:var(--text-secondary);line-height:1.4;">';
           s += '← ' + escapeHtml(src.table || '') + '.' + escapeHtml(src.field || '?');
-          s += ' <span style="display:inline-block;padding:0 5px;border-radius:6px;font-size:9px;font-weight:600;color:white;background:' + ttColor + ';">' + ttLabel + '</span>';
+          s += ' <span style="display:inline-block;padding:0 4px;border-radius:4px;font-size:8px;font-weight:600;color:white;background:' + ttColor + ';vertical-align:middle;">' + ttLabel + '</span>';
           s += '</div>';
         });
       } else {
-        s += '<div style="font-size:11px;color:var(--text-muted);">' + ttLabel + '</div>';
+        s += '<div style="font-size:10px;color:var(--text-muted);">' + ttLabel + '</div>';
       }
       s += '</div>';
       return s;
     }
 
-    // 按 exec_sequence 分组
+    // 按 exec_sequence 分组（倒序：最终步骤在上）
     var seqGroups = {};
     var seqOrder = [];
     chains.forEach(function(c) {
@@ -2274,62 +2274,75 @@ function openDetail(fieldName, scenario) {
       if (!seqGroups[seq]) { seqGroups[seq] = []; seqOrder.push(seq); }
       seqGroups[seq].push(c);
     });
+    seqOrder.sort(function(a, b) { return b - a; });
 
-    // 从最终步骤开始构建树（最终步骤在上，往下分叉）
-    html += '<div style="display:flex;flex-direction:column;align-items:center;gap:0;">';
+    // 渲染：每层一行，层间用连线
+    html += '<div style="display:flex;flex-direction:column;align-items:center;">';
 
     seqOrder.forEach(function(seq, seqIdx) {
       var group = seqGroups[seq];
       var isLast = seqIdx === seqOrder.length - 1;
 
+      // 当前层节点（多场景水平排列，单场景居中）
       if (group.length > 1) {
-        // 多场景：水平排列 + 向下分叉线
-        html += '<div style="display:flex;gap:24px;justify-content:center;position:relative;">';
-
-        // 向上汇聚线
-        if (seqIdx > 0) {
-          html += '<div style="position:absolute;left:50%;top:-20px;width:2px;height:20px;background:var(--border);transform:translateX(-50%);"></div>';
-        }
-
+        html += '<div style="display:flex;gap:40px;justify-content:center;position:relative;">';
         group.forEach(function(c) {
+          html += '<div style="display:flex;flex-direction:column;align-items:center;">';
+          // 向上连接线
+          if (seqIdx > 0) {
+            html += '<div style="width:2px;height:16px;background:var(--border);"></div>';
+          }
           html += renderChainNode(c);
+          html += '</div>';
         });
         html += '</div>';
       } else {
-        // 单步骤：居中
-        html += '<div style="display:flex;justify-content:center;position:relative;">';
+        html += '<div style="display:flex;flex-direction:column;align-items:center;">';
         if (seqIdx > 0) {
-          html += '<div style="position:absolute;left:50%;top:-20px;width:2px;height:20px;background:var(--border);transform:translateX(-50%);"></div>';
+          html += '<div style="width:2px;height:16px;background:var(--border);"></div>';
         }
         html += renderChainNode(group[0]);
         html += '</div>';
       }
 
-      // 层间连接线（向下）
+      // 层间连线
       if (!isLast) {
         var nextGroup = seqGroups[seqOrder[seqIdx + 1]];
         if (nextGroup && nextGroup.length > 1) {
-          // 下一层多分支：画分叉线
-          html += '<div style="height:30px;position:relative;width:100%;">';
+          // 下一层有多个分支：画分叉
+          // 从当前层底部中心向下，再水平展开到每个分支上方
+          html += '<div style="display:flex;flex-direction:column;align-items:center;width:100%;">';
           // 竖线
-          html += '<div style="position:absolute;left:50%;top:0;width:2px;height:15px;background:var(--border);transform:translateX(-50%);"></div>';
-          // 横线（连接所有分支）
-          html += '<div style="position:absolute;left:25%;right:25%;top:15px;height:2px;background:var(--border);"></div>';
-          // 每个分支的竖线
-          for (var bi = 0; bi < nextGroup.length; bi++) {
-            var pct = (bi + 0.5) / nextGroup.length * 50 + 25;
-            html += '<div style="position:absolute;left:' + pct + '%;top:15px;width:2px;height:15px;background:var(--border);"></div>';
+          html += '<div style="width:2px;height:12px;background:var(--border);"></div>';
+          // 横线
+          var branchCount = nextGroup.length;
+          if (branchCount === 2) {
+            html += '<div style="width:60%;height:2px;background:var(--border);position:relative;">';
+            html += '<div style="position:absolute;left:0;top:0;width:2px;height:12px;background:var(--border);"></div>';
+            html += '<div style="position:absolute;right:0;top:0;width:2px;height:12px;background:var(--border);"></div>';
+            html += '<div style="position:absolute;left:50%;top:-12px;width:2px;height:12px;background:var(--border);transform:translateX(-50%);"></div>';
+            html += '</div>';
+          } else {
+            // 3+分支：简单横线+竖线
+            var w = Math.max(40, branchCount * 30);
+            html += '<div style="width:' + w + 'px;height:2px;background:var(--border);position:relative;">';
+            for (var bi = 0; bi < branchCount; bi++) {
+              var left = (bi / (branchCount - 1)) * 100;
+              html += '<div style="position:absolute;left:' + left + '%;top:0;width:2px;height:12px;background:var(--border);transform:translateX(-50%);"></div>';
+            }
+            html += '<div style="position:absolute;left:50%;top:-12px;width:2px;height:12px;background:var(--border);"></div>';
+            html += '</div>';
           }
           html += '</div>';
         } else {
-          // 下一层单步骤：简单竖线
-          html += '<div style="width:2px;height:24px;background:var(--border);margin:0 auto;"></div>';
+          // 下一层单分支：简单竖线
+          html += '<div style="width:2px;height:24px;background:var(--border);"></div>';
         }
       }
     });
 
-    html += '</div>'; // 树容器
-    html += '</div>'; // detail-section
+    html += '</div>';
+    html += '</div>';
   }
 
   document.getElementById('detailBody').innerHTML = html;
