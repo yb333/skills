@@ -384,6 +384,12 @@ def build_report_data(knowledge):
                 "target_field": fname,
                 "chains": [],  # 所有步骤的来源
             }
+        # 取 raw_sql（加工表达式）
+        raw_sql = ""
+        lineage = f.get("lineage", [])
+        if lineage:
+            raw_sql = lineage[0].get("raw_sql", "")
+
         field_chain_map[fname_lower]["chains"].append({
             "step_id": step_id,
             "rule_name": si.get("rule_name", step_id),
@@ -392,6 +398,7 @@ def build_report_data(knowledge):
             "target_table": si.get("target_table", ""),
             "transform_type": f.get("transform_type", "expression"),
             "sources": sources,
+            "raw_sql": raw_sql,
         })
 
     # ── field_details (CTE 穿透血缘链) ──

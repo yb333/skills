@@ -2250,15 +2250,24 @@ function openDetail(fieldName, scenario) {
         scTag = '<span style="display:inline-block;padding:1px 6px;border-radius:6px;font-size:9px;font-weight:600;color:white;background:#8b5cf6;margin-right:4px;">' + escapeHtml(c.scenario) + '</span>';
       }
       var s = '';
-      s += '<div style="padding:6px 10px;background:var(--bg-secondary);border:1px solid ' + ttColor + ';border-radius:6px;min-width:180px;">';
-      s += '<div style="font-weight:600;font-size:12px;margin-bottom:2px;">' + scTag + escapeHtml(c.rule_name || c.step_id) + '</div>';
+      s += '<div style="padding:8px 12px;background:var(--bg-secondary);border:1px solid ' + ttColor + ';border-radius:6px;min-width:200px;max-width:280px;">';
+      s += '<div style="font-weight:600;font-size:12px;margin-bottom:4px;">' + scTag + escapeHtml(c.rule_name || c.step_id) + '</div>';
+      // 加工表达式
+      var rawSql = c.raw_sql || '';
+      if (rawSql && tt !== 'direct') {
+        s += '<div style="font-size:10px;font-family:monospace;color:var(--text-primary);background:var(--bg-card);padding:3px 6px;border-radius:4px;margin-bottom:4px;white-space:pre-wrap;word-break:break-all;line-height:1.4;">' + escapeHtml(rawSql) + '</div>';
+      }
+      // 来源字段
       if (c.sources && c.sources.length > 0) {
         c.sources.forEach(function(src) {
-          s += '<div style="font-size:10px;color:var(--text-secondary);line-height:1.4;">';
-          s += '← ' + escapeHtml(src.table || '') + '.' + escapeHtml(src.field || '?');
+          s += '<div style="font-size:10px;color:var(--text-secondary);line-height:1.5;">';
+          s += '← <code style="color:var(--accent);">' + escapeHtml(src.field || '?') + '</code>';
+          s += ' from ' + escapeHtml(src.table || '');
           s += ' <span style="display:inline-block;padding:0 4px;border-radius:4px;font-size:8px;font-weight:600;color:white;background:' + ttColor + ';vertical-align:middle;">' + ttLabel + '</span>';
           s += '</div>';
         });
+      } else if (tt === 'direct' && c.sources.length === 0) {
+        s += '<div style="font-size:10px;color:var(--text-muted);">无来源</div>';
       } else {
         s += '<div style="font-size:10px;color:var(--text-muted);">' + ttLabel + '</div>';
       }
