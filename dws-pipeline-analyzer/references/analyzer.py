@@ -788,10 +788,12 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
     # 不使用 find_all(exp.Join) 以避免递归进入 CTE 内部
     joins_list = select_node.args.get("joins", [])
     for join_node in joins_list:
-        table = join_node.find(exp.Table)
+        # 用 join_node.this 直接取 JOIN 表（不用 find，避免取到 ON 条件里的表）
+        join_expr = join_node.this
+        table = join_expr if isinstance(join_expr, exp.Table) else (join_expr.find(exp.Table) if join_expr else None)
         if not table:
             continue
-            table_name = ".".join(_clean_name(p.name) for p in table.parts).lower()
+        table_name = ".".join(_clean_name(p.name) for p in table.parts).lower()
         alias = _clean_name(table.alias) if table.alias else ""
 
         # 过滤 CTE 引用（CTE 名作为表名出现在 JOIN 中）
@@ -1561,8 +1563,9 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
         # 交换分区步骤：依赖写入临时表的步骤
         if s.get("is_exchange") and s.get("exchange_temp_table"):
             temp_table_upper = s["exchange_temp_table"].upper()
-            # 也可能带 schema
-            temp_full = s.get("target_schema", "") + "." + temp_table_upper if s.get("target_schema") else temp_table_upper
+            # 也可能带 schema（全部大写匹配）
+            temp_schema = (s.get("target_schema") or "").upper()
+            temp_full = temp_schema + "." + temp_table_upper if temp_schema else temp_table_upper
             for tbl_key in [temp_table_upper, temp_full]:
                 if tbl_key in target_writers:
                     for writer_step in target_writers[tbl_key]:
@@ -2151,16 +2154,18 @@ def build_data_flow(
     for i, rule in enumerate(rules):
         step_id = f"step_{i + 1}"
         rc = rule.rule_code
-        target_full = _normalize_table_name(rule.target_schema, rule.target_table)
+        # 分区交换：真正目标表是 exchange_source_table，target_table 是临时表
+        real_target = rule.exchange_source_table if (rule.rule_type == 9 and rule.exchange_source_table) else rule.target_table
+        target_full = _normalize_table_name(rule.target_schema, real_target)
 
         # 目标表
         if target_full not in seen_tables:
             seen_tables.add(target_full)
             all_tables.append({
                 "schema": rule.target_schema,
-                "name": rule.target_table,
+                "name": real_target,
                 "role": "target",
-                "layer": _infer_layer(rule.target_schema, rule.target_table),
+                "layer": _infer_layer(rule.target_schema, real_target),
             })
 
         parsed = parsed_map.get(rc)
@@ -2202,7 +2207,9 @@ def build_data_flow(
     for i, rule in enumerate(rules):
         step_id = f"step_{i + 1}"
         rc = rule.rule_code
-        target_full = _normalize_table_name(rule.target_schema, rule.target_table)
+        # 分区交换：真正目标表
+        real_target = rule.exchange_source_table if (rule.rule_type == 9 and rule.exchange_source_table) else rule.target_table
+        target_full = _normalize_table_name(rule.target_schema, real_target)
         parsed = parsed_map.get(rc)
         if not parsed:
             continue
