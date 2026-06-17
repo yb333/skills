@@ -335,6 +335,7 @@ body {
 }
 
 .lineage-svg .node-rect.source      { fill: var(--node-source-fill); stroke: var(--node-source-stroke); }
+.lineage-svg .node-rect.primary-table { stroke-width: 2.5; stroke: #3b82f6; }
 .lineage-svg .node-rect.intermediate { fill: var(--node-intermediate-fill); stroke: var(--node-intermediate-stroke); }
 .lineage-svg .node-rect.cte         { fill: var(--node-cte-fill); stroke: var(--node-cte-stroke); }
 .lineage-svg .node-rect.step        { fill: var(--node-step-fill); stroke: var(--node-step-stroke); }
@@ -1648,7 +1649,10 @@ function renderLineage() {
     if (n.hidden && !lineageShowSources) return;
     var nodeType = n.type || 'source';
     svg += '<g class="lh-node" data-id="' + escapeHtml(n.id) + '" data-name="' + escapeHtml(n.name || n.label || '') + '" data-type="' + nodeType + '" style="cursor:pointer;">';
-    svg += '<rect class="node-rect ' + nodeType + '" x="' + n.x + '" y="' + n.y + '" width="' + n.width + '" height="' + n.height + '"/>';
+    var primaryClass = n.is_primary ? ' primary-table' : '';
+    var primaryBadge = n.is_primary ? ' <text x="' + (n.x + n.width - 30) + '" y="' + (n.y + 12) + '" font-size="9" fill="#3b82f6" font-weight="bold">主表</text>' : '';
+    svg += '<rect class="node-rect ' + nodeType + primaryClass + '" x="' + n.x + '" y="' + n.y + '" width="' + n.width + '" height="' + n.height + '"/>';
+    if (primaryBadge) svg += primaryBadge;
 
     var pad = 6;
     svg += '<foreignObject x="' + (n.x + pad) + '" y="' + (n.y + 2) + '" width="' + Math.max(10, n.width - pad * 2) + '" height="' + Math.max(10, n.height - 4) + '">';

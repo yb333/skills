@@ -663,12 +663,27 @@ def _build_lineage_layout(topo, df, bl=None):
                         phys.append(tname)
                 cte_source_map[cn] = phys
 
-    # 来源表引用计数
+    # 来源表引用计数 + 主表识别
     source_ref_count = {}  # {table_name(UPPER): count}
+    step_primary_tables = {}  # {step_id: set(table_name(UPPER))}  主表集合
     for s in steps_list:
+        sid = s["step_id"]
+        primary = set()
         for src in s.get("source_tables_from_sql", []):
             su = src.upper()
             source_ref_count[su] = source_ref_count.get(su, 0) + 1
+        # 从 data_flow 获取 JOIN 类型，识别主表
+        df_step = next((d for d in data_flow_steps if d.get("step_id") == sid), {})
+        for j in df_step.get("joins", []):
+            jt = (j.get("join_type") or "").upper()
+            tbl = (j.get("source_table") or "").upper()
+            if jt == "FROM":
+                # FROM 表始终是主表
+                primary.add(tbl)
+            elif "INNER" in jt or "CROSS" in jt:
+                # INNER JOIN / CROSS JOIN 也是主表
+                primary.add(tbl)
+        step_primary_tables[sid] = primary
     # CTE 内部表也算
     for cte_name, phys_list in cte_source_map.items():
         for p in phys_list:
@@ -726,7 +741,15 @@ def _build_lineage_layout(topo, df, bl=None):
             label = f"{tname} (×{ref_count})" if ref_count > 1 else tname
             hidden = True  # 来源表默认隐藏
 
-        nodes[tname] = {"type": node_type, "label": label, "hidden": hidden, "step_data": None}
+        # 判断是否是某个步骤的主表
+        is_primary = False
+        for sid, primary_set in step_primary_tables.items():
+            if tname.upper() in primary_set:
+                is_primary = True
+                break
+
+        nodes[tname] = {"type": node_type, "label": label, "hidden": hidden, "step_data": None,
+                        "is_primary": is_primary}
 
     # CTE 内部物理表
     for cte_name, phys_list in cte_source_map.items():
@@ -735,7 +758,8 @@ def _build_lineage_layout(topo, df, bl=None):
                 seen_tables.add(p)
                 ref_count = source_ref_count.get(p.upper(), 1)
                 label = f"{p} (×{ref_count})" if ref_count > 1 else p
-                nodes[p] = {"type": "source", "label": label, "hidden": True, "step_data": None}
+                nodes[p] = {"type": "source", "label": label, "hidden": True, "step_data": None,
+                            "is_primary": False}
 
     # ── 3. 构建边 ──
     # 步骤 → 目标表/中间表
@@ -802,11 +826,12 @@ def _build_lineage_layout(topo, df, bl=None):
             else:
                 node_col[nid] = max_seq + 0.5
         else:  # source
-            # 放在使用它的第一个步骤的列 - 0.5
+            # 放在使用它的最早步骤（最小 exec_sequence）的列 - 0.5
+            # 这样所有引用此表的步骤都在表的右边，避免视觉回连
             using_steps = table_to_steps.get(nid, [])
             if using_steps:
-                first_step = using_steps[0]
-                node_col[nid] = step_seq_map.get(first_step, 0) - 0.5
+                min_seq = min(step_seq_map.get(sid, 999) for sid in using_steps)
+                node_col[nid] = min_seq - 0.5
             else:
                 node_col[nid] = -0.5
 
@@ -856,6 +881,7 @@ def _build_lineage_layout(topo, df, bl=None):
                 "hidden": ninfo.get("hidden", False),
                 "step_data": ninfo.get("step_data"),
                 "source_ref_count": source_ref_count.get(name.upper(), 1) if ninfo.get("type") == "source" else 0,
+                "is_primary": ninfo.get("is_primary", False),
             }
 
     # 隐藏节点也需要 id（用于交互高亮时显示）
@@ -878,6 +904,7 @@ def _build_lineage_layout(topo, df, bl=None):
                 "hidden": True,
                 "step_data": None,
                 "source_ref_count": source_ref_count.get(nid.upper(), 1),
+                "is_primary": ninfo.get("is_primary", False),
             }
 
     # ── 5. 构建边输出 ──
