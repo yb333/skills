@@ -773,6 +773,54 @@ def _build_cte_alias_map(select_node, ctes: list) -> dict[str, str]:
     return alias_map
 
 
+def _extract_subquery_tables(subquery_node, depth=0) -> list[tuple[str, str]]:
+    """递归提取子查询内部的所有物理表。
+
+    支持嵌套子查询（子查询内部的子查询）。
+    最大递归深度 10 层。
+
+    Returns: [(table_name, alias), ...]
+    """
+    if depth > 10:
+        return []
+
+    tables = []
+    inner_select = subquery_node.find(exp.Select)
+    if not inner_select:
+        return tables
+
+    # 内部 FROM 表
+    inner_from = inner_select.args.get("from_")
+    if inner_from:
+        inner_main = inner_from.this
+        if isinstance(inner_main, exp.Table):
+            tname = ".".join(_clean_name(p.name) for p in inner_main.parts)
+            alias = _clean_name(inner_main.alias).lower() if inner_main.alias else ""
+            tables.append((tname, alias or tname.split(".")[-1]))
+        elif isinstance(inner_main, exp.Subquery):
+            # 嵌套子查询：递归
+            tables.extend(_extract_subquery_tables(inner_main, depth + 1))
+
+        # 内部逗号 JOIN
+        for extra in inner_from.expressions:
+            if isinstance(extra, exp.Table):
+                tname = ".".join(_clean_name(p.name) for p in extra.parts)
+                alias = _clean_name(extra.alias).lower() if extra.alias else ""
+                tables.append((tname, alias or tname.split(".")[-1]))
+
+    # 内部 JOIN 表
+    for join_node in inner_select.args.get("joins", []):
+        jt = join_node.this
+        if isinstance(jt, exp.Table):
+            tname = ".".join(_clean_name(p.name) for p in jt.parts)
+            alias = _clean_name(jt.alias).lower() if jt.alias else ""
+            tables.append((tname, alias or tname.split(".")[-1]))
+        elif isinstance(jt, exp.Subquery):
+            tables.extend(_extract_subquery_tables(jt, depth + 1))
+
+    return tables
+
+
 def _extract_joins(tree, select_node) -> list[ParsedJoin]:
     """提取 FROM 和 JOIN 信息。
 
@@ -791,25 +839,43 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
             if cte_alias:
                 cte_names.add(_clean_name(str(cte_alias)).upper())
 
-    # 主表 (FROM) — 只取 from_ 的直接 Table，不递归进入子查询
+    # 主表 (FROM) — 处理普通表和子查询
     from_clause = select_node.args.get("from_")
     if from_clause:
-        # from_.this 是主表
-        main_table = from_clause.this
-        if isinstance(main_table, exp.Table):
-            table_name = ".".join(_clean_name(p.name) for p in main_table.parts)
-            alias = _clean_name(main_table.alias) if main_table.alias else ""
+        main_expr = from_clause.this
+        if isinstance(main_expr, exp.Table):
+            table_name = ".".join(_clean_name(p.name) for p in main_expr.parts)
+            alias = _clean_name(main_expr.alias).lower() if main_expr.alias else ""
             joins.append(ParsedJoin(
                 source_table=table_name,
                 alias=alias or table_name.split(".")[-1],
                 join_type="FROM",
                 join_condition="",
             ))
+        elif isinstance(main_expr, exp.Subquery):
+            # FROM 子查询：记录子查询别名 + 递归提取内部表
+            sub_alias = _clean_name(main_expr.alias).lower() if main_expr.alias else ""
+            # 子查询别名作为虚拟 FROM 表（让字段来源能匹配）
+            joins.append(ParsedJoin(
+                source_table=f"(subquery:{sub_alias})",
+                alias=sub_alias or "sub",
+                join_type="FROM",
+                join_condition="",
+            ))
+            # 递归提取子查询内部的物理表
+            for inner_table_name, inner_alias in _extract_subquery_tables(main_expr):
+                joins.append(ParsedJoin(
+                    source_table=inner_table_name,
+                    alias=inner_alias,
+                    join_type="FROM_SUBQUERY",
+                    join_condition="",
+                ))
+
         # from_.expressions 是逗号 JOIN 的额外表（FROM a, b）
         for extra in from_clause.expressions:
             if isinstance(extra, exp.Table):
                 table_name = ".".join(_clean_name(p.name) for p in extra.parts)
-                alias = _clean_name(extra.alias) if extra.alias else ""
+                alias = _clean_name(extra.alias).lower() if extra.alias else ""
                 joins.append(ParsedJoin(
                     source_table=table_name,
                     alias=alias or table_name.split(".")[-1],
@@ -822,6 +888,28 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
     joins_list = select_node.args.get("joins", [])
     for join_node in joins_list:
         join_expr = join_node.this
+
+        # JOIN 子查询：提取子查询别名 + 内部表
+        if isinstance(join_expr, exp.Subquery):
+            sub_alias = _clean_name(join_expr.alias).lower() if join_expr.alias else ""
+            on_node = join_node.args.get("on")
+            join_condition = on_node.sql(dialect="oracle") if on_node else ""
+            joins.append(ParsedJoin(
+                source_table=f"(subquery:{sub_alias})",
+                alias=sub_alias or "sub",
+                join_type="JOIN_SUBQUERY",
+                join_condition=join_condition,
+            ))
+            for inner_table_name, inner_alias in _extract_subquery_tables(join_expr):
+                joins.append(ParsedJoin(
+                    source_table=inner_table_name,
+                    alias=inner_alias,
+                    join_type="JOIN_SUBQUERY_INNER",
+                    join_condition="",
+                ))
+            continue
+
+        # 普通 JOIN 表
         table = join_expr if isinstance(join_expr, exp.Table) else (join_expr.find(exp.Table) if join_expr else None)
         if not table:
             continue
@@ -2248,7 +2336,7 @@ def build_data_flow(
     Returns: data_flow section of knowledge.json
     """
     all_tables = []
-    seen_tables = set()
+    seen_tables = set()  # 统一用 _norm_table 去重
 
     for i, rule in enumerate(rules):
         step_id = f"step_{i + 1}"
@@ -2258,13 +2346,13 @@ def build_data_flow(
         target_full = _normalize_table_name(rule.target_schema, real_target)
 
         # 目标表
-        if target_full not in seen_tables:
-            seen_tables.add(target_full)
+        if _norm_table(target_full) not in seen_tables:
+            seen_tables.add(_norm_table(target_full))
             all_tables.append({
                 "schema": rule.target_schema,
                 "name": real_target,
                 "role": "target",
-                "layer": _infer_layer(rule.target_schema, rule.target_table),
+                "layer": _infer_layer(rule.target_schema, real_target),
             })
 
         parsed = parsed_map.get(rc)
@@ -2273,8 +2361,8 @@ def build_data_flow(
 
         # 源表（主查询）
         for j in parsed.source_tables:
-            if j.source_table not in seen_tables:
-                seen_tables.add(j.source_table)
+            if _norm_table(j.source_table) not in seen_tables:
+                seen_tables.add(_norm_table(j.source_table))
                 parts = j.source_table.split(".")
                 s_schema = parts[0] if len(parts) > 1 else ""
                 s_name = parts[-1] if len(parts) > 1 else parts[0]
@@ -2289,8 +2377,8 @@ def build_data_flow(
         for cte in parsed.ctes:
             for ct in cte.source_tables:
                 tname = ct.get("name", "")
-                if tname and tname not in seen_tables:
-                    seen_tables.add(tname)
+                if tname and _norm_table(tname) not in seen_tables:
+                    seen_tables.add(_norm_table(tname))
                     parts = tname.split(".")
                     s_schema = parts[0] if len(parts) > 1 else ""
                     s_name = parts[-1] if len(parts) > 1 else parts[0]

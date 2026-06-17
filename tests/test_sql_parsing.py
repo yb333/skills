@@ -239,6 +239,36 @@ FROM tree a INNER JOIN tree b ON a.id = b.parent_id"""
         # 同表只出现一次
         assert tables.count("tree") == 1
 
+    def test_from_subquery(self):
+        """FROM 子查询：内部表应被提取"""
+        sql = """SELECT t.x FROM (
+    SELECT a.x FROM tbl_a a LEFT JOIN tbl_b b ON a.id = b.id
+) t LEFT JOIN dim_proj f ON t.id = f.id"""
+        parsed = parse(sql)
+        tables = source_tables(parsed)
+        assert any("tbl_a" in t for t in tables), f"子查询内部 tbl_a 应被提取，实际 {tables}"
+        assert any("tbl_b" in t for t in tables), f"子查询内部 tbl_b 应被提取，实际 {tables}"
+        assert any("dim_proj" in t for t in tables), f"外部 JOIN 表应被提取，实际 {tables}"
+
+    def test_join_subquery(self):
+        """JOIN 子查询：内部表应被提取"""
+        sql = """SELECT t.x FROM main_tbl t
+LEFT JOIN (SELECT b.id FROM b_table b) sub ON t.id = sub.id"""
+        parsed = parse(sql)
+        tables = source_tables(parsed)
+        assert any("main_tbl" in t for t in tables), f"主表应被提取，实际 {tables}"
+        assert any("b_table" in t for t in tables), f"JOIN子查询内部 b_table 应被提取，实际 {tables}"
+
+    def test_nested_subquery(self):
+        """嵌套子查询：最深层的表应被提取"""
+        sql = """SELECT t.x FROM (
+    SELECT a.x FROM (SELECT c.x FROM c_table c) a LEFT JOIN b_table b ON a.x = b.x
+) t"""
+        parsed = parse(sql)
+        tables = source_tables(parsed)
+        assert any("c_table" in t for t in tables), f"最内层 c_table 应被提取，实际 {tables}"
+        assert any("b_table" in t for t in tables), f"中间层 b_table 应被提取，实际 {tables}"
+
 
 # ═══════════════════════════════════════════════════════════════
 # 5. DWS 语法清理
