@@ -276,6 +276,9 @@ def build_report_data(knowledge):
             ],
         })
 
+    # data_dependencies（供字段链路树连线过滤用）
+    data_deps = topo.get("data_dependencies", [])
+
     # ── 构建 alias→物理表名 映射（用于字段来源翻译）──
     alias_table_map = {}  # {step_id: {alias(UPPER): physical_table}}
     for s in data_flow_steps:
@@ -502,6 +505,7 @@ def build_report_data(knowledge):
         "steps": steps_out,
         "fields": fields_out,
         "field_chain_map": field_chain_map,
+        "data_deps": data_deps,
         "field_details": field_details,
         "quality": quality_out,
     }
