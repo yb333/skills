@@ -338,8 +338,10 @@ body {
 
 .lineage-svg .node-rect.source      { fill: var(--node-source-fill); stroke: var(--node-source-stroke); }
 .lineage-svg .node-rect.primary-table { stroke-width: 2.5; }
-/* 主表不改填充色，保持各自类型颜色(source蓝/intermediate灰)，
-   只通过粗边框区分 */
+/* 主表在各自类型颜色基础上加深填充 */
+.lineage-svg .node-rect.source.primary-table { fill: #93c5fd; }
+.lineage-svg .node-rect.intermediate.primary-table { fill: #cbd5e1; }
+.lineage-svg .node-rect.target.primary-table { fill: #86efac; }
 .lineage-svg .node-rect.intermediate { fill: var(--node-intermediate-fill); stroke: var(--node-intermediate-stroke); }
 .lineage-svg .node-rect.cte         { fill: var(--node-cte-fill); stroke: var(--node-cte-stroke); }
 .lineage-svg .node-rect.step        { fill: var(--node-step-fill); stroke: var(--node-step-stroke); }
