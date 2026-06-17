@@ -2253,14 +2253,16 @@ def build_data_flow(
     for i, rule in enumerate(rules):
         step_id = f"step_{i + 1}"
         rc = rule.rule_code
-        target_full = _normalize_table_name(rule.target_schema, rule.target_table)
+        # 分区交换：真正目标表是 exchange_source_table
+        real_target = rule.exchange_source_table if (rule.rule_type == 9 and rule.exchange_source_table) else rule.target_table
+        target_full = _normalize_table_name(rule.target_schema, real_target)
 
         # 目标表
         if target_full not in seen_tables:
             seen_tables.add(target_full)
             all_tables.append({
                 "schema": rule.target_schema,
-                "name": rule.target_table,
+                "name": real_target,
                 "role": "target",
                 "layer": _infer_layer(rule.target_schema, rule.target_table),
             })
@@ -2304,14 +2306,33 @@ def build_data_flow(
     for i, rule in enumerate(rules):
         step_id = f"step_{i + 1}"
         rc = rule.rule_code
-        target_full = _normalize_table_name(rule.target_schema, rule.target_table)
+        # 分区交换：真正目标表是 exchange_source_table
+        real_target_detail = rule.exchange_source_table if (rule.rule_type == 9 and rule.exchange_source_table) else rule.target_table
+        target_full = _normalize_table_name(rule.target_schema, real_target_detail)
         parsed = parsed_map.get(rc)
         if not parsed:
+            # 分区交换步骤无SQL，也需要记录
+            if rule.rule_type == 9:
+                step_entry = {
+                    "step_id": step_id,
+                    "rule_code": rc,
+                    "target_table": target_full,
+                    "write_mode": "EXCHANGE PARTITION",
+                    "joins": [],
+                    "where_clause": "",
+                    "group_by": [],
+                    "having_clause": "",
+                    "ctes": [],
+                    "raw_sql": "",
+                }
+                steps_detail.append(step_entry)
             continue
 
         # 写入模式
         dm = rule.delete_mode
-        if dm == "1":
+        if rule.rule_type == 9:
+            write_mode = "EXCHANGE PARTITION"
+        elif dm == "1":
             write_mode = "TRUNCATE + INSERT"
         elif dm == "0":
             write_mode = "APPEND"

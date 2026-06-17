@@ -179,3 +179,34 @@ class TestEndToEnd:
         closes = static.count("</div>")
         assert opens == closes, \
             f"静态 HTML div 标签不平衡 ({opens} 开 vs {closes} 闭)，会导致布局层级错误"
+
+    def test_last_topology_node_is_target(self, tmp_output):
+        """回归: 数据流图拓扑序的最后一个节点必须是目标表，不是步骤。"""
+        xlsx = self._make_xlsx("case_23_exchange_partition", tmp_output)
+        knowledge, results = run_full_analysis(xlsx, tmp_output)
+        html = (Path(tmp_output) / "asset_report.html").read_text()
+        import re, json
+        m = re.search(r'const REPORT_DATA = ({.*?});\s', html, re.DOTALL)
+        data = json.loads(m.group(1))
+        lineage = data.get("lineage", {})
+        assert isinstance(lineage, dict), "lineage 应为 dict"
+        nodes = lineage.get("nodes", [])
+        assert len(nodes) > 0, "无节点"
+        max_layer = max(n["layer"] for n in nodes)
+        last_nodes = [n for n in nodes if n["layer"] == max_layer]
+        for n in last_nodes:
+            assert n["type"] == "target", \
+                f"最后一层(layer={max_layer})应为目标表，实际有 {n['type']}: {n['name']}"
+
+    def test_exchange_partition_data_flow(self, tmp_output):
+        """回归: 分区交换步骤在 data_flow 里有正确的目标表和步骤详情。"""
+        xlsx = self._make_xlsx("case_23_exchange_partition", tmp_output)
+        knowledge, results = run_full_analysis(xlsx, tmp_output)
+        steps = knowledge["data_flow"]["steps"]
+        # step_2 是交换分区，target 应该是 dwl_real_f
+        exchange_step = next(s for s in steps if "exchange" in s.get("write_mode", "").lower() or s["step_id"] == "step_2")
+        assert "dwl_real_f" in exchange_step["target_table"].lower(), \
+            f"交换分区目标表应为 dwl_real_f，实际 {exchange_step['target_table']}"
+        # dwl_real_f 应该出现在 tables 里
+        table_names = [t["name"].lower() for t in knowledge["data_flow"]["tables"]]
+        assert "dwl_real_f" in table_names, f"dwl_real_f 应在 tables 里，实际 {table_names}"
