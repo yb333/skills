@@ -2408,36 +2408,38 @@ function drawChainLinks(treeId, layerCount, fieldName) {
     return null;
   }
 
-  // 用 data_deps 画线（同场景或公共步骤才连）
-  function shouldConnect(scenario1, scenario2) {
-    if (!scenario1 || scenario1 === '公共步骤' || scenario1 === '默认') return true;
-    if (!scenario2 || scenario2 === '公共步骤' || scenario2 === '默认') return true;
-    return scenario1 === scenario2;
+  // 按 seq 分层连接（恢复场景过滤方案，修复端点方向）
+  function shouldConnect(sc1, sc2) {
+    if (!sc1 || sc1 === '公共步骤' || sc1 === '默认') return true;
+    if (!sc2 || sc2 === '公共步骤' || sc2 === '默认') return true;
+    return sc1 === sc2;
   }
 
-  for (var di = 0; di < deps.length; di++) {
-    var dep = deps[di];
-    if (!fieldStepIds[dep.from] || !fieldStepIds[dep.to]) continue;
+  for (var li = 0; li < layerCount - 1; li++) {
+    var upperLayer = document.getElementById(treeId + '_L' + li);
+    var lowerLayer = document.getElementById(treeId + '_L' + (li + 1));
+    if (!upperLayer || !lowerLayer) continue;
 
-    // 场景过滤：跨场景不连线（避免X交叉）
-    var fromChain = fieldChain.chains.find(function(c) { return c.step_id === dep.from; });
-    var toChain = fieldChain.chains.find(function(c) { return c.step_id === dep.to; });
-    if (fromChain && toChain && !shouldConnect(fromChain.scenario || '', toChain.scenario || '')) continue;
+    var upperNodes = upperLayer.querySelectorAll('.chain-node-wrapper');
+    var lowerNodes = lowerLayer.querySelectorAll('.chain-node-wrapper');
 
-    var fromDom = findDomByStep(dep.from);
-    var toDom = findDomByStep(dep.to);
-    if (!fromDom || !toDom) continue;
-
-    // dep.from 是上游(seq小,渲染在下面), dep.to 是下游(seq大,渲染在上面)
-    // 连线端点必须在两个卡片之间：下卡片顶部 → 上卡片底部
-    var lowerRect = fromDom.getBoundingClientRect();  // 下游在下面
-    var upperRect = toDom.getBoundingClientRect();    // 上游在上面
-    var x1 = lowerRect.left + lowerRect.width/2 - treeRect.left;
-    var y1 = lowerRect.top - treeRect.top;        // 下卡片顶部
-    var x2 = upperRect.left + upperRect.width/2 - treeRect.left;
-    var y2 = upperRect.bottom - treeRect.top;      // 上卡片底部
-    var midY = (y1 + y2) / 2;
-    paths += '<path d="M ' + x1 + ' ' + y1 + ' L ' + x1 + ' ' + midY + ' L ' + x2 + ' ' + midY + ' L ' + x2 + ' ' + y2 + '" stroke="' + lineColor + '" stroke-width="1.5" fill="none" opacity="0.6" />';
+    for (var ui = 0; ui < upperNodes.length; ui++) {
+      var uScenario = upperNodes[ui].getAttribute('data-scenario') || '';
+      var uRect = upperNodes[ui].getBoundingClientRect();
+      for (var li2 = 0; li2 < lowerNodes.length; li2++) {
+        var lScenario = lowerNodes[li2].getAttribute('data-scenario') || '';
+        if (shouldConnect(uScenario, lScenario)) {
+          var lRect = lowerNodes[li2].getBoundingClientRect();
+          // 上卡片底部 → 下卡片顶部（端点在卡片之间）
+          var x1 = uRect.left + uRect.width/2 - treeRect.left;
+          var y1 = uRect.bottom - treeRect.top;
+          var x2 = lRect.left + lRect.width/2 - treeRect.left;
+          var y2 = lRect.top - treeRect.top;
+          var midY = (y1 + y2) / 2;
+          paths += '<path d="M ' + x1 + ' ' + y1 + ' L ' + x1 + ' ' + midY + ' L ' + x2 + ' ' + midY + ' L ' + x2 + ' ' + y2 + '" stroke="' + lineColor + '" stroke-width="1.5" fill="none" opacity="0.6" />';
+        }
+      }
+    }
   }
 
   svg.innerHTML = '<g>' + paths + '</g>';
