@@ -337,7 +337,9 @@ body {
 }
 
 .lineage-svg .node-rect.source      { fill: var(--node-source-fill); stroke: var(--node-source-stroke); }
-.lineage-svg .node-rect.primary-table { fill: var(--node-primary-fill); stroke: var(--node-primary-stroke); stroke-width: 2.5; }
+.lineage-svg .node-rect.primary-table { stroke-width: 2.5; }
+/* 主表不改填充色，保持各自类型颜色(source蓝/intermediate灰)，
+   只通过粗边框区分 */
 .lineage-svg .node-rect.intermediate { fill: var(--node-intermediate-fill); stroke: var(--node-intermediate-stroke); }
 .lineage-svg .node-rect.cte         { fill: var(--node-cte-fill); stroke: var(--node-cte-stroke); }
 .lineage-svg .node-rect.step        { fill: var(--node-step-fill); stroke: var(--node-step-stroke); }
