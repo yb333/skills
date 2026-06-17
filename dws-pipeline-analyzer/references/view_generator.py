@@ -263,6 +263,9 @@ def build_report_data(knowledge):
             "purpose": ai_step.get("purpose", ""),
             "logic": ai_step.get("logic", ""),
             "raw_sql": df_step.get("raw_sql", ""),
+            "join_usage": df_step.get("join_usage", []),
+            "where_usage": df_step.get("where_usage", []),
+            "groupby_usage": df_step.get("groupby_usage", []),
             "ctes": [
                 {
                     "name": c.get("name", ""),
@@ -498,6 +501,65 @@ def build_report_data(knowledge):
         "ai_insights": quality.get("ai_insights", []),
     }
 
+    # ── 字段使用汇总（字段名 → 跨步骤的关联/过滤/分组信息）──
+    field_usage_map = {}  # {field_lower: {join: [...], where: [...], groupby: [...]}}
+    for s in steps_out:
+        sid = s.get("step_id", "")
+        sname = s.get("rule_name", "") or sid
+        scenario = s.get("scenario_name", "")
+
+        for ju in s.get("join_usage", []):
+            fname = (ju.get("field") or "").lower()
+            if not fname:
+                continue
+            if fname not in field_usage_map:
+                field_usage_map[fname] = {"join": [], "where": [], "groupby": []}
+            field_usage_map[fname]["join"].append({
+                "step_id": sid, "step_name": sname, "scenario": scenario,
+                "join_type": ju.get("join_type", ""),
+                "on_condition": ju.get("on_condition", ""),
+                "tables": ju.get("tables", []),
+            })
+
+        for wu in s.get("where_usage", []):
+            fname = (wu.get("field") or "").lower()
+            if not fname:
+                continue
+            if fname not in field_usage_map:
+                field_usage_map[fname] = {"join": [], "where": [], "groupby": []}
+            field_usage_map[fname]["where"].append({
+                "step_id": sid, "step_name": sname, "scenario": scenario,
+                "condition": wu.get("condition", ""),
+            })
+
+        for gu in s.get("groupby_usage", []):
+            fname = (gu.get("field") or "").lower()
+            if not fname:
+                continue
+            if fname not in field_usage_map:
+                field_usage_map[fname] = {"join": [], "where": [], "groupby": []}
+            field_usage_map[fname]["groupby"].append({
+                "step_id": sid, "step_name": sname, "scenario": scenario,
+            })
+
+    # ── 辅助字段（出现在 usage 里但不在 fields_out 里的字段）──
+    write_field_names = set(f["target_field"].lower() for f in fields_out)
+    auxiliary_fields = []
+    for fname, usage in field_usage_map.items():
+        if fname not in write_field_names:
+            roles = []
+            if usage["join"]:
+                roles.append("关联键")
+            if usage["where"]:
+                roles.append("过滤")
+            if usage["groupby"]:
+                roles.append("分组")
+            auxiliary_fields.append({
+                "field": fname,
+                "roles": roles,
+                "usage": usage,
+            })
+
     return {
         "summary": summary,
         "lineage": lineage,
@@ -507,6 +569,8 @@ def build_report_data(knowledge):
         "field_chain_map": field_chain_map,
         "data_deps": data_deps,
         "field_details": field_details,
+        "field_usage_map": field_usage_map,
+        "auxiliary_fields": auxiliary_fields,
         "quality": quality_out,
     }
 

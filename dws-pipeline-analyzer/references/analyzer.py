@@ -2600,6 +2600,9 @@ def build_data_flow(
                 for c in parsed.ctes
             ],
             "raw_sql": parsed.raw_sql,
+            "join_usage": parsed.join_usage,
+            "where_usage": parsed.where_usage,
+            "groupby_usage": parsed.groupby_usage,
         }
         steps_detail.append(step_entry)
 

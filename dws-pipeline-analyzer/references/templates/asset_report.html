@@ -1286,10 +1286,16 @@ body {
       <div class="section-body">
         <input type="text" class="field-search-box" id="fieldSearch"
                placeholder="搜索字段名、来源表、加工类型...">
-        <div style="overflow:auto;max-height:600px;">
+        <div style="font-weight:600;font-size:13px;margin:8px 0 4px;color:var(--text-secondary);">写入目标表的字段</div>
+        <div style="overflow:auto;max-height:400px;">
           <table class="field-table" id="fieldMappingTable"></table>
         </div>
         <div class="no-results" id="fieldNoResults" style="display:none;">未找到匹配的字段</div>
+
+        <div style="font-weight:600;font-size:13px;margin:16px 0 4px;color:var(--text-secondary);">辅助字段（仅关联/过滤使用，不写入目标表）</div>
+        <div style="overflow:auto;max-height:300px;">
+          <table class="field-table" id="auxFieldsTable"></table>
+        </div>
       </div>
     </div>
   </div>
@@ -2021,6 +2027,44 @@ function renderFieldMapping() {
 
   html += '</tbody>';
   document.getElementById('fieldMappingTable').innerHTML = html;
+
+  // 辅助字段板块
+  var auxFields = REPORT_DATA.auxiliary_fields || [];
+  var auxContainer = document.getElementById('auxFieldsTable');
+  if (auxContainer) {
+    if (auxFields.length === 0) {
+      auxContainer.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:13px;">无辅助字段</div>';
+    } else {
+      var auxHtml = '<thead><tr>' +
+        '<th style="width:25%">字段名</th>' +
+        '<th style="width:30%">使用步骤</th>' +
+        '<th style="width:25%">角色</th>' +
+        '<th style="width:20%">详情</th>' +
+        '</tr></thead><tbody>';
+      auxFields.forEach(function(af) {
+        var steps = [];
+        var allUsage = af.usage;
+        var stepSet = {};
+        ['join', 'where', 'groupby'].forEach(function(cat) {
+          (allUsage[cat] || []).forEach(function(u) {
+            if (!stepSet[u.step_name]) { stepSet[u.step_name] = true; steps.push(u.step_name); }
+          });
+        });
+        var roleTags = af.roles.map(function(r) {
+          var c = r === '关联键' ? '#f97316' : (r === '过滤' ? '#3b82f6' : '#8b5cf6');
+          return '<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600;color:white;background:' + c + ';margin-right:4px;">' + r + '</span>';
+        }).join('');
+        auxHtml += '<tr data-field="' + escapeHtml(af.field) + '" onclick="openDetail(\'' + escapeHtml(af.field) + '\')" style="cursor:pointer;">';
+        auxHtml += '<td><span class="field-name">' + escapeHtml(af.field) + '</span></td>';
+        auxHtml += '<td style="font-size:12px;">' + escapeHtml(steps.join(', ')) + '</td>';
+        auxHtml += '<td>' + roleTags + '</td>';
+        auxHtml += '<td style="font-size:12px;color:var(--text-muted);">点击查看</td>';
+        auxHtml += '</tr>';
+      });
+      auxHtml += '</tbody>';
+      auxContainer.innerHTML = auxHtml;
+    }
+  }
 }
 
 function handleFieldSearch() {
@@ -2246,6 +2290,19 @@ function openDetail(fieldName, scenario) {
   if (detail.is_final_field === false) {
     html += '<span style="padding:3px 10px;border-radius:8px;font-size:12px;font-weight:600;color:#854d0e;background:#fef9c3;">中间过程字段</span>';
   }
+  // 角色标签（关联/分组/过滤）
+  var _usage = (REPORT_DATA.field_usage_map || {})[fieldName.toLowerCase()];
+  if (_usage) {
+    if (_usage.join && _usage.join.length > 0) {
+      html += '<span style="padding:3px 10px;border-radius:8px;font-size:12px;font-weight:600;color:white;background:#f97316;">关联键</span>';
+    }
+    if (_usage.groupby && _usage.groupby.length > 0) {
+      html += '<span style="padding:3px 10px;border-radius:8px;font-size:12px;font-weight:600;color:white;background:#8b5cf6;">分组</span>';
+    }
+    if (_usage.where && _usage.where.length > 0) {
+      html += '<span style="padding:3px 10px;border-radius:8px;font-size:12px;font-weight:600;color:white;background:#3b82f6;">过滤</span>';
+    }
+  }
   html += '</div>';
 
   // Meaning
@@ -2349,6 +2406,51 @@ function openDetail(fieldName, scenario) {
 
     // 渲染后画连线
     setTimeout(function() { drawChainLinks(treeId, seqOrder.length, fieldName); }, 0);
+  }
+
+  // 字段使用信息（关联/分组/过滤）
+  var usageMap = REPORT_DATA.field_usage_map || {};
+  var usage = usageMap[fieldName.toLowerCase()];
+
+  if (usage) {
+    // 关联使用
+    if (usage.join && usage.join.length > 0) {
+      html += '<div class="detail-section"><h4>关联使用</h4>';
+      usage.join.forEach(function(j) {
+        var scTag = j.scenario && j.scenario !== '默认' ? ' <span style="font-size:10px;color:var(--text-muted);">[' + escapeHtml(j.scenario) + ']</span>' : '';
+        html += '<div style="margin-bottom:10px;padding:8px;background:var(--bg-secondary);border-radius:6px;">';
+        html += '<div style="font-weight:600;font-size:12px;margin-bottom:4px;">' + escapeHtml(j.step_name) + scTag + ' — ' + escapeHtml(j.join_type) + '</div>';
+        html += '<div style="font-size:11px;font-family:monospace;color:var(--text-primary);background:var(--bg-card);padding:3px 6px;border-radius:4px;margin-bottom:4px;">' + escapeHtml(j.on_condition) + '</div>';
+        if (j.tables && j.tables.length > 0) {
+          j.tables.forEach(function(t) {
+            html += '<div style="font-size:11px;color:var(--text-secondary);">' + escapeHtml(t.alias) + ' → ' + escapeHtml(t.table) + '</div>';
+          });
+        }
+        html += '</div>';
+      });
+      html += '</div>';
+    }
+
+    // 分组
+    if (usage.groupby && usage.groupby.length > 0) {
+      html += '<div class="detail-section"><h4>分组</h4>';
+      usage.groupby.forEach(function(g) {
+        var scTag = g.scenario && g.scenario !== '默认' ? ' <span style="font-size:10px;color:var(--text-muted);">[' + escapeHtml(g.scenario) + ']</span>' : '';
+        html += '<div style="font-size:12px;margin-bottom:4px;">' + escapeHtml(g.step_name) + scTag + ': GROUP BY ' + escapeHtml(fieldName) + '</div>';
+      });
+      html += '</div>';
+    }
+
+    // 过滤条件
+    if (usage.where && usage.where.length > 0) {
+      html += '<div class="detail-section"><h4>过滤条件</h4>';
+      usage.where.forEach(function(w) {
+        var scTag = w.scenario && w.scenario !== '默认' ? ' <span style="font-size:10px;color:var(--text-muted);">[' + escapeHtml(w.scenario) + ']</span>' : '';
+        html += '<div style="font-size:12px;margin-bottom:4px;">' + escapeHtml(w.step_name) + scTag + '</div>';
+        html += '<div style="font-size:11px;font-family:monospace;color:var(--text-primary);background:var(--bg-secondary);padding:3px 6px;border-radius:4px;margin-bottom:6px;">' + escapeHtml(w.condition) + '</div>';
+      });
+      html += '</div>';
+    }
   }
 
   document.getElementById('detailBody').innerHTML = html;
