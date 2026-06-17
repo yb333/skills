@@ -2434,8 +2434,9 @@ function drawChainLinks(treeId, layerCount, fieldName) {
     var y1 = uRect.bottom - treeRect.top;
     var x2 = lRect.left + lRect.width/2 - treeRect.left;
     var y2 = lRect.top - treeRect.top;
-    var cy = (y1 + y2) / 2;
-    paths += '<path d="M ' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + cy + ', ' + x2 + ' ' + cy + ', ' + x2 + ' ' + y2 + '" stroke="' + lineColor + '" stroke-width="1.5" fill="none" opacity="0.7" />';
+    // 用正交折线（L形）确保不交叉，端点精确连接卡片
+    var midY = (y1 + y2) / 2;
+    paths += '<path d="M ' + x1 + ' ' + y1 + ' L ' + x1 + ' ' + midY + ' L ' + x2 + ' ' + midY + ' L ' + x2 + ' ' + y2 + '" stroke="' + lineColor + '" stroke-width="1.5" fill="none" opacity="0.6" />';
   }
 
   svg.innerHTML = '<g>' + paths + '</g>';

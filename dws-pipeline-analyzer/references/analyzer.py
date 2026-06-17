@@ -1616,15 +1616,14 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
         # SQL 中解析出的源表（主查询的 FROM/JOIN，不含 CTE/子查询内部）
         parsed = parsed_map.get(rule.rule_code)
         sql_source_tables = []
-        all_sql_tables = []  # 含子查询内表（用于自引用检测）
-        if parsed and parsed.raw_sql:
-            # 主查询源表（同表名去重，自连接不重复计）
-            for j in parsed.source_tables:
-                if j.source_table not in sql_source_tables:
-                    sql_source_tables.append(j.source_table)
-            # 全树扫描所有表（含子查询），用于自引用检测
-            # 限定在 SELECT 子树内，避免把 CREATE VIEW 的定义表名误判为引用
-            # 对 UNION/INTERSECT/EXCEPT，扫描所有分支
+        all_sql_tables = []  # 全树扫描所有表（含子查询），用于自引用检测
+        for j in parsed.source_tables:
+            # 过滤子查询假名（不是物理表）
+            if j.source_table.startswith("(subquery:"):
+                continue
+            if j.source_table not in sql_source_tables:
+                sql_source_tables.append(j.source_table)
+            # 全树扫描（在循环外初始化，循环内只追加）
             try:
                 clean = _strip_dws_clauses(parsed.raw_sql)
                 clean = _replace_placeholders(clean)
