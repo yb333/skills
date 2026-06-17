@@ -1286,15 +1286,25 @@ body {
       <div class="section-body">
         <input type="text" class="field-search-box" id="fieldSearch"
                placeholder="搜索字段名、来源表、加工类型...">
-        <div style="font-weight:600;font-size:13px;margin:8px 0 4px;color:var(--text-secondary);">写入目标表的字段</div>
+        <button class="collapsible-toggle open" id="writeFieldsToggle" style="width:100%;justify-content:flex-start;margin:8px 0 4px;">
+          <span class="toggle-arrow">&#9660;</span>
+          <span style="font-weight:600;font-size:13px;color:var(--text-secondary);">写入目标表的字段</span>
+        </button>
+        <div class="collapsible-body open" id="writeFieldsBody" style="max-height:none;">
         <div style="overflow:auto;max-height:400px;">
           <table class="field-table" id="fieldMappingTable"></table>
         </div>
         <div class="no-results" id="fieldNoResults" style="display:none;">未找到匹配的字段</div>
+        </div>
 
-        <div style="font-weight:600;font-size:13px;margin:16px 0 4px;color:var(--text-secondary);">辅助字段（仅关联/过滤使用，不写入目标表）</div>
+        <button class="collapsible-toggle open" id="auxFieldsToggle" style="width:100%;justify-content:flex-start;margin:16px 0 4px;">
+          <span class="toggle-arrow">&#9660;</span>
+          <span style="font-weight:600;font-size:13px;color:var(--text-secondary);">辅助字段（仅关联/过滤使用，不写入目标表）</span>
+        </button>
+        <div class="collapsible-body open" id="auxFieldsBody" style="max-height:none;">
         <div style="overflow:auto;max-height:300px;">
           <table class="field-table" id="auxFieldsTable"></table>
+        </div>
         </div>
       </div>
     </div>
@@ -2573,6 +2583,22 @@ document.getElementById('qualityToggle').addEventListener('click', function() {
 document.getElementById('fieldMappingToggle').addEventListener('click', function() {
   this.classList.toggle('open');
   document.getElementById('fieldMappingBody').classList.toggle('open');
+});
+
+// 写入字段板块折叠
+document.getElementById('writeFieldsToggle').addEventListener('click', function() {
+  this.classList.toggle('open');
+  document.getElementById('writeFieldsBody').classList.toggle('open');
+  var arrow = this.querySelector('.toggle-arrow');
+  arrow.innerHTML = this.classList.contains('open') ? '&#9660;' : '&#9654;';
+});
+
+// 辅助字段板块折叠
+document.getElementById('auxFieldsToggle').addEventListener('click', function() {
+  this.classList.toggle('open');
+  document.getElementById('auxFieldsBody').classList.toggle('open');
+  var arrow = this.querySelector('.toggle-arrow');
+  arrow.innerHTML = this.classList.contains('open') ? '&#9660;' : '&#9654;';
 });
 
 // Issue group toggle (inline function used by onclick)
