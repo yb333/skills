@@ -2064,6 +2064,7 @@ function renderQuality() {
       { label: '最大JOIN数', value: complexity.max_join_count },
       { label: '源表总数', value: complexity.total_source_tables },
       { label: 'CTE数', value: complexity.max_cte_count || 0 },
+      { label: '子查询', value: complexity.total_subquery_count || 0 },
       { label: 'CASE分支', value: complexity.total_case_when_branches || 0 }
     ];
     stats.forEach(function(st) {

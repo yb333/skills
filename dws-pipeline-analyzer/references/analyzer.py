@@ -845,13 +845,18 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
         main_expr = from_clause.this
         if isinstance(main_expr, exp.Table):
             table_name = ".".join(_clean_name(p.name) for p in main_expr.parts)
-            alias = _clean_name(main_expr.alias).lower() if main_expr.alias else ""
-            joins.append(ParsedJoin(
-                source_table=table_name,
-                alias=alias or table_name.split(".")[-1],
-                join_type="FROM",
-                join_condition="",
-            ))
+            # 过滤 CTE 名作为 FROM 表（CTE 内部表已追溯，不需要 CTE 节点）
+            short_name = table_name.split(".")[-1] if "." in table_name else table_name
+            if short_name.upper() in cte_names:
+                pass  # CTE 不加入 source_tables，但其内部表会通过 _extract_ctes 加入
+            else:
+                alias = _clean_name(main_expr.alias).lower() if main_expr.alias else ""
+                joins.append(ParsedJoin(
+                    source_table=table_name,
+                    alias=alias or table_name.split(".")[-1],
+                    join_type="FROM",
+                    join_condition="",
+                ))
         elif isinstance(main_expr, exp.Subquery):
             # FROM 子查询：记录子查询别名 + 递归提取内部表
             sub_alias = _clean_name(main_expr.alias).lower() if main_expr.alias else ""
@@ -2100,6 +2105,8 @@ def analyze_quality(
     complexity_metrics = {
         "max_join_count": 0,
         "max_cte_count": 0,
+        "max_subquery_count": 0,
+        "total_subquery_count": 0,
         "max_select_column_count": 0,
         "total_source_tables": 0,
         "total_case_when_branches": 0,
@@ -2139,6 +2146,11 @@ def analyze_quality(
             complexity_metrics["max_select_column_count"], select_count
         )
         complexity_metrics["total_case_when_branches"] += case_when_branches
+
+        # 子查询统计（FROM/JOIN 子查询）
+        subquery_count = sum(1 for j in parsed.source_tables if "subquery" in j.join_type.lower())
+        complexity_metrics["total_subquery_count"] = complexity_metrics.get("total_subquery_count", 0) + subquery_count
+        complexity_metrics["max_subquery_count"] = max(complexity_metrics.get("max_subquery_count", 0), subquery_count)
 
         # 来源表统计：含 CTE 内部表
         for j in parsed.source_tables:
