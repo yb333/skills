@@ -1754,9 +1754,8 @@ function initLineageHighlight() {
     }
     var nodeId = nodeEl.getAttribute('data-id');
     var nodeType = nodeEl.getAttribute('data-type');
-    if (nodeType === 'step') {
-      highlightStep(nodeId);
-    }
+    // 步骤和来源表都可以点击高亮
+    highlightStep(nodeId);
   });
 }
 
@@ -2070,16 +2069,28 @@ function renderFieldMapping() {
 function handleFieldSearch() {
   var query = document.getElementById('fieldSearch').value.trim().toLowerCase();
   var rows = document.querySelectorAll('#fieldMappingTable tbody tr');
+  var auxRows = document.querySelectorAll('#auxFieldsTable tbody tr');
   var noResults = document.getElementById('fieldNoResults');
   var anyVisible = false;
 
-  rows.forEach(function(row) {
+  // 支持空格分隔的多关键词联合搜索（AND 逻辑）
+  var keywords = query ? query.split(/\s+/).filter(function(k) { return k; }) : [];
+
+  function matchRow(row) {
     var text = row.textContent.toLowerCase();
-    var match = !query || text.indexOf(query) >= 0;
+    if (keywords.length === 0) {
+      row.style.display = '';
+      row.classList.remove('highlight');
+      return true;
+    }
+    var match = keywords.every(function(kw) { return text.indexOf(kw) >= 0; });
     row.style.display = match ? '' : 'none';
-    row.classList.toggle('highlight', !!match && !!query);
-    if (match) anyVisible = true;
-  });
+    row.classList.toggle('highlight', match);
+    return match;
+  }
+
+  rows.forEach(function(row) { if (matchRow(row)) anyVisible = true; });
+  auxRows.forEach(function(row) { if (matchRow(row)) anyVisible = true; });
 
   noResults.style.display = anyVisible ? 'none' : '';
 }
