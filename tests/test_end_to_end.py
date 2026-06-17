@@ -210,3 +210,19 @@ class TestEndToEnd:
         # dwl_real_f 应该出现在 tables 里
         table_names = [t["name"].lower() for t in knowledge["data_flow"]["tables"]]
         assert "dwl_real_f" in table_names, f"dwl_real_f 应在 tables 里，实际 {table_names}"
+
+    def test_table_case_dedup(self, tmp_output):
+        """回归: 表名大小写不一致时 data_flow.tables 不重复，
+        data_dependencies 不丢失。"""
+        xlsx = self._make_xlsx("case_25_table_case_dedup", tmp_output)
+        knowledge, results = run_full_analysis(xlsx, tmp_output)
+        tables = knowledge["data_flow"]["tables"]
+        # 按归一化名检查重复
+        seen = set()
+        for t in tables:
+            norm = f"{t['schema']}.{t['name']}".lower()
+            assert norm not in seen, f"表重复(大小写): {norm} 出现多次，tables={[t['name'] for t in tables]}"
+            seen.add(norm)
+        # 依赖不应为空（大小写不应导致 target_writers 匹配失败）
+        deps = knowledge["topology"]["data_dependencies"]
+        assert len(deps) >= 1, f"应有数据依赖(step_1→step_2)，实际 {len(deps)}"
