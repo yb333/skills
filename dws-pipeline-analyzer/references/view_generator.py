@@ -385,7 +385,7 @@ def build_report_data(knowledge):
 
         # 取链路中最重的加工类型
         chain_for_field = field_chain_map.get(fname_lower, {}).get("chains", [])
-        chain_priority = {"unknown": -1, "value": 0, "direct": 1, "expression": 2, "fallback": 3, "case_when": 4, "aggregate": 5, "pivot": 6, "window": 7}
+        chain_priority = {"unknown": -1, "direct": 0, "value": 1, "fallback": 2, "case_when": 3, "expression": 4, "aggregate": 5, "pivot": 6, "window": 7}
         best_tt = f.get("transform_type", "expression")
         for cc in chain_for_field:
             cc_tt = cc.get("transform_type", "expression")

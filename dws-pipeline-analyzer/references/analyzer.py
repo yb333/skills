@@ -338,6 +338,32 @@ def _normalize_table_name(schema: str, table: str) -> str:
     return t
 
 
+def _norm_table(name: str) -> str:
+    """表名归一化（统一小写，去空格）。所有表名比较都必须走这个函数。"""
+    if not name:
+        return ""
+    return name.strip().lower()
+
+
+def _table_match(name1: str, name2: str) -> bool:
+    """表名匹配（大小写不敏感）。所有表名比较都用这个函数，禁止直接 == 或 in。
+
+    支持:
+    - 完整名匹配: 'dws.tbl' == 'DWS.TBL' → True
+    - 短名匹配:   'dws.tbl' == 'TBL'     → True（右操作数是短名时）
+    """
+    n1 = _norm_table(name1)
+    n2 = _norm_table(name2)
+    if not n1 or not n2:
+        return False
+    if n1 == n2:
+        return True
+    # 短名匹配（去掉 schema 前缀比较）
+    n1_short = n1.split(".")[-1]
+    n2_short = n2.split(".")[-1]
+    return n1_short == n2_short
+
+
 def _infer_layer(schema: str, table: str) -> str:
     """推断数仓层级"""
     combined = f"{schema}.{table}".lower()
@@ -1573,51 +1599,49 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
         for seq, sids in sorted(schedule_groups.items())
     ]
 
-    # ── 索引：目标表 → 写入它的步骤（大写归一化，避免大小写不匹配）──
-    target_writers = {}  # table_full(UPPER) → [step_id, ...]
+    # ── 索引：目标表 → 写入它的步骤（统一 _norm_table 归一化）──
+    target_writers = {}  # {norm_table: [step_id, ...]}
     for s in steps:
-        target_writers.setdefault(s["target_table_full"].upper(), []).append(s["step_id"])
+        key = _norm_table(s["target_table_full"])
+        target_writers.setdefault(key, []).append(s["step_id"])
 
-    # ── 数据依赖图（SQL 交叉比对，大小写不敏感）──
+    # ── 数据依赖图（用 _table_match 比较，大小写不敏感）──
     data_dependencies = []
     for s in steps:
         # 交换分区步骤：依赖写入临时表的步骤
         if s.get("is_exchange") and s.get("exchange_temp_table"):
-            temp_table_upper = s["exchange_temp_table"].upper()
-            # 带 schema（全部大写匹配 target_writers 的 key）
-            temp_schema_upper = (s.get("target_schema") or "").upper()
-            temp_full = temp_schema_upper + "." + temp_table_upper if temp_schema_upper else temp_table_upper
-            for tbl_key in [temp_table_upper, temp_full]:
-                if tbl_key in target_writers:
-                    for writer_step in target_writers[tbl_key]:
+            temp_table = s["exchange_temp_table"]
+            for writer_key, writer_steps in target_writers.items():
+                if _table_match(temp_table, writer_key):
+                    for writer_step in writer_steps:
                         if writer_step != s["step_id"]:
                             data_dependencies.append({
                                 "from": writer_step,
                                 "to": s["step_id"],
                                 "type": "exchange",
-                                "intermediate_table": s.get("exchange_temp_table", ""),
+                                "intermediate_table": temp_table,
                             })
-            continue  # 交换分区不再走常规来源表匹配
+            continue
 
         for src_table in s["source_tables_from_sql"]:
-            src_upper = src_table.upper()
-            if src_upper in target_writers:
-                for writer_step in target_writers[src_upper]:
-                    if writer_step != s["step_id"]:
-                        data_dependencies.append({
-                            "from": writer_step,
-                            "to": s["step_id"],
-                            "type": "data_flow",
-                            "intermediate_table": src_table,
-                        })
+            for writer_key, writer_steps in target_writers.items():
+                if _table_match(src_table, writer_key):
+                    for writer_step in writer_steps:
+                        if writer_step != s["step_id"]:
+                            data_dependencies.append({
+                                "from": writer_step,
+                                "to": s["step_id"],
+                                "type": "data_flow",
+                                "intermediate_table": src_table,
+                            })
 
     # ── 自引用检测 ──
     self_references = []
     for s in steps:
-        target = s["target_table_full"].upper()
-        # 用 all_tables_from_sql（含子查询）检测自引用
-        all_tables = [t.upper() for t in s.get("all_tables_from_sql", s["source_tables_from_sql"])]
-        if target in all_tables:
+        target = s["target_table_full"]
+        all_tables = s.get("all_tables_from_sql", s["source_tables_from_sql"])
+        # 用 _table_match 检测自引用（大小写不敏感）
+        if any(_table_match(target, t) for t in all_tables):
             # 检测具体模式
             parsed = parsed_map.get(s["rule_code"])
             pattern = ""
@@ -1857,14 +1881,10 @@ def build_field_mappings(
 
             tf_data = tf_index.get(alias.lower())
 
-            field_entry = {
-                "target_field": alias,
-                "producing_step": step_id,
-                "rule_code": rc,
-                "in_target_fields": tf_data is not None,
-                "excel_source_field": tf_data.source_field if tf_data else None,
-                "transform_type": col.transform_type,
-                "lineage": [
+            # 构建 lineage
+            if col.source_fields:
+                # 有源字段引用（direct/aggregate/pivot 等）
+                field_lineage = [
                     {
                         "step": step_id,
                         "source_table": sf.get("alias", ""),
@@ -1877,7 +1897,30 @@ def build_field_mappings(
                         "cte_expression": sf.get("cte_expression", ""),
                     }
                     for sf in col.source_fields
-                ],
+                ]
+            else:
+                # 无源字段引用（value 类型如 'N' AS del_flag、CURRENT_TIMESTAMP）
+                # 用表达式本身作为内容，确保链路不为空
+                field_lineage = [{
+                    "step": step_id,
+                    "source_table": "",
+                    "source_field": alias,
+                    "transform": col.transform_type,
+                    "raw_sql": col.expression,
+                    "cte_name": "",
+                    "cte_transform_type": "",
+                    "cte_source_fields": [],
+                    "cte_expression": "",
+                }]
+
+            field_entry = {
+                "target_field": alias,
+                "producing_step": step_id,
+                "rule_code": rc,
+                "in_target_fields": tf_data is not None,
+                "excel_source_field": tf_data.source_field if tf_data else None,
+                "transform_type": col.transform_type,
+                "lineage": field_lineage,
                 "validation": {
                     "excel_vs_sql_match": tf_data is not None,
                 },
