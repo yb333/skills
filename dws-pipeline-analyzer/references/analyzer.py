@@ -1798,6 +1798,41 @@ def build_field_mappings(
         step_id = f"step_{i + 1}"
         rc = rule.rule_code
         parsed = parsed_map.get(rc)
+
+        # 分区交换步骤：从上游步骤（写入临时表的步骤）继承字段（全部直取）
+        if rule.rule_type == 9:
+            # 找写入临时表的上游步骤
+            temp_table = (rule.target_table or "").lower()
+            temp_full = _normalize_table_name(rule.target_schema, rule.target_table).lower()
+            upstream_fields = []
+            for j, prev_rule in enumerate(rules[:i]):
+                prev_target = _normalize_table_name(prev_rule.target_schema, prev_rule.target_table).lower()
+                if prev_target == temp_full or prev_target == temp_table:
+                    # 复制上游步骤的字段
+                    for f in all_fields:
+                        if f.get("producing_step") == f"step_{j + 1}":
+                            upstream_fields.append(dict(f))  # 浅拷贝
+
+            for uf in upstream_fields:
+                field_entry = {
+                    "target_field": uf["target_field"],
+                    "producing_step": step_id,
+                    "rule_code": rc,
+                    "in_target_fields": uf.get("in_target_fields", False),
+                    "excel_source_field": uf.get("excel_source_field"),
+                    "transform_type": "direct",  # 交换分区 = 直取
+                    "lineage": [{
+                        "step": step_id,
+                        "source_table": temp_table,
+                        "source_field": uf["target_field"],
+                        "transform": "direct",
+                        "raw_sql": f"EXCHANGE PARTITION (source: {temp_table})",
+                    }],
+                    "validation": {"excel_vs_sql_match": None},
+                }
+                all_fields.append(field_entry)
+            continue
+
         if not parsed:
             continue
 
