@@ -2315,15 +2315,18 @@ function openDetail(fieldName, scenario) {
       if (group.length > 1) {
         html += '<div id="' + layerId + '" style="display:flex;gap:48px;justify-content:center;margin-bottom:8px;">';
         group.forEach(function(c, ci) {
-          html += '<div class="chain-node-wrapper" data-layer="' + seqIdx + '" data-branch="' + ci + '" style="display:flex;flex-direction:column;align-items:center;">';
+          var cScenario = c.scenario || '';
+          html += '<div class="chain-node-wrapper" data-layer="' + seqIdx + '" data-branch="' + ci + '" data-scenario="' + escapeHtml(cScenario) + '" style="display:flex;flex-direction:column;align-items:center;">';
           html += renderChainNode(c);
           html += '</div>';
         });
         html += '</div>';
       } else {
         html += '<div id="' + layerId + '" style="display:flex;justify-content:center;margin-bottom:8px;">';
-        html += '<div class="chain-node-wrapper" data-layer="' + seqIdx + '" data-branch="0" style="display:flex;flex-direction:column;align-items:center;">';
-        html += renderChainNode(group[0]);
+        var c0 = group[0];
+        var c0Scenario = c0.scenario || '';
+        html += '<div class="chain-node-wrapper" data-layer="' + seqIdx + '" data-branch="0" data-scenario="' + escapeHtml(c0Scenario) + '" style="display:flex;flex-direction:column;align-items:center;">';
+        html += renderChainNode(c0);
         html += '</div>';
         html += '</div>';
       }
@@ -2347,7 +2350,7 @@ function closeDetail() {
   document.getElementById('detailOverlay').classList.remove('open');
 }
 
-// ── 链路树 SVG 连线 ──
+// ── 链路树 SVG 连线（同场景才连接，公共步骤连所有）──
 function drawChainLinks(treeId, layerCount) {
   var tree = document.getElementById(treeId);
   var svg = document.getElementById(treeId + '_svg');
@@ -2360,53 +2363,40 @@ function drawChainLinks(treeId, layerCount) {
   var lineColor = getComputedStyle(document.documentElement).getPropertyValue('--text-muted') || '#94a3b8';
   var paths = '';
 
+  function shouldConnect(scenario1, scenario2) {
+    // 公共步骤连所有，同场景才互联
+    if (!scenario1 || scenario1 === '公共步骤' || scenario1 === '默认') return true;
+    if (!scenario2 || scenario2 === '公共步骤' || scenario2 === '默认') return true;
+    return scenario1 === scenario2;
+  }
+
+  function drawLink(uRect, lRect) {
+    var x1 = uRect.left + uRect.width/2 - treeRect.left;
+    var y1 = uRect.bottom - treeRect.top;
+    var x2 = lRect.left + lRect.width/2 - treeRect.left;
+    var y2 = lRect.top - treeRect.top;
+    var cy = (y1 + y2) / 2;
+    return '<path d="M ' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + cy + ', ' + x2 + ' ' + cy + ', ' + x2 + ' ' + y2 + '" stroke="' + lineColor + '" stroke-width="1.5" fill="none" opacity="0.7" />';
+  }
+
   for (var li = 0; li < layerCount - 1; li++) {
     var upperLayer = document.getElementById(treeId + '_L' + li);
     var lowerLayer = document.getElementById(treeId + '_L' + (li + 1));
     if (!upperLayer || !lowerLayer) continue;
 
-    // 上层所有节点（底部中心）
     var upperNodes = upperLayer.querySelectorAll('.chain-node-wrapper');
     var lowerNodes = lowerLayer.querySelectorAll('.chain-node-wrapper');
 
-    if (upperNodes.length === 1 && lowerNodes.length === 1) {
-      // 单对单：简单贝塞尔
-      var u = upperNodes[0].getBoundingClientRect();
-      var l = lowerNodes[0].getBoundingClientRect();
-      var x1 = u.left + u.width/2 - treeRect.left;
-      var y1 = u.bottom - treeRect.top;
-      var x2 = l.left + l.width/2 - treeRect.left;
-      var y2 = l.top - treeRect.top;
-      var cy = (y1 + y2) / 2;
-      paths += '<path d="M ' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + cy + ', ' + x2 + ' ' + cy + ', ' + x2 + ' ' + y2 + '" stroke="' + lineColor + '" stroke-width="2" fill="none" />';
+    // 按场景连接（只连同场景或公共步骤）
+    for (var ui = 0; ui < upperNodes.length; ui++) {
+      var uScenario = upperNodes[ui].getAttribute('data-scenario') || '';
+      var uRect = upperNodes[ui].getBoundingClientRect();
 
-    } else if (upperNodes.length >= 1 && lowerNodes.length > 1) {
-      // 单对多：分叉（从上层每个节点的底部中心连到下层各节点的顶部中心）
-      for (var ui = 0; ui < upperNodes.length; ui++) {
-        var uRect = upperNodes[ui].getBoundingClientRect();
-        var ux = uRect.left + uRect.width/2 - treeRect.left;
-        var uy = uRect.bottom - treeRect.top;
-
-        for (var li2 = 0; li2 < lowerNodes.length; li2++) {
-          var lRect = lowerNodes[li2].getBoundingClientRect();
-          var lx = lRect.left + lRect.width/2 - treeRect.left;
-          var ly = lRect.top - treeRect.top;
-          var cy2 = (uy + ly) / 2;
-          paths += '<path d="M ' + ux + ' ' + uy + ' C ' + ux + ' ' + cy2 + ', ' + lx + ' ' + cy2 + ', ' + lx + ' ' + ly + '" stroke="' + lineColor + '" stroke-width="1.5" fill="none" opacity="0.7" />';
+      for (var li2 = 0; li2 < lowerNodes.length; li2++) {
+        var lScenario = lowerNodes[li2].getAttribute('data-scenario') || '';
+        if (shouldConnect(uScenario, lScenario)) {
+          paths += drawLink(uRect, lowerNodes[li2].getBoundingClientRect());
         }
-      }
-
-    } else if (upperNodes.length > 1 && lowerNodes.length === 1) {
-      // 多对单：汇聚
-      var lNode = lowerNodes[0].getBoundingClientRect();
-      var lx = lNode.left + lNode.width/2 - treeRect.left;
-      var ly = lNode.top - treeRect.top;
-      for (var ui2 = 0; ui2 < upperNodes.length; ui2++) {
-        var uRect2 = upperNodes[ui2].getBoundingClientRect();
-        var ux2 = uRect2.left + uRect2.width/2 - treeRect.left;
-        var uy2 = uRect2.bottom - treeRect.top;
-        var cy3 = (uy2 + ly) / 2;
-        paths += '<path d="M ' + ux2 + ' ' + uy2 + ' C ' + ux2 + ' ' + cy3 + ', ' + lx + ' ' + cy3 + ', ' + lx + ' ' + ly + '" stroke="' + lineColor + '" stroke-width="1.5" fill="none" opacity="0.7" />';
       }
     }
   }
