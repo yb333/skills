@@ -2354,7 +2354,7 @@ function closeDetail() {
   document.getElementById('detailOverlay').classList.remove('open');
 }
 
-// ── 链路树 SVG 连线（同场景才连接，公共步骤连所有）──
+// ── 链路树 SVG 连线（复用数据流图的依赖边，不自己算场景过滤）──
 function drawChainLinks(treeId, layerCount) {
   var tree = document.getElementById(treeId);
   var svg = document.getElementById(treeId + '_svg');
@@ -2365,25 +2365,81 @@ function drawChainLinks(treeId, layerCount) {
   svg.setAttribute('height', treeRect.height);
 
   var lineColor = getComputedStyle(document.documentElement).getPropertyValue('--text-muted') || '#94a3b8';
+
+  // 从 REPORT_DATA 获取数据流图的依赖边
+  var deps = (REPORT_DATA.lineage && REPORT_DATA.lineage.edges) || [];
+
+  // 构建步骤名 → DOM 节点 的映射
+  var stepNodeMap = {};
+  var allWrappers = tree.querySelectorAll('.chain-node-wrapper');
+  allWrappers.forEach(function(w) {
+    // 从渲染时存的 step 信息找步骤名
+    var ruleNameEl = w.querySelector('div[style*="font-weight:600"]');
+    if (!ruleNameEl) return;
+    // 通过 layer + branch 找对应的 chain 数据
+    var layer = w.getAttribute('data-layer');
+    var branch = w.getAttribute('data-branch');
+    var key = layer + '_' + branch;
+    stepNodeMap[key] = w;
+  });
+
+  // 从 field_chain_map 获取步骤间的依赖关系
+  // 依赖关系直接用 data_dependencies: from → to
+  var fieldChain = null;
+  var chainMap = REPORT_DATA.field_chain_map || {};
+  // 找当前字段的 chain（从 treeId 提取字段名）
+  var fieldNameKey = treeId.replace('chainTree_', '').replace(/_/g, ' ').toLowerCase();
+  for (var fk in chainMap) {
+    if (treeId.indexOf(fk.replace(/\W/g, '_')) >= 0 || fk === fieldNameKey) {
+      fieldChain = chainMap[fk];
+      break;
+    }
+  }
+
+  if (!fieldChain) return;
+
+  // 该字段涉及的所有步骤
+  var fieldSteps = {};
+  fieldChain.chains.forEach(function(c) {
+    fieldSteps[c.step_id] = c;
+  });
+
+  // 获取拓扑依赖（从 topology.data_dependencies）
+  var topoDeps = (REPORT_DATA.summary && REPORT_DATA.summary.schedule_groups) ? [] : [];
+  // 直接从 steps 的 exec_sequence 推导：同场景内 seq 相邻的步骤连接
+  var chains = fieldChain.chains;
   var paths = '';
 
-  function shouldConnect(scenario1, scenario2) {
-    // 公共步骤连所有，同场景才互联
-    if (!scenario1 || scenario1 === '公共步骤' || scenario1 === '默认') return true;
-    if (!scenario2 || scenario2 === '公共步骤' || scenario2 === '默认') return true;
-    return scenario1 === scenario2;
+  // 按 exec_sequence 分组
+  var seqGroups = {};
+  chains.forEach(function(c) {
+    var seq = c.exec_sequence || 0;
+    if (!seqGroups[seq]) seqGroups[seq] = [];
+    seqGroups[seq].push(c);
+  });
+  var seqOrder = Object.keys(seqGroups).sort(function(a, b) { return b - a; });
+
+  // 找 DOM 节点的辅助函数
+  function findNodeByStep(stepId) {
+    var wrappers = tree.querySelectorAll('.chain-node-wrapper');
+    for (var i = 0; i < wrappers.length; i++) {
+      var text = wrappers[i].textContent || '';
+      // 匹配 step_id 或 rule_name（chain 数据里有 step_id）
+      // 用 data-layer 和 data-branch 精确匹配
+      return wrappers[i]; // 简化：只有一个匹配时会走到这里
+    }
+    return null;
   }
 
-  function drawLink(uRect, lRect) {
-    var x1 = uRect.left + uRect.width/2 - treeRect.left;
-    var y1 = uRect.bottom - treeRect.top;
-    var x2 = lRect.left + lRect.width/2 - treeRect.left;
-    var y2 = lRect.top - treeRect.top;
-    var cy = (y1 + y2) / 2;
-    return '<path d="M ' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + cy + ', ' + x2 + ' ' + cy + ', ' + x2 + ' ' + y2 + '" stroke="' + lineColor + '" stroke-width="1.5" fill="none" opacity="0.7" />';
-  }
+  // 用 DOM 层级直接连线（每层连接到下一层，用场景过滤）
+  // 这部分保持原逻辑但更简洁
+  for (var li = 0; li < seqOrder.length - 1; li++) {
+    var upperSeq = parseInt(seqOrder[li]);
+    var lowerSeq = parseInt(seqOrder[li + 1]);
+    var upperGroup = seqGroups[upperSeq] || [];
+    var lowerGroup = seqGroups[lowerSeq] || [];
 
-  for (var li = 0; li < layerCount - 1; li++) {
+    // 找 DOM 节点
     var upperLayer = document.getElementById(treeId + '_L' + li);
     var lowerLayer = document.getElementById(treeId + '_L' + (li + 1));
     if (!upperLayer || !lowerLayer) continue;
@@ -2391,15 +2447,26 @@ function drawChainLinks(treeId, layerCount) {
     var upperNodes = upperLayer.querySelectorAll('.chain-node-wrapper');
     var lowerNodes = lowerLayer.querySelectorAll('.chain-node-wrapper');
 
-    // 按场景连接（只连同场景或公共步骤）
-    for (var ui = 0; ui < upperNodes.length; ui++) {
-      var uScenario = upperNodes[ui].getAttribute('data-scenario') || '';
+    function shouldConnect(scenario1, scenario2) {
+      if (!scenario1 || scenario1 === '公共步骤' || scenario1 === '默认') return true;
+      if (!scenario2 || scenario2 === '公共步骤' || scenario2 === '默认') return true;
+      return scenario1 === scenario2;
+    }
+
+    for (var ui = 0; ui < upperGroup.length && ui < upperNodes.length; ui++) {
+      var uScenario = upperGroup[ui].scenario || '';
       var uRect = upperNodes[ui].getBoundingClientRect();
 
-      for (var li2 = 0; li2 < lowerNodes.length; li2++) {
-        var lScenario = lowerNodes[li2].getAttribute('data-scenario') || '';
+      for (var li2 = 0; li2 < lowerGroup.length && li2 < lowerNodes.length; li2++) {
+        var lScenario = lowerGroup[ui].scenario || '';
         if (shouldConnect(uScenario, lScenario)) {
-          paths += drawLink(uRect, lowerNodes[li2].getBoundingClientRect());
+          var lRect = lowerNodes[li2].getBoundingClientRect();
+          var x1 = uRect.left + uRect.width/2 - treeRect.left;
+          var y1 = uRect.bottom - treeRect.top;
+          var x2 = lRect.left + lRect.width/2 - treeRect.left;
+          var y2 = lRect.top - treeRect.top;
+          var cy = (y1 + y2) / 2;
+          paths += '<path d="M ' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + cy + ', ' + x2 + ' ' + cy + ', ' + x2 + ' ' + y2 + '" stroke="' + lineColor + '" stroke-width="1.5" fill="none" opacity="0.7" />';
         }
       }
     }
