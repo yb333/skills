@@ -250,6 +250,9 @@ class TestEndToEnd:
         for n in last_nodes:
             assert n["type"] == "target", \
                 f"最后一层应为目标表，实际有 {n['type']}: {n['name']}"
+        # 边不应为空（大小写不匹配导致边丢失的回归）
+        edges = lineage.get("edges", [])
+        assert len(edges) > 0, "数据流图边为空（大小写导致节点匹配失败）"
 
     def test_field_usage_in_html(self, tmp_output):
         """回归: HTML 详情面板含字段使用信息(关联/分组/过滤) + 辅助字段板块。"""

@@ -842,37 +842,47 @@ def _build_lineage_layout(topo, df, bl=None):
     # ── 3. 构建边 ──
     # 步骤 → 目标表/中间表
     step_to_table = {}  # {step_id: table_name}
+    # 构建 norm → node_name 映射（大小写不敏感查找）
+    norm_nodes = {}
+    for nid in nodes:
+        norm_nodes[_norm(nid)] = nid
+
     for s in steps_list:
         sid = s["step_id"]
         tf = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
-        if tf in nodes:
-            edges_list.append({"from": sid, "to": tf, "label": "", "type": "step_to_table"})
-            step_to_table[sid] = tf
+        tf_norm = _norm(tf)
+        if tf_norm in norm_nodes:
+            tf_actual = norm_nodes[tf_norm]
+            edges_list.append({"from": sid, "to": tf_actual, "label": "", "type": "step_to_table"})
+            step_to_table[sid] = tf_actual
 
     # 来源表 → 步骤
     table_to_steps = {}  # {table: [step_ids]}
     for s in steps_list:
         sid = s["step_id"]
         for src in s.get("source_tables_from_sql", []):
-            if src in nodes and src != sid:
-                edges_list.append({"from": src, "to": sid, "label": "", "type": "source_to_step"})
-                table_to_steps.setdefault(src, []).append(sid)
+            src_norm = _norm(src)
+            if src_norm in norm_nodes and src != sid:
+                src_actual = norm_nodes[src_norm]
+                edges_list.append({"from": src_actual, "to": sid, "label": "", "type": "source_to_step"})
+                table_to_steps.setdefault(src_actual, []).append(sid)
         # CTE 内部源表 → 步骤
         df_step = next((d for d in data_flow_steps if d.get("step_id") == sid), {})
         for cte in df_step.get("ctes", []):
             for st in cte.get("source_tables", []):
                 tname = st.get("name", "")
-                if tname in nodes and tname != sid:
-                    edges_list.append({"from": tname, "to": sid, "label": f"CTE:{cte.get('name','')}", "type": "source_to_step"})
-                    table_to_steps.setdefault(tname, []).append(sid)
+                tname_norm = _norm(tname)
+                if tname_norm in norm_nodes and tname != sid:
+                    tname_actual = norm_nodes[tname_norm]
+                    edges_list.append({"from": tname_actual, "to": sid, "label": f"CTE:{cte.get('name','')}", "type": "source_to_step"})
+                    table_to_steps.setdefault(tname_actual, []).append(sid)
 
     # 数据依赖（中间表 → 后续步骤）
     for dep in data_deps:
         from_step = dep.get("from", "")
         to_step = dep.get("to", "")
-        # from_step 写的表 → to_step 读
         intermediate_table = step_to_table.get(from_step, "")
-        if intermediate_table and intermediate_table in nodes and to_step in nodes:
+        if intermediate_table and _norm(intermediate_table) in norm_nodes and to_step in nodes:
             edges_list.append({"from": intermediate_table, "to": to_step, "label": "", "type": "dep"})
 
     # ── 4. 按 exec_sequence 分列计算坐标 ──
