@@ -273,6 +273,7 @@ def build_report_data(knowledge):
             "join_usage": df_step.get("join_usage", []),
             "where_usage": df_step.get("where_usage", []),
             "groupby_usage": df_step.get("groupby_usage", []),
+            "join_paths": df_step.get("join_paths", {}),
             "ctes": [
                 {
                     "name": c.get("name", ""),
@@ -347,12 +348,15 @@ def build_report_data(knowledge):
 
     step_info_map = {}
     for s in steps_list:
-        step_info_map[s["step_id"]] = {
+        sid = s["step_id"]
+        df_step = next((d for d in data_flow_steps if d.get("step_id") == sid), {})
+        step_info_map[sid] = {
             "target_table": s.get("target_table", ""),
             "scenario_name": s.get("scenario_name", "默认"),
             "rule_name": s.get("rule_name", ""),
             "rule_code": s.get("rule_code", ""),
             "exec_sequence": s.get("exec_sequence", 0),
+            "join_paths": df_step.get("join_paths", {}),
         }
 
     # ── field_chain_map (字段 → 完整链路树，供详情面板用) ──
@@ -381,6 +385,7 @@ def build_report_data(knowledge):
             "transform_type": f.get("transform_type", "expression"),
             "sources": sources,
             "raw_sql": raw_sql,
+            "join_paths": si.get("join_paths", {}),
         })
 
     # ── fields (全局去重，不按场景分组；取链路中最重加工类型) ──
@@ -473,6 +478,7 @@ def build_report_data(knowledge):
             "transform_type": f.get("transform_type", "expression"),
             "sources": sources,
             "raw_sql": raw_sql,
+            "join_paths": si.get("join_paths", {}),
         })
 
     # ── field_details (CTE 穿透血缘链) ──

@@ -2420,11 +2420,65 @@ function openDetail(fieldName, scenario) {
       // 来源字段
       if (c.sources && c.sources.length > 0) {
         c.sources.forEach(function(src) {
+          var srcAlias = (src.alias || '').toLowerCase();
+          var srcTable = src.table || '';
+          var isSubquery = srcTable.startsWith('(subquery:') || srcTable.startsWith('(子查询');
+
           s += '<div style="font-size:13px;color:var(--text-secondary);line-height:1.7;">';
           s += '← <code style="color:var(--accent);font-size:13px;">' + escapeHtml(src.field || '?') + '</code>';
-          s += ' from ' + escapeHtml(src.table || '');
+          if (isSubquery) {
+            s += ' from <span style="color:#8b5cf6;">📦子查询</span>';
+          } else {
+            s += ' from ' + escapeHtml(srcTable);
+          }
           s += ' <span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:11px;font-weight:600;color:white;background:' + ttColor + ';vertical-align:middle;">' + ttLabel + '</span>';
           s += '</div>';
+
+          // 桥接路径（从 join_paths 查找该别名的关联链）
+          var joinPaths = c.join_paths || {};
+          var pathInfo = joinPaths[srcAlias];
+          if (pathInfo && pathInfo.path && pathInfo.path.length > 0) {
+            s += '<details style="margin-top:4px;margin-left:16px;">';
+            s += '<summary style="cursor:pointer;font-size:12px;color:var(--text-muted);">关联路径 (' + pathInfo.path.length + '层桥接)</summary>';
+            s += '<div style="margin-top:4px;">';
+            pathInfo.path.forEach(function(step, pi) {
+              var stepAlias = step.to_alias || '';
+              var stepTable = step.to_table || '';
+              var stepIsSub = stepTable.startsWith('(subquery:') || stepTable.startsWith('(子查询');
+              var onCond = step.on_condition || '';
+              var jt = step.join_type || '';
+              s += '<div style="font-size:11px;color:var(--text-secondary);margin-bottom:2px;padding-left:' + (pi * 12) + 'px;border-left:2px solid var(--border);padding-left:8px;">';
+              s += '<span style="font-weight:600;">' + escapeHtml(jt) + '</span> ';
+              if (stepIsSub) {
+                s += '📦子查询(' + escapeHtml(stepAlias) + ')';
+              } else {
+                s += escapeHtml(stepTable) + ' (' + escapeHtml(stepAlias) + ')';
+              }
+              if (onCond) {
+                s += '<div style="font-family:monospace;font-size:10px;color:var(--text-muted);margin-top:1px;">ON ' + escapeHtml(onCond) + '</div>';
+              }
+              s += '</div>';
+            });
+            s += '</div>';
+            s += '</details>';
+          }
+
+          // 子查询折叠
+          if (isSubquery && pathInfo && (pathInfo.subquery_sql || (pathInfo.subquery_tables && pathInfo.subquery_tables.length > 0))) {
+            s += '<details style="margin-top:4px;margin-left:16px;">';
+            var tblCount = pathInfo.subquery_tables ? pathInfo.subquery_tables.length : 0;
+            s += '<summary style="cursor:pointer;font-size:12px;color:#8b5cf6;">📦子查询 (' + tblCount + '张表)</summary>';
+            if (pathInfo.subquery_tables && pathInfo.subquery_tables.length > 0) {
+              var tblNames = pathInfo.subquery_tables.map(function(t) { return t[0]; });
+              s += '<div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">内部表: ' + escapeHtml(tblNames.join(', ')) + '</div>';
+            }
+            if (pathInfo.subquery_sql) {
+              var sqlPreview = pathInfo.subquery_sql;
+              if (sqlPreview.length > 300) sqlPreview = sqlPreview.substring(0, 300) + '...';
+              s += '<pre style="font-size:10px;font-family:monospace;background:var(--bg-card);padding:5px 8px;border-radius:4px;margin-top:4px;white-space:pre-wrap;word-break:break-all;max-height:150px;overflow:auto;">' + escapeHtml(sqlPreview) + '</pre>';
+            }
+            s += '</details>';
+          }
         });
       } else if (tt === 'direct' && c.sources.length === 0) {
         s += '<div style="font-size:10px;color:var(--text-muted);">无来源</div>';

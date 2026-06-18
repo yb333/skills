@@ -2779,6 +2779,7 @@ def build_data_flow(
             "join_usage": parsed.join_usage,
             "where_usage": parsed.where_usage,
             "groupby_usage": parsed.groupby_usage,
+            "join_paths": parsed.join_paths,
         }
         steps_detail.append(step_entry)
 
