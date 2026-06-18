@@ -2551,52 +2551,73 @@ function openDetail(fieldName, scenario) {
       return code ? ' <span style="color:var(--text-muted);font-weight:400;font-size:12px;">(' + escapeHtml(code) + ')</span>' : '';
     }
 
-    // 关联使用
-    if (usage.join && usage.join.length > 0) {
-      html += '<div class="detail-section"><h4>关联使用</h4>';
-      usage.join.forEach(function(j) {
-        var scTag = j.scenario && j.scenario !== '默认' ? ' <span style="font-size:10px;color:var(--text-muted);">[' + escapeHtml(j.scenario) + ']</span>' : '';
-        html += '<div style="margin-bottom:10px;padding:8px;background:var(--bg-secondary);border-radius:6px;">';
-        html += '<div style="font-weight:600;font-size:14px;margin-bottom:6px;">' + escapeHtml(j.step_name) + codeTag(j.step_name) + scTag + ' — ' + escapeHtml(j.join_type) + '</div>';
-        html += '<div style="font-size:13px;font-family:monospace;color:var(--text-primary);background:var(--bg-card);padding:5px 8px;border-radius:4px;margin-bottom:6px;">' + escapeHtml(j.on_condition) + '</div>';
-        if (j.tables && j.tables.length > 0) {
-          j.tables.forEach(function(t) {
-            html += '<div style="font-size:11px;color:var(--text-secondary);">' + escapeHtml(t.alias) + ' → ' + escapeHtml(t.table) + '</div>';
-          });
-        }
-        html += '</div>';
+    // 按步骤分组渲染（序号 + 交替背景色）
+    var stepColors = ['', 'var(--bg-secondary)'];
+
+    function renderUsageByStep(items, renderFunc, sectionTitle) {
+      if (!items || items.length === 0) return '';
+      var html2 = '<div class="detail-section"><h4>' + sectionTitle + '</h4>';
+      // 按 step_id 分组
+      var groups = {};
+      var groupOrder = [];
+      items.forEach(function(item) {
+        var key = item.step_id + '|' + (item.step_name || '');
+        if (!groups[key]) { groups[key] = []; groupOrder.push({key: key, item: item}); }
+        groups[key].push(item);
       });
-      html += '</div>';
+      groupOrder.forEach(function(g, gi) {
+        var bgColor = stepColors[gi % 2];
+        var items2 = groups[g.key];
+        var item0 = g.item;
+        var scTag = item0.scenario && item0.scenario !== '默认' ? ' <span style="font-size:10px;color:var(--text-muted);">[' + escapeHtml(item0.scenario) + ']</span>' : '';
+        html2 += '<div style="margin-bottom:8px;padding:8px 10px;background:' + bgColor + ';border-radius:6px;' + (bgColor ? '' : 'border:1px solid var(--border);') + '">';
+        html2 += '<div style="font-weight:600;font-size:14px;margin-bottom:6px;">' + escapeHtml(item0.step_name || item0.step_id) + codeTag(item0.step_name || item0.step_id) + scTag + '</div>';
+        items2.forEach(function(it, ii) {
+          var num = '①②③④⑤⑥⑦⑧⑨⑩'[ii] || (ii + 1) + '.';
+          html2 += renderFunc(it, num);
+        });
+        html2 += '</div>';
+      });
+      html2 += '</div>';
+      return html2;
     }
+
+    // 关联使用
+    html += renderUsageByStep(usage.join, function(j, num) {
+      var s = '<div style="margin-bottom:6px;">';
+      s += '<div style="font-size:12px;color:var(--text-muted);margin-bottom:2px;">' + num + ' ' + escapeHtml(j.join_type) + '</div>';
+      s += '<div style="font-size:13px;font-family:monospace;color:var(--text-primary);background:var(--bg-card);padding:5px 8px;border-radius:4px;margin-bottom:4px;">' + escapeHtml(j.on_condition) + '</div>';
+      if (j.tables && j.tables.length > 0) {
+        s += '<div style="font-size:11px;color:var(--text-secondary);">';
+        j.tables.forEach(function(t) {
+          var isSub = t.table.startsWith('(子查询') || t.table.startsWith('(subquery:');
+          s += '<span style="margin-right:8px;">' + escapeHtml(t.alias) + ' → ' + (isSub ? '<span style="color:#8b5cf6;">📦子查询</span>' : escapeHtml(t.table)) + '</span>';
+        });
+        s += '</div>';
+      }
+      s += '</div>';
+      return s;
+    }, '关联使用');
 
     // 分组
-    if (usage.groupby && usage.groupby.length > 0) {
-      html += '<div class="detail-section"><h4>分组</h4>';
-      usage.groupby.forEach(function(g) {
-        var scTag = g.scenario && g.scenario !== '默认' ? ' <span style="font-size:10px;color:var(--text-muted);">[' + escapeHtml(g.scenario) + ']</span>' : '';
-        html += '<div style="font-size:14px;margin-bottom:4px;">' + escapeHtml(g.step_name) + codeTag(g.step_name) + scTag + ': GROUP BY ' + escapeHtml(fieldName) + '</div>';
-      });
-      html += '</div>';
-    }
+    html += renderUsageByStep(usage.groupby, function(g, num) {
+      return '<div style="font-size:13px;margin-bottom:4px;color:var(--text-secondary);">' + num + ' GROUP BY ' + escapeHtml(fieldName) + '</div>';
+    }, '分组');
 
     // 过滤条件
-    if (usage.where && usage.where.length > 0) {
-      html += '<div class="detail-section"><h4>过滤条件</h4>';
-      usage.where.forEach(function(w) {
-        var scTag = w.scenario && w.scenario !== '默认' ? ' <span style="font-size:10px;color:var(--text-muted);">[' + escapeHtml(w.scenario) + ']</span>' : '';
-        html += '<div style="font-size:14px;margin-bottom:4px;">' + escapeHtml(w.step_name) + codeTag(w.step_name) + scTag + '</div>';
-        // 高亮 WHERE 条件里的字段名（安全实现：用正则全局替换，不会死循环）
-        var condHtml = escapeHtml(w.condition);
-        var fnEscaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        try {
-          condHtml = condHtml.replace(new RegExp(fnEscaped, 'gi'), function(m) {
-            return '<mark style="background:#fef08a;color:#854d0e;padding:1px 3px;border-radius:3px;font-weight:600;">' + m + '</mark>';
-          });
-        } catch(e) { /* 正则失败就用原始文本 */ }
-        html += '<div style="font-size:13px;font-family:monospace;color:var(--text-primary);background:var(--bg-secondary);padding:5px 8px;border-radius:4px;margin-bottom:8px;">' + condHtml + '</div>';
-      });
-      html += '</div>';
-    }
+    html += renderUsageByStep(usage.where, function(w, num) {
+      var condHtml = escapeHtml(w.condition);
+      var fnEscaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      try {
+        condHtml = condHtml.replace(new RegExp(fnEscaped, 'gi'), function(m) {
+          return '<mark style="background:#fef08a;color:#854d0e;padding:1px 3px;border-radius:3px;font-weight:600;">' + m + '</mark>';
+        });
+      } catch(e) {}
+      var s = '<div style="margin-bottom:6px;">';
+      s += '<div style="font-size:13px;font-family:monospace;color:var(--text-primary);background:var(--bg-card);padding:5px 8px;border-radius:4px;">' + condHtml + '</div>';
+      s += '</div>';
+      return s;
+    }, '过滤条件');
   }
 
   document.getElementById('detailBody').innerHTML = html;
