@@ -3386,9 +3386,14 @@ def main():
     # ── Step 7: 组装输出 ──
     print("Step 7: 组装 knowledge_draft.json...")
 
-    # 找目标表名（取第一个规则的目标表）
-    first_rule = rules[0]
-    target_name = first_rule.target_table or "unknown"
+    # 找最终目标表（最大 exec_sequence 的步骤目标表，考虑交换分区）
+    target_name = "unknown"
+    if rules:
+        max_seq_rule = max(rules, key=lambda r: r.exec_sequence)
+        if max_seq_rule.rule_type == 9 and max_seq_rule.exchange_source_table:
+            target_name = max_seq_rule.exchange_source_table
+        else:
+            target_name = max_seq_rule.target_table or "unknown"
 
     # 加工模式标签自动检测
     patterns = detect_patterns(parsed_map, topology)

@@ -1543,7 +1543,7 @@ function renderOverview() {
     { label: '来源表', value: s.source_count || complexity.total_source_tables || 0 },
     stepMetric,
     { label: '目标字段', value: s.field_count || (REPORT_DATA.schema_fields ? REPORT_DATA.schema_fields.length : 0) },
-    { label: 'CTE 数', value: cteCount }
+    { label: '加工步骤', value: REPORT_DATA.steps ? REPORT_DATA.steps.length : (s.rule_count || 0) }
   ];
 
   var metricsHtml = '';
