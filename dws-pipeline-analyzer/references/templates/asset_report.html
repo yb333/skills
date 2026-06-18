@@ -2023,16 +2023,17 @@ function renderFieldMapping() {
   (REPORT_DATA.schema_fields || []).forEach(function(sf) { schemaMap[sf.name.toLowerCase()] = sf; });
 
   var html = '<thead><tr>' +
-    '<th style="width:16%">目标字段</th>' +
+    '<th style="width:4%">#</th>' +
+    '<th style="width:15%">目标字段</th>' +
     '<th style="width:9%">类型</th>' +
-    '<th style="width:18%">业务含义</th>' +
-    '<th style="width:24%">最初来源</th>' +
-    '<th style="width:15%">角色</th>' +
+    '<th style="width:17%">业务含义</th>' +
+    '<th style="width:23%">最初来源</th>' +
+    '<th style="width:14%">角色</th>' +
     '<th style="width:10%">链路</th>' +
     '<th style="width:8%">步骤</th>' +
     '</tr></thead><tbody>';
 
-  fields.forEach(function(f) {
+  fields.forEach(function(f, fi) {
     var sf = schemaMap[f.target_field.toLowerCase()] || {};
     var originSources = f.origin_sources || f.sources || [];
     var srcText = '-';
@@ -2070,6 +2071,7 @@ function renderFieldMapping() {
     var stepCode = st ? (st.rule_code || st.step_id) : '-';
 
     html += '<tr data-field="' + escapeHtml(f.target_field) + '" onclick="openDetail(\'' + escapeHtml(f.target_field) + '\')" style="cursor:pointer;' + (f.is_final_field === false ? 'opacity:0.6;' : '') + '">';
+    html += '<td style="font-size:12px;color:var(--text-muted);">' + (fi + 1) + '</td>';
     var fieldBadge = f.is_final_field === false ? ' <span style="font-size:9px;padding:1px 5px;border-radius:4px;background:#fef9c3;color:#854d0e;vertical-align:middle;">中间过程</span>' : '';
     html += '<td><span class="field-name">' + escapeHtml(f.target_field) + '</span>' + fieldBadge + '</td>';
     html += '<td><span class="field-type">' + escapeHtml(sf.type || '-') + '</span></td>';
@@ -2095,11 +2097,12 @@ function renderFieldMapping() {
       auxContainer.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:13px;">无辅助字段</div>';
     } else {
       var auxHtml = '<thead><tr>' +
-        '<th style="width:30%">字段名</th>' +
-        '<th style="width:45%">使用步骤</th>' +
+        '<th style="width:5%">#</th>' +
+        '<th style="width:28%">字段名</th>' +
+        '<th style="width:42%">使用步骤</th>' +
         '<th style="width:25%">角色</th>' +
         '</tr></thead><tbody>';
-      auxFields.forEach(function(af) {
+      auxFields.forEach(function(af, ai) {
         var steps = [];
         var stepCodes = [];
         var allUsage = af.usage;
@@ -2121,6 +2124,7 @@ function renderFieldMapping() {
           return '<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600;color:white;background:' + c + ';margin-right:4px;">' + r + '</span>';
         }).join('');
         auxHtml += '<tr data-field="' + escapeHtml(af.field) + '" onclick="openDetail(\'' + escapeHtml(af.field) + '\')" style="cursor:pointer;">';
+        auxHtml += '<td style="font-size:12px;color:var(--text-muted);">' + (ai + 1) + '</td>';
         auxHtml += '<td><span class="field-name">' + escapeHtml(af.field) + '</span></td>';
         auxHtml += '<td style="font-size:12px;">' + escapeHtml(stepsText) + '</td>';
         auxHtml += '<td>' + roleTags + '</td>';
