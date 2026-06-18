@@ -1760,7 +1760,7 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
             # 过滤子查询内部表（FROM_SUBQUERY / JOIN_SUBQUERY_INNER）
             if "SUBQUERY" in j.join_type.upper() and j.join_type != "FROM":
                 continue
-            if j.source_table not in sql_source_tables:
+            if _norm_table(j.source_table) not in [_norm_table(t) for t in sql_source_tables]:
                 sql_source_tables.append(j.source_table)
             # 全树扫描（在循环外初始化，循环内只追加）
             try:
@@ -1906,12 +1906,12 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
             if s["step_id"] in writers:
                 continue
             if s["exec_sequence"] > max_writer_seq:
-                if table in s["source_tables_from_sql"]:
+                if any(_table_match(table, t) for t in s["source_tables_from_sql"]):
                     later_readers.append(s["step_id"])
 
         # 自引用的步骤也依赖前面的写入
         for sr in self_references:
-            if sr["table"] == table and sr["step"] in writers:
+            if _table_match(sr["table"], table) and sr["step"] in writers:
                 # 自引用步骤依赖同目标表的其他写入步骤
                 earlier_writers = [
                     w for w in writers
