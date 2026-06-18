@@ -351,6 +351,7 @@ def build_report_data(knowledge):
             "target_table": s.get("target_table", ""),
             "scenario_name": s.get("scenario_name", "默认"),
             "rule_name": s.get("rule_name", ""),
+            "rule_code": s.get("rule_code", ""),
             "exec_sequence": s.get("exec_sequence", 0),
         }
 
@@ -372,6 +373,7 @@ def build_report_data(knowledge):
             field_chain_map[fname_lower] = {"target_field": fname, "chains": []}
         field_chain_map[fname_lower]["chains"].append({
             "step_id": step_id,
+            "rule_code": si.get("rule_code", ""),
             "rule_name": si.get("rule_name", step_id),
             "scenario": si.get("scenario_name", ""),
             "exec_sequence": si.get("exec_sequence", 0),
@@ -462,6 +464,7 @@ def build_report_data(knowledge):
             raw_sql = field_lineage[0].get("raw_sql", "")
 
         field_chain_map[fname_lower]["chains"].append({
+            "rule_code": si.get("rule_code", ""),
             "step_id": step_id,
             "rule_name": si.get("rule_name", step_id),
             "scenario": si.get("scenario_name", ""),

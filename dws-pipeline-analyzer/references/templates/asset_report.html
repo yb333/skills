@@ -2097,20 +2097,28 @@ function renderFieldMapping() {
         '</tr></thead><tbody>';
       auxFields.forEach(function(af) {
         var steps = [];
+        var stepCodes = [];
         var allUsage = af.usage;
         var stepSet = {};
         ['join', 'where', 'groupby'].forEach(function(cat) {
           (allUsage[cat] || []).forEach(function(u) {
-            if (!stepSet[u.step_name]) { stepSet[u.step_name] = true; steps.push(u.step_name); }
+            if (!stepSet[u.step_name]) {
+              stepSet[u.step_name] = true;
+              steps.push(u.step_name);
+              // 找 rule_code
+              var st = (REPORT_DATA.steps || []).find(function(s) { return s.step_id === u.step_id || s.rule_name === u.step_name; });
+              stepCodes.push(st ? (st.rule_code || '') : '');
+            }
           });
         });
+        var stepsText = steps.map(function(s, i) { return s + (stepCodes[i] ? ' (' + stepCodes[i] + ')' : ''); }).join(', ');
         var roleTags = af.roles.map(function(r) {
           var c = r === '关联键' ? '#f97316' : (r === '过滤' ? '#3b82f6' : '#8b5cf6');
           return '<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600;color:white;background:' + c + ';margin-right:4px;">' + r + '</span>';
         }).join('');
         auxHtml += '<tr data-field="' + escapeHtml(af.field) + '">';
         auxHtml += '<td><span class="field-name">' + escapeHtml(af.field) + '</span></td>';
-        auxHtml += '<td style="font-size:12px;">' + escapeHtml(steps.join(', ')) + '</td>';
+        auxHtml += '<td style="font-size:12px;">' + escapeHtml(stepsText) + '</td>';
         auxHtml += '<td>' + roleTags + '</td>';
         auxHtml += '<td style="font-size:12px;color:var(--text-muted);">点击查看</td>';
         auxHtml += '</tr>';
@@ -2404,7 +2412,8 @@ function openDetail(fieldName, scenario) {
       }
       var s = '';
       s += '<div style="padding:12px 16px;background:var(--bg-secondary);border:1px solid ' + ttColor + ';border-radius:8px;min-width:260px;max-width:380px;">';
-      s += '<div style="font-weight:600;font-size:15px;margin-bottom:6px;">' + scTag + escapeHtml(c.rule_name || c.step_id) + '</div>';
+      var codeTag = c.rule_code ? ' <span style="color:var(--text-muted);font-weight:400;font-size:12px;">(' + escapeHtml(c.rule_code) + ')</span>' : '';
+      s += '<div style="font-weight:600;font-size:15px;margin-bottom:6px;">' + scTag + escapeHtml(c.rule_name || c.step_id) + codeTag + '</div>';
       // 加工表达式（非直取都显示）
       var rawSql = c.raw_sql || '';
       if (rawSql && tt !== 'direct') {
@@ -2479,13 +2488,24 @@ function openDetail(fieldName, scenario) {
   var usage = usageMap[fieldName.toLowerCase()];
 
   if (usage) {
+    // 构建 step_name → rule_code 映射
+    var stepCodeMap = {};
+    (REPORT_DATA.steps || []).forEach(function(s) {
+      stepCodeMap[s.step_name || s.rule_name || s.step_id] = s.rule_code || '';
+      stepCodeMap[s.step_id] = s.rule_code || '';
+    });
+    function codeTag(name) {
+      var code = stepCodeMap[name];
+      return code ? ' <span style="color:var(--text-muted);font-weight:400;font-size:12px;">(' + escapeHtml(code) + ')</span>' : '';
+    }
+
     // 关联使用
     if (usage.join && usage.join.length > 0) {
       html += '<div class="detail-section"><h4>关联使用</h4>';
       usage.join.forEach(function(j) {
         var scTag = j.scenario && j.scenario !== '默认' ? ' <span style="font-size:10px;color:var(--text-muted);">[' + escapeHtml(j.scenario) + ']</span>' : '';
         html += '<div style="margin-bottom:10px;padding:8px;background:var(--bg-secondary);border-radius:6px;">';
-        html += '<div style="font-weight:600;font-size:14px;margin-bottom:6px;">' + escapeHtml(j.step_name) + scTag + ' — ' + escapeHtml(j.join_type) + '</div>';
+        html += '<div style="font-weight:600;font-size:14px;margin-bottom:6px;">' + escapeHtml(j.step_name) + codeTag(j.step_name) + scTag + ' — ' + escapeHtml(j.join_type) + '</div>';
         html += '<div style="font-size:13px;font-family:monospace;color:var(--text-primary);background:var(--bg-card);padding:5px 8px;border-radius:4px;margin-bottom:6px;">' + escapeHtml(j.on_condition) + '</div>';
         if (j.tables && j.tables.length > 0) {
           j.tables.forEach(function(t) {
@@ -2502,7 +2522,7 @@ function openDetail(fieldName, scenario) {
       html += '<div class="detail-section"><h4>分组</h4>';
       usage.groupby.forEach(function(g) {
         var scTag = g.scenario && g.scenario !== '默认' ? ' <span style="font-size:10px;color:var(--text-muted);">[' + escapeHtml(g.scenario) + ']</span>' : '';
-        html += '<div style="font-size:14px;margin-bottom:4px;">' + escapeHtml(g.step_name) + scTag + ': GROUP BY ' + escapeHtml(fieldName) + '</div>';
+        html += '<div style="font-size:14px;margin-bottom:4px;">' + escapeHtml(g.step_name) + codeTag(g.step_name) + scTag + ': GROUP BY ' + escapeHtml(fieldName) + '</div>';
       });
       html += '</div>';
     }
@@ -2512,7 +2532,7 @@ function openDetail(fieldName, scenario) {
       html += '<div class="detail-section"><h4>过滤条件</h4>';
       usage.where.forEach(function(w) {
         var scTag = w.scenario && w.scenario !== '默认' ? ' <span style="font-size:10px;color:var(--text-muted);">[' + escapeHtml(w.scenario) + ']</span>' : '';
-        html += '<div style="font-size:14px;margin-bottom:4px;">' + escapeHtml(w.step_name) + scTag + '</div>';
+        html += '<div style="font-size:14px;margin-bottom:4px;">' + escapeHtml(w.step_name) + codeTag(w.step_name) + scTag + '</div>';
         html += '<div style="font-size:13px;font-family:monospace;color:var(--text-primary);background:var(--bg-secondary);padding:5px 8px;border-radius:4px;margin-bottom:8px;">' + escapeHtml(w.condition) + '</div>';
       });
       html += '</div>';
