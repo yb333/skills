@@ -800,6 +800,9 @@ def _build_lineage_layout(topo, df, bl=None):
             if jt == "FROM":
                 # FROM 表始终是主表
                 primary.add(tbl)
+            elif jt == "FROM_SUBQUERY_MAIN":
+                # FROM 子查询内部的 FROM 主表（透传主表属性）
+                primary.add(tbl)
             elif "INNER" in jt or "CROSS" in jt:
                 # INNER JOIN / CROSS JOIN 也是主表
                 primary.add(tbl)
