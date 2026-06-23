@@ -165,3 +165,60 @@ class TestSubqueryPrimarySecondaryPropagation:
             f"orders_a（FROM子查询内部主表）应为主表，实际 {orders_a['join_type']}"
         assert orders_b["join_type"] in ("FROM_SUBQUERY_MAIN", "FROM"), \
             f"orders_b（FROM子查询内部主表）应为主表，实际 {orders_b['join_type']}"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 契约 3：UNION 分支独立记录 + 子查询字段穿透（union_branches）
+# ═══════════════════════════════════════════════════════════════
+
+class TestUnionBranchesStructure:
+    """UNION 每个分支独立记录 source_tables + columns，字段穿透到物理表。
+
+    分支=步骤内场景。同一字段（order_id）在分支1来自 orders_a，分支2来自 orders_b。
+    """
+
+    def test_union_branches_count(self):
+        """两段 UNION 应产生 2 个 union_branches"""
+        parsed = parse_single_sql(UNION_SUBQUERY_SQL, "dws")
+        assert len(parsed.union_branches) == 2, \
+            f"应有 2 个 union_branches，实际 {len(parsed.union_branches)}"
+
+    def test_non_union_no_branches(self):
+        """非 UNION 的普通 SQL 不应有 union_branches"""
+        sql = "SELECT a.x FROM ods.tab a"
+        parsed = parse_single_sql(sql, "dws")
+        assert parsed.union_branches == [], "普通 SELECT 不应有 union_branches"
+
+    def test_branch_columns_penetrate_to_physical(self):
+        """分支字段穿透：t1.order_id → ods.orders_a.order_id"""
+        parsed = parse_single_sql(UNION_SUBQUERY_SQL, "dws")
+        b1 = parsed.union_branches[0]
+        order_id_col = next(c for c in b1["columns"] if c.alias == "order_id")
+        # source_fields 应是穿透后的物理来源
+        assert order_id_col.source_fields, "order_id 应有物理来源"
+        src = order_id_col.source_fields[0]
+        assert "orders_a" in src["table"], \
+            f"分支1 order_id 应穿透到 orders_a，实际 {src['table']}"
+        assert src["branch"] == 1
+
+    def test_same_field_different_source_per_branch(self):
+        """同一字段在两个分支来源不同（分支1=orders_a，分支2=orders_b）"""
+        parsed = parse_single_sql(UNION_SUBQUERY_SQL, "dws")
+        b1_order = next(c for c in parsed.union_branches[0]["columns"] if c.alias == "order_id")
+        b2_order = next(c for c in parsed.union_branches[1]["columns"] if c.alias == "order_id")
+        assert "orders_a" in b1_order.source_fields[0]["table"]
+        assert "orders_b" in b2_order.source_fields[0]["table"]
+
+    def test_union_branches_in_data_flow(self):
+        """union_branches 应进入 data_flow step 详情"""
+        rule = _make_rule(UNION_SUBQUERY_SQL)
+        parsed = {"R1": parse_single_sql(UNION_SUBQUERY_SQL, "dws")}
+        df = build_data_flow([rule], parsed)
+        step = df["steps"][0]
+        assert "union_branches" in step, "step 详情应有 union_branches"
+        assert len(step["union_branches"]) == 2
+        # 验证序列化后的字段穿透信息完整
+        b1 = step["union_branches"][0]
+        order_id = next(c for c in b1["columns"] if c["alias"] == "order_id")
+        assert order_id["physical_sources"], "序列化后 physical_sources 应非空"
+        assert "orders_a" in order_id["physical_sources"][0]["table"]

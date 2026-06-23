@@ -248,6 +248,11 @@ class ParsedSQL:
     ctes: list = field(default_factory=list)  # list[ParsedCTE]
     raw_sql: str = ""
     parse_error: str = ""
+    # UNION/集合操作：每个分支独立记录（分支=步骤内场景）
+    # 每个 branch: {"branch_index": 1, "op": "UNION ALL",
+    #               "source_tables": [ParsedJoin...], "columns": [ParsedColumn...],
+    #               "alias_table_map": {ALIAS(UPPER): physical_table}}
+    union_branches: list = field(default_factory=list)
     # 字段使用信息（关联/过滤/分组）
     join_usage: list = field(default_factory=list)
     where_usage: list = field(default_factory=list)
@@ -704,12 +709,21 @@ def _parse_set_operation(tree, sqlglot_dialect: str, comment_alias_map: dict, ra
     branches = []
     _collect_set_branches(tree, branches)
 
-    # 合并所有分支的 source_tables
+    # 合并所有分支的 source_tables（保留原有行为，兼容下游）
     all_joins = []
-    for branch in branches:
-        if isinstance(branch, exp.Select):
-            branch_joins = _extract_joins(branch, branch)
-            all_joins.extend(branch_joins)
+    # 同时记录每个分支独立的 source_tables + columns（分支=步骤内场景）
+    union_branches = []
+    for idx, branch in enumerate(branches):
+        if not isinstance(branch, exp.Select):
+            continue
+        branch_joins = _extract_joins(branch, branch)
+        all_joins.extend(branch_joins)
+        branch_columns = _extract_select_columns(branch, comment_alias_map)
+        union_branches.append({
+            "branch_index": idx + 1,
+            "source_tables": branch_joins,
+            "columns": branch_columns,
+        })
 
     # 去重（同名同别名）
     seen = set()
@@ -720,6 +734,7 @@ def _parse_set_operation(tree, sqlglot_dialect: str, comment_alias_map: dict, ra
             seen.add(key)
             deduped.append(j)
     result.source_tables = deduped
+    result.union_branches = union_branches
 
     # select_columns 以第一个分支为准
     first_branch = branches[0] if branches else None
@@ -755,6 +770,10 @@ def _parse_set_operation(tree, sqlglot_dialect: str, comment_alias_map: dict, ra
             cte_alias_map = _build_cte_alias_map(first_branch, result.ctes)
     _apply_cte_penetration(result.select_columns, result.ctes, cte_alias_map)
 
+    # 分支字段穿透：把每个分支的 columns 解析到物理表字段
+    # （子查询别名 t1.order_id → 物理表 orders_a.order_id）
+    _resolve_branch_columns_physical(union_branches)
+
     return result
 
 
@@ -773,6 +792,86 @@ def _collect_set_branches(node, branches: list) -> None:
         inner = node.find(exp.Select)
         if inner:
             branches.append(inner)
+
+
+def _resolve_branch_columns_physical(union_branches: list) -> None:
+    """给每个 UNION 分支的 columns 补上物理表字段来源（穿透子查询别名）。
+
+    对每个分支：
+    1. 从 source_tables 建 alias→物理表 映射（跳过子查询占位）
+    2. 对子查询占位项，解析其 SQL 建立 子查询输出字段→(内部物理表,内部字段) 映射
+    3. 每个 column 的 expr 形如 "t1.order_id"，解析 alias.field：
+       - alias 是子查询占位 → 用子查询字段映射穿透到内部物理表
+       - alias 是普通物理表别名 → 直接映射
+    结果写入 column.source_tables（物理表名列表）和 source_fields（物理来源详情）
+    """
+    for branch in union_branches:
+        source_tables = branch["source_tables"]
+        # 1. alias → 物理表 映射（非占位项）
+        alias_to_table = {}
+        subquery_placeholders = []  # 子查询占位 ParsedJoin
+        for j in source_tables:
+            if j.source_table.startswith("(subquery:"):
+                subquery_placeholders.append(j)
+            elif j.alias and j.source_table:
+                alias_to_table[j.alias.upper()] = j.source_table
+
+        # 2. 子查询输出字段 → 内部物理来源
+        #    subquery_field_map: {子查询别名(UPPER): {输出字段(UPPER): (物理表, 内部字段)}}
+        subquery_field_map = {}
+        for sq in subquery_placeholders:
+            sq_alias = (sq.alias or "sub").upper()
+            if not sq.subquery_sql:
+                continue
+            try:
+                sq_parsed = parse_single_sql(sq.subquery_sql, "oracle")
+            except Exception:
+                continue
+            if sq_parsed.parse_error:
+                continue
+            # 子查询内部 alias → 物理表
+            sq_inner_alias_map = {}
+            for ij in sq_parsed.source_tables:
+                if not ij.source_table.startswith("(subquery:") and ij.alias:
+                    sq_inner_alias_map[ij.alias.upper()] = ij.source_table
+            # 子查询输出列 → 物理来源
+            field_map = {}
+            for col in sq_parsed.select_columns:
+                col_name = (col.alias or "").upper()
+                if not col_name or not col.source_fields:
+                    continue
+                # 取第一个来源（子查询内字段通常单来源）
+                sf = col.source_fields[0]
+                sf_alias = (sf.get("alias", "") or "").upper()
+                sf_field = sf.get("field", "")
+                physical = sq_inner_alias_map.get(sf_alias, sf_alias)
+                field_map[col_name] = (physical, sf_field)
+            subquery_field_map[sq_alias] = field_map
+
+        # 3. 解析每个 column 的物理来源
+        for col in branch["columns"]:
+            expr = col.expression or ""
+            # 解析 alias.field（支持 t1.order_id 或 order_id 等简单形式）
+            phys_sources = []
+            for sf in col.source_fields:
+                sf_alias = (sf.get("alias", "") or "").upper()
+                sf_field = sf.get("field", "")
+                if sf_alias in subquery_field_map:
+                    # 子查询穿透
+                    fm = subquery_field_map[sf_alias]
+                    key = (sf_field or col.alias or "").upper()
+                    if key in fm:
+                        phys_sources.append({"table": fm[key][0], "field": fm[key][1], "branch": branch["branch_index"]})
+                        continue
+                # 普通物理表别名
+                physical = alias_to_table.get(sf_alias, sf_alias)
+                phys_sources.append({"table": physical, "field": sf_field, "branch": branch["branch_index"]})
+            # 写回 column（不破坏原有 source_fields，新增 physical_sources）
+            col.source_tables = [p["table"] for p in phys_sources]
+            # 用扩展属性记录物理来源（ParsedColumn 是 dataclass，动态属性需谨慎，改用 source_fields 承载）
+            # 这里把物理来源塞进 source_fields（覆盖别名层，因为下游用 source_fields 做映射）
+            if phys_sources:
+                col.source_fields = phys_sources
 
 
 def _build_cte_alias_map(select_node, ctes: list) -> dict[str, str]:
@@ -2835,6 +2934,24 @@ def build_data_flow(
             "where_usage": parsed.where_usage,
             "groupby_usage": parsed.groupby_usage,
             "join_paths": parsed.join_paths,
+            # UNION 分支（分支=步骤内场景，字段来源已穿透到物理表）
+            "union_branches": [
+                {
+                    "branch_index": b["branch_index"],
+                    "source_tables": [
+                        {"source_table": j.source_table, "alias": j.alias,
+                         "join_type": j.join_type, "join_condition": j.join_condition}
+                        for j in b["source_tables"]
+                    ],
+                    "columns": [
+                        {"alias": c.alias, "expression": c.expression,
+                         "transform_type": c.transform_type,
+                         "physical_sources": c.source_fields}
+                        for c in b["columns"]
+                    ],
+                }
+                for b in parsed.union_branches
+            ] if parsed.union_branches else [],
         }
         steps_detail.append(step_entry)
 
