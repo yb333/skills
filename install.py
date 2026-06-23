@@ -132,6 +132,9 @@ def main():
     print()
 
     # ── 3. venv + 依赖 ──
+    # 注意：SKILL 运行时（run.py）用调用它的 python 解释器，不强制使用此 venv。
+    # venv 供偏好隔离环境的用户使用；手工复制的用户只要系统 python 装好依赖即可
+    # （run.py 启动时会自检依赖并友好提示安装）。
     print("[3/4] 创建虚拟环境 + 安装依赖...")
     if mode == "global":
         config_dir = Path.home() / ".config" / "opencode"

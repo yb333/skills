@@ -35,7 +35,6 @@ install.bat
 | [commands/](commands/) | 命令定义（/analyze 等） |
 | [install.sh](install.sh) | macOS/Linux 安装器 |
 | [install.bat](install.bat) | Windows 安装器（双击即可执行） |
-| [install.ps1](install.ps1) | Windows 安装器（PowerShell 版，备用） |
 
 ## 手工安装
 

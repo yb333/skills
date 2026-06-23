@@ -3396,7 +3396,7 @@ def main():
         print(f"错误: 文件不存在: {input_path}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"═══ dws-pipeline-analyzer ═══")
+    print(f"=== dws-pipeline-analyzer ===")
     print(f"输入: {input_path}")
     print(f"输出基础目录: {base_output_dir}")
     print()
@@ -3460,7 +3460,7 @@ def main():
             print(f"  - 表头列数: {len(diag_headers)}", file=sys.stderr)
 
             if rt_col_idx is None:
-                print(f"  - ✗ 找不到 '规则类型' 列！表头: {diag_headers[:10]}", file=sys.stderr)
+                print(f"  - [FAIL] 找不到 '规则类型' 列！表头: {diag_headers[:10]}", file=sys.stderr)
             else:
                 print(f"  - 规则类型列 idx={rt_col_idx} ('{diag_headers[rt_col_idx]}')", file=sys.stderr)
                 # 检查规则类型值
@@ -3472,7 +3472,7 @@ def main():
                 print(f"  - 规则类型值: {rt_values}", file=sys.stderr)
 
             if sql_col_idx is None:
-                print(f"  - ✗ 找不到 '查询语句' 列！表头含'查询': {[h for h in diag_headers if '查询' in h or 'sql' in h.lower()]}", file=sys.stderr)
+                print(f"  - [FAIL] 找不到 '查询语句' 列！表头含'查询': {[h for h in diag_headers if '查询' in h or 'sql' in h.lower()]}", file=sys.stderr)
             else:
                 print(f"  - 查询语句列 idx={sql_col_idx} ('{diag_headers[sql_col_idx]}')", file=sys.stderr)
                 # 检查 SQL 是否为空
@@ -3483,7 +3483,7 @@ def main():
                         if not sql_val or not str(sql_val).strip():
                             empty_sql += 1
                 if empty_sql > 0:
-                    print(f"  - ⚠ {empty_sql} 行的 SQL 为空", file=sys.stderr)
+                    print(f"  - [WARN] {empty_sql} 行的 SQL 为空", file=sys.stderr)
 
         wb_diag.close()
         sys.exit(1)
@@ -3644,7 +3644,7 @@ def main():
     summary_text = _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings, quality)
     summary_file.write_text(summary_text, encoding="utf-8")
 
-    print(f"\n═══ 完成 ═══")
+    print(f"\n=== 完成 ===")
     print(f"输出: {output_file}")
     print(f"摘要: {summary_file}")
     print(f"目标表: {target_name}")

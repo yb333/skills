@@ -25,19 +25,18 @@ description: |-
 
 ## 依赖检查（首次执行前）
 
-脚本依赖 `openpyxl` 和 `sqlglot`。首次运行时自动检测，缺失则自动安装：
+脚本依赖 `openpyxl` 和 `sqlglot`。run.py 启动时会自检依赖，缺失时友好提示安装（不会抛 ImportError 堆栈）。
 
-```bash
-pip install openpyxl sqlglot
-```
-
-AI 执行脚本前，先检测依赖是否可用：
+AI 执行脚本前，可先检测依赖是否可用：
 ```bash
 python -c "import openpyxl, sqlglot; print('OK')"
 ```
 如果报 ImportError，运行 `pip install openpyxl sqlglot` 后重试。
 
-> **注意**：本文档统一用 `python`。Windows 直接用 `python`；macOS/Linux 如果只有 `python3`，请用 `python3` 替代。
+> **安装方式说明**：
+> - 用 `install.sh` / `install.bat` 安装：会创建 venv 并装依赖（偏好隔离环境）
+> - 手工复制 skill 目录：只要系统 python 装好依赖即可，run.py 会自检提示
+> - 本文档统一用 `python`。Windows 直接用 `python`；macOS/Linux 如果只有 `python3`，请用 `python3` 替代。
 
 ---
 

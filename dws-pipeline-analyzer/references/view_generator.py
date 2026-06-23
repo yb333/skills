@@ -1109,7 +1109,7 @@ def generate_asset_report(knowledge, output_dir):
     output_path = Path(output_dir) / "asset_report.html"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
-    print(f"  ✓ 资产说明书: {output_path}")
+    print(f"  [OK] 资产说明书: {output_path}")
     return True
 
 
@@ -1211,7 +1211,7 @@ def generate_mapping(knowledge, output_dir):
         joins = df_step.get("joins", [])
         ctes = df_step.get("ctes", [])
         ub_list = df_step.get("union_branches", [])
-        has_union = len(ub_list) > 1
+        has_union = len(ub_list) >= 1
 
         def _join_type_label(jt, join_cond):
             """把 join_type 翻译成友好关联描述"""
@@ -1381,7 +1381,7 @@ def generate_mapping(knowledge, output_dir):
     output_path = Path(output_dir) / "mapping.xlsx"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(str(output_path))
-    print(f"  ✓ Mapping Excel: {output_path}")
+    print(f"  [OK] Mapping Excel: {output_path}")
     return True
 
 
@@ -1739,7 +1739,7 @@ def generate_tech_design(knowledge, output_dir):
     output_path = Path(output_dir) / "tech_design.md"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("\n".join(lines), encoding="utf-8")
-    print(f"  ✓ 技术设计文档: {output_path}")
+    print(f"  [OK] 技术设计文档: {output_path}")
     return True
 
 
@@ -1781,9 +1781,9 @@ def main():
         if ai_path.exists():
             ai_text = ai_path.read_text(encoding="utf-8")
             _merge_ai_markdown(knowledge, ai_text)
-            print(f"  ✓ 已合并 AI 增强: {ai_path}")
+            print(f"  [OK] 已合并 AI 增强: {ai_path}")
         else:
-            print(f"  ⚠ AI 输入文件不存在: {ai_path}（跳过）")
+            print(f"  [WARN] AI 输入文件不存在: {ai_path}（跳过）")
 
     # 输出目录: 直接用用户指定的 output 目录
     views_dir = Path(args.output)
@@ -1794,7 +1794,7 @@ def main():
     else:
         views = [v.strip() for v in views_str.split(",") if v.strip()]
 
-    print(f"═══ dws-pipeline-analyzer 视图生成器 ═══")
+    print(f"=== dws-pipeline-analyzer 视图生成器 ===")
     print(f"输入: {input_path}")
     print(f"输出: {views_dir}")
     print(f"视图: {', '.join(views)}")
@@ -1814,7 +1814,7 @@ def main():
     print()
     success = sum(1 for v in results.values() if v)
     total = len(results)
-    print(f"═══ 完成: {success}/{total} 视图生成成功 ═══")
+    print(f"=== 完成: {success}/{total} 视图生成成功 ===")
 
     if success < total:
         sys.exit(1)

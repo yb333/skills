@@ -94,7 +94,7 @@ python {skill_dir}/run.py view_generator \
 3. **视图用 knowledge_draft.json 生成**，AI 增强结果通过 `--ai-input knowledge_ai.md` 注入
 4. **视图全部自动生成**，不询问用户选哪些
 5. **DDL 自动检测**，同级 04_ddl/ 有就读，没有就跳过
-6. **输出目录**直接用 --output 指定的目录，不嵌套子目录
+6. **输出目录**：`--output` 给基础目录，脚本自动在其下按**规则组英文名称**建子目录，产物输出到那里（缺失则回退规则组编码）
 
 ## SKILL 加载
 

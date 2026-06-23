@@ -20,7 +20,27 @@ ALIAS_MAP = {
 }
 
 
+def check_dependencies():
+    """启动时检查依赖，缺失则友好提示安装（不抛 ImportError 堆栈）。
+
+    无论用户用 install 脚本（建 venv）还是手工复制，最终都靠运行 run.py 的
+    python 解释器来 import。这里统一兜底，避免依赖缺失时给出不友好的报错。
+    """
+    missing = []
+    for pkg in ("openpyxl", "sqlglot"):
+        try:
+            __import__(pkg)
+        except ImportError:
+            missing.append(pkg)
+    if missing:
+        print(f"[ERROR] 缺少依赖: {', '.join(missing)}", file=sys.stderr)
+        print(f"  请安装: pip install {' '.join(missing)}", file=sys.stderr)
+        print(f"  （当前 Python: {sys.executable}）", file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
+    check_dependencies()
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         references_dir = Path(__file__).resolve().parent / "references"
         print("Usage: python run.py <script_name> [script_args...]")
