@@ -458,3 +458,82 @@ class TestExcelReadRobustness:
         raw = read_excel(xlsx)
         assert len(raw["rules"]) >= 1, "RULE 应正常解析"
         assert raw["group_variables"] == {}, "空 GV 应返回空 dict"
+
+
+# ═══════════════════════════════════════════════════════════════
+# Tier 7: exec_sequence 解析健壮性
+# ═══════════════════════════════════════════════════════════════
+
+class TestExecSequenceParsing:
+    """exec_sequence 必须正确处理数值/字符串/浮点字符串格式。
+
+    Bug: int(exec_seq_str) 对字符串 "1.0" 会 ValueError → 塌缩为 0，
+    导致调度图扁平化、串行依赖丢失。制品包 Excel 可能以文本格式存储执行序列。
+    """
+
+    def test_float_string_exec_sequence(self, tmp_path):
+        """执行序列存为字符串 '2.0' 应正确解析为 2，不塌缩为 0"""
+        import openpyxl
+        from _build_xlsx import build_xlsx, RULE_COLUMNS
+        from case_01_minimal import rules as minimal_rules
+
+        xlsx = str(tmp_path / "float_seq.xlsx")
+        build_xlsx(xlsx, rules=minimal_rules)
+        # 把执行序列列改成字符串 "2.0"
+        wb = openpyxl.load_workbook(xlsx)
+        ws = wb["RULE"]
+        headers = [c.value for c in next(ws.iter_rows(min_row=1))]
+        if "执行序列" in headers:
+            col_idx = headers.index("执行序列") + 1
+            for row in ws.iter_rows(min_row=2):
+                if row[col_idx - 1].value is not None:
+                    row[col_idx - 1].value = "2.0"  # 字符串浮点
+        wb.save(xlsx)
+        wb.close()
+
+        raw = read_excel(xlsx)
+        assert len(raw["rules"]) >= 1
+        # 关键：字符串 "2.0" 应解析为 2，不是 0
+        assert raw["rules"][0].exec_sequence == 2, \
+            f"字符串 '2.0' 应解析为 2，实际 {raw['rules'][0].exec_sequence}"
+
+    def test_integer_exec_sequence_unchanged(self, tmp_path):
+        """整数执行序列不受影响"""
+        from _build_xlsx import build_xlsx
+        from case_01_minimal import rules as minimal_rules
+        xlsx = str(tmp_path / "int_seq.xlsx")
+        build_xlsx(xlsx, rules=minimal_rules)
+        raw = read_excel(xlsx)
+        # case_01 的 exec_sequence 默认值（int 格式，不受 bug 影响）
+        assert isinstance(raw["rules"][0].exec_sequence, int)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Tier 8: 子查询统计正确性
+# ═══════════════════════════════════════════════════════════════
+
+class TestSubqueryCount:
+    """subquery_count 应只数子查询本身，不数子查询内部的物理表。
+
+    Bug: 原实现按 join_type 含 "subquery" 计数，把 FROM_SUBQUERY_MAIN/
+    FROM_SUBQUERY/JOIN_SUBQUERY_INNER（子查询内部物理表）也算进去，
+    导致一个含 2 表的子查询被记成 2 个子查询。
+    """
+
+    def test_single_subquery_counted_as_one(self):
+        """1 个 FROM 子查询（内部 2 表）应记为 1 个子查询"""
+        import tempfile
+        sql = "SELECT t.x FROM (SELECT a.x FROM ods.t1 a LEFT JOIN ods.t2 b ON a.id=b.id) t"
+        rules = [{"rule_code":"R1","rule_type":1,"exec_sequence":0,
+                  "target_schema":"dws","target_table":"t_f","delete_mode":"1",
+                  "query_sql":sql,"rule_name":"t"}]
+        xlsx = tempfile.mktemp(suffix=".xlsx")
+        build_xlsx(xlsx, rules=rules)
+        raw = read_excel(xlsx)
+        pm = {r.rule_code: parse_single_sql(r.query_sql, "dws") for r in raw["rules"]}
+        topo = build_topology(raw["rules"], pm)
+        df = build_data_flow(raw["rules"], pm)
+        fm = build_field_mappings(raw["rules"], pm, {})
+        q = analyze_quality(topo, df, fm, pm)
+        assert q["complexity_metrics"]["max_subquery_count"] == 1, \
+            f"1 个子查询应记为 1，实际 {q['complexity_metrics']['max_subquery_count']}"

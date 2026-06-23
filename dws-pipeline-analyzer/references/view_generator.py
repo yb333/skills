@@ -769,19 +769,26 @@ def _build_lineage_layout(topo, df, bl=None):
                 final_targets.add(_norm(tf))
 
     # CTE 名
-    cte_names = set()
+    # 先全量收集所有 CTE 名（统一大写），再构建 source_map（避免 CTE_A 引用
+    # CTE_B 时 B 还没进 cte_names 而被误当物理表——顺序依赖 bug）
+    cte_names_upper = set()
+    for s in data_flow_steps:
+        for cte in s.get("ctes", []):
+            cn = cte.get("name", "")
+            if cn:
+                cte_names_upper.add(cn.upper())
     cte_source_map = {}
     for s in data_flow_steps:
         for cte in s.get("ctes", []):
             cn = cte.get("name", "")
             if cn:
-                cte_names.add(cn)
                 phys = []
                 for st in cte.get("source_tables", []):
                     tname = st.get("name", "")
-                    if tname and tname.upper() not in cte_names:
+                    if tname and tname.upper() not in cte_names_upper:
                         phys.append(tname)
                 cte_source_map[cn] = phys
+    cte_names = cte_names_upper  # 兼容下游（下游比较都用 upper）
 
     # 来源表引用计数 + 主表识别
     source_ref_count = {}  # {table_name(UPPER): count}

@@ -441,7 +441,8 @@ def read_excel(excel_path: str) -> dict:
         query = _get_val(row, ci.get("query_sql"))
         exec_seq_str = _get_val(row, ci.get("exec_sequence"))
         try:
-            exec_seq = int(exec_seq_str) if exec_seq_str else 0
+            # int(float()) 兼容数值、字符串 "1"、字符串 "1.0" 三种格式
+            exec_seq = int(float(exec_seq_str)) if exec_seq_str else 0
         except (ValueError, TypeError):
             exec_seq = 0
 
@@ -770,6 +771,16 @@ def _parse_set_operation(tree, sqlglot_dialect: str, comment_alias_map: dict, ra
             cte_alias_map = _build_cte_alias_map(first_branch, result.ctes)
     _apply_cte_penetration(result.select_columns, result.ctes, cte_alias_map)
 
+    # 对每个 UNION 分支的 columns 也做 CTE 穿透（分支可能直接引用 CTE）
+    if result.ctes:
+        for idx, ub in enumerate(union_branches):
+            branch_node = branches[idx] if idx < len(branches) else None
+            if isinstance(branch_node, exp.Select):
+                b_cte_alias_map = _build_cte_alias_map(branch_node, result.ctes)
+            else:
+                b_cte_alias_map = cte_alias_map
+            _apply_cte_penetration(ub["columns"], result.ctes, b_cte_alias_map)
+
     # 分支字段穿透：把每个分支的 columns 解析到物理表字段
     # （子查询别名 t1.order_id → 物理表 orders_a.order_id）
     _resolve_branch_columns_physical(union_branches)
@@ -866,10 +877,11 @@ def _resolve_branch_columns_physical(union_branches: list) -> None:
                 # 普通物理表别名
                 physical = alias_to_table.get(sf_alias, sf_alias)
                 phys_sources.append({"table": physical, "field": sf_field, "branch": branch["branch_index"]})
-            # 写回 column（不破坏原有 source_fields，新增 physical_sources）
+            # 写回 column：source_fields 在 UNION 分支中被替换为物理穿透来源
+            # （{table, field, branch} 结构，替代原有的别名层 {alias, field}）。
+            # 这是设计意图：union_branches 的 columns 专供物理穿透，不再保留别名层。
+            # 下游 build_data_flow 将其序列化为 physical_sources。
             col.source_tables = [p["table"] for p in phys_sources]
-            # 用扩展属性记录物理来源（ParsedColumn 是 dataclass，动态属性需谨慎，改用 source_fields 承载）
-            # 这里把物理来源塞进 source_fields（覆盖别名层，因为下游用 source_fields 做映射）
             if phys_sources:
                 col.source_fields = phys_sources
 
@@ -2041,46 +2053,47 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
         # SQL 中解析出的源表（主查询 FROM/JOIN + 子查询内部物理表；只过滤子查询假名）
         parsed = parsed_map.get(rule.rule_code)
         sql_source_tables = []
-        all_sql_tables = []  # 全树扫描所有表（含子查询），用于自引用检测
         for j in parsed.source_tables:
             # 过滤子查询假名（不是物理表）；子查询内部的物理表是真实源表，保留
             if j.source_table.startswith("(subquery:"):
                 continue
             if _norm_table(j.source_table) not in [_norm_table(t) for t in sql_source_tables]:
                 sql_source_tables.append(j.source_table)
-            # 全树扫描（在循环外初始化，循环内只追加）
-            # 用 _norm_table 归一化的 seen 集合去重，避免同一表大小写不同被当成两张表
-            _all_sql_seen = {_norm_table(t) for t in all_sql_tables}
-            try:
-                clean = _strip_dws_clauses(parsed.raw_sql)
-                clean = _replace_placeholders(clean)
-                tree = sqlglot.parse_one(clean, dialect="oracle")
-                if isinstance(tree, (exp.Union, exp.Intersect, exp.Except)):
-                    # 集合操作：收集所有分支的表
-                    branches = []
-                    _collect_set_branches(tree, branches)
-                    for branch in branches:
-                        for table in branch.find_all(exp.Table):
-                            tname = ".".join(_clean_name(p.name) for p in table.parts)
-                            if tname and _norm_table(tname) not in _all_sql_seen:
-                                all_sql_tables.append(tname)
-                                _all_sql_seen.add(_norm_table(tname))
+
+        # 全树扫描所有表（含子查询内部），用于自引用检测
+        # parse 只做一次（在 source_tables 循环之外），用 _norm_table 归一化去重
+        all_sql_tables = []
+        _all_sql_seen = set()
+        try:
+            clean = _strip_dws_clauses(parsed.raw_sql)
+            clean = _replace_placeholders(clean)
+            tree = sqlglot.parse_one(clean, dialect="oracle")
+            if isinstance(tree, (exp.Union, exp.Intersect, exp.Except)):
+                # 集合操作：收集所有分支的表
+                branches = []
+                _collect_set_branches(tree, branches)
+                for branch in branches:
+                    for table in branch.find_all(exp.Table):
+                        tname = ".".join(_clean_name(p.name) for p in table.parts)
+                        if tname and _norm_table(tname) not in _all_sql_seen:
+                            all_sql_tables.append(tname)
+                            _all_sql_seen.add(_norm_table(tname))
+            else:
+                select_node = tree.find(exp.Select)
+                if select_node:
+                    for table in select_node.find_all(exp.Table):
+                        tname = ".".join(_clean_name(p.name) for p in table.parts)
+                        if tname and _norm_table(tname) not in _all_sql_seen:
+                            all_sql_tables.append(tname)
+                            _all_sql_seen.add(_norm_table(tname))
                 else:
-                    select_node = tree.find(exp.Select)
-                    if select_node:
-                        for table in select_node.find_all(exp.Table):
-                            tname = ".".join(_clean_name(p.name) for p in table.parts)
-                            if tname and _norm_table(tname) not in _all_sql_seen:
-                                all_sql_tables.append(tname)
-                                _all_sql_seen.add(_norm_table(tname))
-                    else:
-                        for table in tree.find_all(exp.Table):
-                            tname = ".".join(_clean_name(p.name) for p in table.parts)
-                            if tname and _norm_table(tname) not in _all_sql_seen:
-                                all_sql_tables.append(tname)
-                                _all_sql_seen.add(_norm_table(tname))
-            except Exception:
-                all_sql_tables = sql_source_tables  # fallback
+                    for table in tree.find_all(exp.Table):
+                        tname = ".".join(_clean_name(p.name) for p in table.parts)
+                        if tname and _norm_table(tname) not in _all_sql_seen:
+                            all_sql_tables.append(tname)
+                            _all_sql_seen.add(_norm_table(tname))
+        except Exception:
+            all_sql_tables = list(sql_source_tables)  # fallback
 
         # 分区交换（类型9）特殊处理：
         # target_table 是临时表，exchange_source_table 是真正的目标表（分区表）
@@ -2604,8 +2617,8 @@ def analyze_quality(
         )
         complexity_metrics["total_case_when_branches"] += case_when_branches
 
-        # 子查询统计（FROM/JOIN 子查询）
-        subquery_count = sum(1 for j in parsed.source_tables if "subquery" in j.join_type.lower())
+        # 子查询统计（只数 (subquery:xxx) 占位项，不数内部物理表）
+        subquery_count = sum(1 for j in parsed.source_tables if j.source_table.startswith("(subquery:"))
         complexity_metrics["total_subquery_count"] = complexity_metrics.get("total_subquery_count", 0) + subquery_count
         complexity_metrics["max_subquery_count"] = max(complexity_metrics.get("max_subquery_count", 0), subquery_count)
 
@@ -2853,11 +2866,15 @@ def build_data_flow(
                     "layer": _infer_layer(s_schema, s_name),
                 })
 
-        # CTE 内部源表（也纳入来源表统计）
+        # CTE 内部源表（也纳入来源表统计，过滤 CTE 间互相引用）
+        cte_name_set = {_norm_table(c.name) for c in parsed.ctes if c.name}
         for cte in parsed.ctes:
             for ct in cte.source_tables:
                 tname = ct.get("name", "")
-                if tname and _norm_table(tname) not in seen_tables:
+                # 过滤掉引用其他 CTE 的（CTE 名不是物理表）
+                if not tname or _norm_table(tname) in cte_name_set:
+                    continue
+                if _norm_table(tname) not in seen_tables:
                     seen_tables.add(_norm_table(tname))
                     parts = tname.split(".")
                     s_schema = parts[0] if len(parts) > 1 else ""

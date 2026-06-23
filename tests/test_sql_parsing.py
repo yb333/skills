@@ -462,3 +462,31 @@ class TestSqlParsingRobustness:
         parsed = parse(raw)
         assert parsed.parse_error is not None
         assert parsed.raw_sql == raw, "失败时应保留原始 SQL"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 9. CTE 引用顺序（CTE_A 引用后定义的 CTE_B）
+# ═══════════════════════════════════════════════════════════════
+
+class TestCTEOrdering:
+    """CTE 互相引用时，被引用的 CTE 名不应被当成物理源表。
+
+    Bug: cte_source_map 边遍历边收集 CTE 名，当 cte_a 引用后定义的 cte_b 时，
+    cte_b 还没进集合，被当成物理表塞进 data_flow.tables。
+    """
+
+    def test_cte_reference_not_treated_as_physical(self):
+        """CTE_A 引用 CTE_B，data_flow.tables 不应出现 cte_b"""
+        sql = """WITH cte_b AS (SELECT id FROM ods.t2),
+cte_a AS (SELECT id FROM cte_b)
+SELECT a.id FROM cte_a a"""
+        from analyzer import build_data_flow, RawRule
+        rule = RawRule(rule_code="R1", rule_name="t", rule_type=1, exec_sequence=0,
+                       target_schema="dws", target_table="t_f", delete_mode="1", query_sql=sql)
+        df = build_data_flow([rule], {"R1": parse_single_sql(sql, "dws")})
+        table_names = {t["name"].lower() for t in df["tables"]}
+        # cte_b 不应作为物理表出现（它是 CTE，不是物理源表）
+        assert "cte_b" not in table_names, \
+            f"cte_b 是 CTE 名不应出现在 tables，实际 {table_names}"
+        # 真正的物理源表 t2 应在
+        assert "t2" in table_names
