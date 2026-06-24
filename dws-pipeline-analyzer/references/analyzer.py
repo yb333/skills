@@ -2993,6 +2993,188 @@ def build_data_flow(
     }
 
 
+def build_join_key_lineage(
+    step_id: str,
+    field_name: str,
+    table_alias: str,
+    rules: list[RawRule],
+    parsed_map: dict,
+    topology: dict,
+    data_flow: dict,
+    field_mappings: dict,
+    visited: set = None,
+    depth: int = 0,
+) -> dict:
+    """跨步骤追溯关联键的来源链。
+
+    从某步骤的关联键（如 step_4 的 tmp3.bid）出发，沿数据依赖反向追溯，
+    穿透中间表的直取/加工，追到物理源表的原始字段。
+
+    追溯规则：
+    - 中间表的 direct 字段 → 继续向上追溯
+    - 中间表的加工字段（拼接/截取/兜底）→ 展示加工，对每个源字段继续追溯
+    - 物理源表字段（ods/dim 层）→ 停止（叶节点）
+
+    Args:
+        step_id: 起始步骤（如 "step_4"）
+        field_name: 关联键字段名（如 "bid"）
+        table_alias: 该字段在起始 SQL 里的表别名（如 "t"，指向 tmp3）
+        visited: 已访问的 (step_id, table, field) 防循环
+        depth: 递归深度（最大 15）
+
+    Returns: 追溯链树节点
+        {
+            "step_id": "step_4",
+            "field": "bid",
+            "table": "dws.tmp3",        # 解析后的物理表名
+            "transform": "direct",       # 加工类型
+            "raw_sql": "t.bid",          # 加工表达式
+            "is_physical": False,        # 是否物理源表（叶节点标识）
+            "children": [ ... ]          # 上游来源（加工字段可能多源）
+        }
+    """
+    if visited is None:
+        visited = set()
+    if depth > 15:
+        return None
+
+    # 1. 解析 table_alias → 物理表名（用 data_flow 的 joins）
+    df_steps = data_flow.get("steps", [])
+    df_step = next((s for s in df_steps if s.get("step_id") == step_id), {})
+    alias_map = {}
+    for j in df_step.get("joins", []):
+        if j.get("alias") and j.get("source_table"):
+            alias_map[j["alias"].upper()] = j["source_table"]
+    resolved_table = alias_map.get((table_alias or "").upper(), table_alias or "")
+
+    # 2. 判断是否物理源表（ods/dim 层或非中间表）
+    norm_table = _norm_table(resolved_table)
+    is_physical = not norm_table.startswith(("dws.tmp", "tmp", "dws.temp", "temp"))
+
+    # 3. 在 field_mappings 找该步骤该字段的 lineage
+    fields_list = field_mappings.get("fields", [])
+    # step_id → rule_code 映射
+    steps_list = topology.get("steps", [])
+    step_to_rule = {s["step_id"]: s.get("rule_code", "") for s in steps_list}
+    rule_code = step_to_rule.get(step_id, "")
+
+    node = {
+        "step_id": step_id,
+        "field": field_name,
+        "table": resolved_table,
+        "transform": "direct",
+        "raw_sql": "",
+        "is_physical": is_physical,
+        "children": [],
+    }
+
+    # 物理源表 → 叶节点，停止
+    if is_physical:
+        return node
+
+    # 防循环
+    visit_key = (step_id, norm_table, field_name.lower())
+    if visit_key in visited:
+        node["transform"] = "cycle"
+        return node
+    visited.add(visit_key)
+
+    # 4. 找该字段的 lineage
+    # 关联键通常不在 SELECT 里，而是产出该中间表的步骤才有它的 lineage。
+    # 所以先定位产出 resolved_table 的步骤，从那个步骤查 field_mappings。
+    producing_step = _find_producing_step(resolved_table, field_name, steps_list, rules)
+    lookup_step = producing_step if producing_step else step_id
+
+    target_field_match = None
+    for f in fields_list:
+        if (f.get("target_field", "").lower() == field_name.lower()
+                and f.get("producing_step", "") == lookup_step):
+            target_field_match = f
+            break
+
+    if not target_field_match:
+        # 兜底：在所有字段里找该 step 的 lineage 里含此字段的
+        for f in fields_list:
+            for l in f.get("lineage", []):
+                if l.get("step") == lookup_step and l.get("source_field", "").lower() == field_name.lower():
+                    target_field_match = f
+                    break
+            if target_field_match:
+                break
+
+    if not target_field_match:
+        return node  # 找不到 lineage，返回当前节点（无 children）
+
+    lineages = target_field_match.get("lineage", [])
+    # 只取属于产出步骤的 lineage（lookup_step 是产出 resolved_table 的步骤）
+    step_lineages = [l for l in lineages if l.get("step") == lookup_step]
+    if not step_lineages:
+        step_lineages = lineages
+
+    # 产出步骤的 alias→table 映射（用于解析 lineage 里的别名）
+    producing_df_step = next((s for s in df_steps if s.get("step_id") == lookup_step), {})
+    producing_alias_map = {}
+    for j in producing_df_step.get("joins", []):
+        if j.get("alias") and j.get("source_table"):
+            producing_alias_map[j["alias"].upper()] = j["source_table"]
+
+    # 5. 对每个 lineage 来源，递归追溯
+    for l in step_lineages:
+        src_field = l.get("source_field", "")
+        src_table_alias = l.get("source_table", "")
+        transform = l.get("transform", "direct")
+        raw_sql = l.get("raw_sql", "")
+
+        # 解析 src_table_alias（用产出步骤的 alias 映射）
+        src_resolved = producing_alias_map.get(src_table_alias.upper(), src_table_alias)
+        src_norm = _norm_table(src_resolved)
+        src_is_physical = not src_norm.startswith(("dws.tmp", "tmp", "dws.temp", "temp"))
+
+        child_node = {
+            "step_id": lookup_step,
+            "field": src_field,
+            "table": src_resolved,
+            "transform": transform,
+            "raw_sql": raw_sql,
+            "is_physical": src_is_physical,
+            "children": [],
+        }
+
+        if not src_is_physical and src_field:
+            # 中间表字段 → 找它产生的步骤，继续追溯
+            upstream_step = _find_producing_step(src_resolved, src_field, steps_list, rules)
+            if upstream_step:
+                child = build_join_key_lineage(
+                    upstream_step, src_field, src_resolved, rules, parsed_map,
+                    topology, data_flow, field_mappings, visited.copy(), depth + 1,
+                )
+                if child:
+                    child_node = child
+                    child_node["transform"] = transform  # 保留当前跳的加工类型
+                    child_node["raw_sql"] = raw_sql
+
+        node["children"].append(child_node)
+
+    return node
+
+
+def _find_producing_step(table_name: str, field_name: str, steps_list: list, rules: list[RawRule]) -> str:
+    """找到产出某表某字段的步骤 ID。
+
+    通过 data_dependencies 或 target_table 反查。
+    """
+    norm = _norm_table(table_name)
+    for s in steps_list:
+        target_full = _norm_table(s.get("target_table_full", "") or
+                                  _normalize_table_name(s.get("target_schema", ""), s.get("target_table", "")))
+        if target_full == norm:
+            return s.get("step_id", "")
+        # 短名匹配
+        if norm.endswith("." + target_full.split(".")[-1]) or target_full.endswith("." + norm.split(".")[-1]):
+            return s.get("step_id", "")
+    return ""
+
+
 # ═══════════════════════════════════════════════════════════════
 # 辅助: detect_patterns() — 加工模式标签自动检测
 # ═══════════════════════════════════════════════════════════════
