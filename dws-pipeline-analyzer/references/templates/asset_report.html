@@ -2517,9 +2517,13 @@ function openDetail(fieldName, scenario) {
               var ttMap = {'direct':'直取','expression':'加工','case_when':'条件','fallback':'兜底','value':'赋值'};
               var ttLbl = ttMap[tt] || tt;
               var phys = node.is_physical;
+              var alias = node.alias || '';
               ns += '<div style="margin-left:' + (indent * 14) + 'px;font-size:12px;color:var(--text-secondary);line-height:1.7;">';
               ns += '← <code style="color:var(--accent);">' + escapeHtml(node.field || '?') + '</code>';
               ns += ' from ' + escapeHtml(shortTbl);
+              if (alias) {
+                ns += ' <span style="font-size:11px;color:var(--text-muted);">(' + escapeHtml(alias) + ')</span>';
+              }
               if (tt !== 'direct') {
                 ns += ' <span style="color:#f97316;font-weight:600;">[' + ttLbl + ']</span>';
                 if (node.raw_sql) {
@@ -2530,6 +2534,17 @@ function openDetail(fieldName, scenario) {
                 ns += ' <span style="color:#22c55e;font-weight:600;">★物理源表</span>';
               }
               ns += '</div>';
+              // 多源加工节点：展示参与加工的表之间的关联关系
+              var joinRels = node.join_relations || [];
+              if (joinRels.length > 0) {
+                ns += '<div style="margin-left:' + (indent * 14 + 14) + 'px;font-size:11px;color:#8b5cf6;margin-top:2px;">';
+                ns += '关联: ';
+                joinRels.forEach(function(r, ri) {
+                  if (ri > 0) ns += '; ';
+                  ns += escapeHtml(r.alias) + '=' + escapeHtml((r.table||'').split('.').pop()) + ' ' + escapeHtml(r.join_type||'') + ' ON ' + escapeHtml(r.on_condition||'');
+                });
+                ns += '</div>';
+              }
               var children = node.children || [];
               for (var ci = 0; ci < children.length; ci++) {
                 ns += renderTraceNode(children[ci], indent + 1);

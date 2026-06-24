@@ -3134,6 +3134,7 @@ def build_join_key_lineage(
             "step_id": lookup_step,
             "field": src_field,
             "table": src_resolved,
+            "alias": src_table_alias,  # 原始别名（如 a/b），让用户看清 a.code 是哪个表
             "transform": transform,
             "raw_sql": raw_sql,
             "is_physical": src_is_physical,
@@ -3155,7 +3156,32 @@ def build_join_key_lineage(
 
         node["children"].append(child_node)
 
+    # 多源加工节点（如拼接 a.code||b.seq）附上该步骤的关联关系，
+    # 让用户知道参与加工的表之间是怎么 JOIN 的
+    if len(node["children"]) > 1:
+        node["join_relations"] = _extract_join_relations(lookup_step, producing_df_step)
+
     return node
+
+
+def _extract_join_relations(step_id: str, df_step: dict) -> list:
+    """从 step 的 join_paths 提取关联关系摘要（哪些表 JOIN，ON 条件）。
+
+    Returns: [{alias, table, join_type, on_condition}, ...]
+    """
+    relations = []
+    join_paths = df_step.get("join_paths", {})
+    for alias, info in join_paths.items():
+        for p in info.get("path", []):
+            on_cond = p.get("on_condition", "")
+            if on_cond:
+                relations.append({
+                    "alias": p.get("to_alias", alias),
+                    "table": p.get("to_table", ""),
+                    "join_type": p.get("join_type", ""),
+                    "on_condition": on_cond,
+                })
+    return relations
 
 
 def _find_producing_step(table_name: str, field_name: str, steps_list: list, rules: list[RawRule]) -> str:
