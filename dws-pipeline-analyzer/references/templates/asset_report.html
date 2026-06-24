@@ -2518,6 +2518,10 @@ function openDetail(fieldName, scenario) {
               var ttLbl = ttMap[tt] || tt;
               var phys = node.is_physical;
               var alias = node.alias || '';
+              var hasChildren = (node.children || []).length > 0;
+              // 多源加工节点：加工表达式作为整体展示（在关联上面），子节点不重复
+              var isProcessingNode = hasChildren && tt !== 'direct';
+
               ns += '<div style="margin-left:' + (indent * 14) + 'px;font-size:12px;color:var(--text-secondary);line-height:1.7;">';
               ns += '← <code style="color:var(--accent);">' + escapeHtml(node.field || '?') + '</code>';
               ns += ' from ' + escapeHtml(shortTbl);
@@ -2526,14 +2530,17 @@ function openDetail(fieldName, scenario) {
               }
               if (tt !== 'direct') {
                 ns += ' <span style="color:#f97316;font-weight:600;">[' + ttLbl + ']</span>';
-                if (node.raw_sql) {
-                  ns += ' <code style="font-size:11px;color:var(--text-muted);">' + escapeHtml(node.raw_sql.substring(0, 50)) + '</code>';
-                }
               }
               if (phys) {
                 ns += ' <span style="color:#22c55e;font-weight:600;">★物理源表</span>';
               }
               ns += '</div>';
+
+              // 加工表达式：多源加工节点在关联上面展示一次
+              if (isProcessingNode && node.raw_sql) {
+                ns += '<div style="margin-left:' + (indent * 14 + 14) + 'px;font-size:11px;color:#f97316;margin-top:2px;font-family:monospace;background:var(--bg-card);padding:3px 8px;border-radius:4px;display:inline-block;">' + escapeHtml(node.raw_sql.substring(0, 60)) + '</div>';
+              }
+
               // 多源加工节点：展示参与加工的表之间的关联关系
               var joinRels = node.join_relations || [];
               if (joinRels.length > 0) {

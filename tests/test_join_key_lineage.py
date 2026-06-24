@@ -140,3 +140,89 @@ def _collect_steps(chain):
 def _collect_leaves(chain):
     """收集所有叶节点。"""
     return [node for node in _walk_chain(chain) if not node.get("children")]
+
+
+# ═══════════════════════════════════════════════════════════════
+# 多场景覆盖
+# ═══════════════════════════════════════════════════════════════
+
+class TestJoinKeyLineageMultiScenario:
+    """不同追溯模式的多场景覆盖。"""
+
+    def test_single_source_processing_substring(self):
+        """场景2：单源加工（截取）→ 直取 → 关联"""
+        from analyzer import build_join_key_lineage
+        scenario = [
+            {"name": "截取key", "target": "tmp1",
+             "sql": "SELECT a.id, SUBSTR(a.code, 1, 5) AS join_key FROM ods.src_a a"},
+            {"name": "直取", "target": "tmp2",
+             "sql": "SELECT t.id, t.join_key FROM dws.tmp1 t"},
+            {"name": "关联", "target": "final_f",
+             "sql": "SELECT t.id, d.name FROM dws.tmp2 t LEFT JOIN ods.dim_d d ON t.join_key = d.join_key"},
+        ]
+        rules, pm, topo, df, fm = _run_analysis(scenario)
+        chain = build_join_key_lineage("step_3", "join_key", "t", rules, pm, topo, df, fm)
+        assert chain, "追溯链不应为空"
+        # 应追到 ods.src_a（单源截取）
+        leaves = _collect_leaf_tables(chain)
+        assert any("src_a" in t for t in leaves), f"应追到 src_a，实际 {leaves}"
+        # 加工类型应有 expression（截取）
+        transforms = _collect_transforms(chain)
+        assert "expression" in transforms
+
+    def test_multi_hop_pure_direct(self):
+        """场景3：纯直取多跳（无加工），关联键一路直取"""
+        from analyzer import build_join_key_lineage
+        scenario = [
+            {"name": "源头", "target": "tmp1",
+             "sql": "SELECT a.id, a.k FROM ods.src a"},
+            {"name": "直取1", "target": "tmp2",
+             "sql": "SELECT t.id, t.k FROM dws.tmp1 t"},
+            {"name": "直取2", "target": "tmp3",
+             "sql": "SELECT t.id, t.k FROM dws.tmp2 t"},
+            {"name": "直取3", "target": "tmp4",
+             "sql": "SELECT t.id, t.k FROM dws.tmp3 t"},
+            {"name": "关联", "target": "final_f",
+             "sql": "SELECT t.id, d.name FROM dws.tmp4 t LEFT JOIN ods.dim_d d ON t.k = d.k"},
+        ]
+        rules, pm, topo, df, fm = _run_analysis(scenario)
+        chain = build_join_key_lineage("step_5", "k", "t", rules, pm, topo, df, fm)
+        assert chain, "追溯链不应为空"
+        # 应追到 ods.src
+        leaves = _collect_leaf_tables(chain)
+        assert any("src" in t for t in leaves), f"应追到 src，实际 {leaves}"
+        # 全程直取，无加工
+        transforms = _collect_transforms(chain)
+        assert "expression" not in transforms, f"纯直取不应有加工，实际 {transforms}"
+
+    def test_no_trace_for_physical_source(self):
+        """场景4：物理源表直接关联，无追溯链"""
+        from analyzer import build_join_key_lineage
+        scenario = [
+            {"name": "直接关联", "target": "final_f",
+             "sql": "SELECT a.id, b.name FROM ods.src_a a LEFT JOIN ods.dim_b b ON a.k = b.k"},
+        ]
+        rules, pm, topo, df, fm = _run_analysis(scenario)
+        # src_a.k 是物理源表，不应有追溯链
+        chain = build_join_key_lineage("step_1", "k", "a", rules, pm, topo, df, fm)
+        assert chain is not None
+        assert chain.get("is_physical"), "物理源表的关联键应直接标为物理源表"
+        assert not chain.get("children"), "物理源表不应有追溯子节点"
+
+    def test_fallback_processing(self):
+        """场景5：兜底加工（COALESCE）作为关联键"""
+        from analyzer import build_join_key_lineage
+        scenario = [
+            {"name": "兜底key", "target": "tmp1",
+             "sql": "SELECT a.id, COALESCE(a.code, 'UNK') AS join_key FROM ods.src_a a"},
+            {"name": "关联", "target": "final_f",
+             "sql": "SELECT t.id, d.name FROM dws.tmp1 t LEFT JOIN ods.dim_d d ON t.join_key = d.join_key"},
+        ]
+        rules, pm, topo, df, fm = _run_analysis(scenario)
+        chain = build_join_key_lineage("step_2", "join_key", "t", rules, pm, topo, df, fm)
+        assert chain, "追溯链不应为空"
+        transforms = _collect_transforms(chain)
+        # COALESCE 应识别为 fallback
+        assert "fallback" in transforms, f"兜底应识别为 fallback，实际 {transforms}"
+        leaves = _collect_leaf_tables(chain)
+        assert any("src_a" in t for t in leaves)
