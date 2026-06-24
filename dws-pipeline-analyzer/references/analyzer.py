@@ -3047,14 +3047,34 @@ def build_join_key_lineage(
             alias_map[j["alias"].upper()] = j["source_table"]
     resolved_table = alias_map.get((table_alias or "").upper(), table_alias or "")
 
-    # 2. 判断是否物理源表（ods/dim 层或非中间表）
+    # 2. 判断是否物理源表（ods/dim 层或非中间表，子查询假名不算物理表）
     norm_table = _norm_table(resolved_table)
-    is_physical = not norm_table.startswith(("dws.tmp", "tmp", "dws.temp", "temp"))
+    is_physical = (not norm_table.startswith(("dws.tmp", "tmp", "dws.temp", "temp"))
+                   and not resolved_table.startswith("(subquery:"))
+
+    # steps_list 提前定义（子查询穿透和 lineage 查找都要用）
+    steps_list = topology.get("steps", [])
+
+    # 2b. 子查询穿透：resolved_table 是 (subquery:xxx) 时，解析子查询内部找物理来源
+    if resolved_table.startswith("(subquery:"):
+        sq_children = _trace_subquery_sources(
+            step_id, field_name, table_alias, parsed_map, steps_list,
+            rules, topology, data_flow, field_mappings, visited, depth,
+        )
+        if sq_children is not None:
+            node = {
+                "step_id": step_id,
+                "field": field_name,
+                "table": resolved_table,
+                "transform": "direct",
+                "raw_sql": "",
+                "is_physical": False,
+                "children": sq_children,
+            }
+            return node
 
     # 3. 在 field_mappings 找该步骤该字段的 lineage
     fields_list = field_mappings.get("fields", [])
-    # step_id → rule_code 映射
-    steps_list = topology.get("steps", [])
     step_to_rule = {s["step_id"]: s.get("rule_code", "") for s in steps_list}
     rule_code = step_to_rule.get(step_id, "")
 
@@ -3128,7 +3148,8 @@ def build_join_key_lineage(
         # 解析 src_table_alias（用产出步骤的 alias 映射）
         src_resolved = producing_alias_map.get(src_table_alias.upper(), src_table_alias)
         src_norm = _norm_table(src_resolved)
-        src_is_physical = not src_norm.startswith(("dws.tmp", "tmp", "dws.temp", "temp"))
+        src_is_physical = (not src_norm.startswith(("dws.tmp", "tmp", "dws.temp", "temp"))
+                          and not src_resolved.startswith("(subquery:"))
 
         child_node = {
             "step_id": lookup_step,
@@ -3142,17 +3163,27 @@ def build_join_key_lineage(
         }
 
         if not src_is_physical and src_field:
-            # 中间表字段 → 找它产生的步骤，继续追溯
-            upstream_step = _find_producing_step(src_resolved, src_field, steps_list, rules)
-            if upstream_step:
-                child = build_join_key_lineage(
-                    upstream_step, src_field, src_resolved, rules, parsed_map,
-                    topology, data_flow, field_mappings, visited.copy(), depth + 1,
+            if src_resolved.startswith("(subquery:"):
+                # 子查询穿透：解析子查询内部找物理来源
+                sq_children = _trace_subquery_sources(
+                    lookup_step, src_field, src_table_alias, parsed_map, steps_list,
+                    rules, topology, data_flow, field_mappings, visited, depth,
                 )
-                if child:
-                    child_node = child
-                    child_node["transform"] = transform  # 保留当前跳的加工类型
-                    child_node["raw_sql"] = raw_sql
+                if sq_children is not None:
+                    child_node["children"] = sq_children
+                    child_node["is_physical"] = False
+            else:
+                # 中间表字段 → 找它产生的步骤，继续追溯
+                upstream_step = _find_producing_step(src_resolved, src_field, steps_list, rules)
+                if upstream_step:
+                    child = build_join_key_lineage(
+                        upstream_step, src_field, src_resolved, rules, parsed_map,
+                        topology, data_flow, field_mappings, visited.copy(), depth + 1,
+                    )
+                    if child:
+                        child_node = child
+                        child_node["transform"] = transform  # 保留当前跳的加工类型
+                        child_node["raw_sql"] = raw_sql
 
         node["children"].append(child_node)
 
@@ -3162,6 +3193,91 @@ def build_join_key_lineage(
         node["join_relations"] = _extract_join_relations(lookup_step, producing_df_step)
 
     return node
+
+
+def _trace_subquery_sources(
+    step_id, field_name, table_alias, parsed_map, steps_list,
+    rules, topology, data_flow, field_mappings, visited, depth,
+):
+    """穿透子查询：从 (subquery:xxx) 占位的 subquery_sql 解析字段的物理来源。
+
+    Returns: 子节点列表（物理来源），或 None（无法穿透）。
+    """
+    step_to_rule = {s["step_id"]: s.get("rule_code", "") for s in steps_list}
+    rule_code = step_to_rule.get(step_id, "")
+    parsed = parsed_map.get(rule_code)
+    if not parsed:
+        return None
+
+    # 找子查询占位（alias 匹配 table_alias）
+    sq_placeholder = None
+    for j in parsed.source_tables:
+        if j.source_table.startswith("(subquery:") and j.subquery_sql:
+            if not table_alias or j.alias.upper() == (table_alias or "").upper():
+                sq_placeholder = j
+                break
+    if not sq_placeholder or not sq_placeholder.subquery_sql:
+        return None
+
+    # 重新解析子查询 SQL，找 field_name 的来源
+    try:
+        sq_parsed = parse_single_sql(sq_placeholder.subquery_sql, "oracle")
+    except Exception:
+        return None
+    if sq_parsed.parse_error:
+        return None
+
+    # 子查询内部 alias → 物理表
+    sq_alias_map = {}
+    for ij in sq_parsed.source_tables:
+        if not ij.source_table.startswith("(subquery:") and ij.alias:
+            sq_alias_map[ij.alias.upper()] = ij.source_table
+
+    # 找该字段在子查询内的列
+    sq_col = None
+    for c in sq_parsed.select_columns:
+        if (c.alias or "").lower() == field_name.lower():
+            sq_col = c
+            break
+    if not sq_col or not sq_col.source_fields:
+        return None
+
+    # 对每个来源构建子节点
+    children = []
+    for sf in sq_col.source_fields:
+        sf_alias = (sf.get("alias", "") or "").upper()
+        sf_field = sf.get("field", "")
+        src_table = sq_alias_map.get(sf_alias, sf_alias)
+        src_norm = _norm_table(src_table)
+        src_is_physical = (not src_norm.startswith(("dws.tmp", "tmp", "dws.temp", "temp"))
+                          and not src_table.startswith("(subquery:"))
+
+        child = {
+            "step_id": step_id,
+            "field": sf_field,
+            "table": src_table,
+            "alias": sf_alias,
+            "transform": sq_col.transform_type,
+            "raw_sql": sq_col.expression,
+            "is_physical": src_is_physical,
+            "children": [],
+        }
+
+        if not src_is_physical and sf_field:
+            upstream = _find_producing_step(src_table, sf_field, steps_list, rules)
+            if upstream:
+                sub = build_join_key_lineage(
+                    upstream, sf_field, src_table, rules, parsed_map,
+                    topology, data_flow, field_mappings, visited.copy(), depth + 1,
+                )
+                if sub:
+                    child = sub
+                    child["transform"] = sq_col.transform_type
+                    child["raw_sql"] = sq_col.expression
+
+        children.append(child)
+
+    return children if children else None
 
 
 def _extract_join_relations(step_id: str, df_step: dict) -> list:

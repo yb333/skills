@@ -226,3 +226,96 @@ class TestJoinKeyLineageMultiScenario:
         assert "fallback" in transforms, f"兜底应识别为 fallback，实际 {transforms}"
         leaves = _collect_leaf_tables(chain)
         assert any("src_a" in t for t in leaves)
+
+    def test_case_when_processing(self):
+        """场景6：CASE WHEN 加工关联键（条件加工，多条件字段都追溯）"""
+        from analyzer import build_join_key_lineage
+        scenario = [
+            {"name": "条件key", "target": "tmp1",
+             "sql": "SELECT a.id, CASE WHEN a.t=1 THEN a.k1 ELSE a.k2 END AS jk FROM ods.src a"},
+            {"name": "关联", "target": "final_f",
+             "sql": "SELECT t.id, d.name FROM dws.tmp1 t LEFT JOIN ods.dim_d d ON t.jk = d.jk"},
+        ]
+        rules, pm, topo, df, fm = _run_analysis(scenario)
+        chain = build_join_key_lineage("step_2", "jk", "t", rules, pm, topo, df, fm)
+        assert chain, "追溯链不应为空"
+        transforms = _collect_transforms(chain)
+        assert "case_when" in transforms, f"CASE WHEN 应识别为 case_when，实际 {transforms}"
+        leaves = _collect_leaf_tables(chain)
+        assert any("src" in t for t in leaves), f"应追到 src，实际 {leaves}"
+
+    def test_multi_step_stacked_processing(self):
+        """场景7：多步骤叠加加工（拼接→截取→拼接，三层加工都展示）"""
+        from analyzer import build_join_key_lineage
+        scenario = [
+            {"name": "拼接", "target": "tmp1",
+             "sql": "SELECT a.id, (a.x || a.y) AS k FROM ods.src1 a"},
+            {"name": "截取", "target": "tmp2",
+             "sql": "SELECT t.id, SUBSTR(t.k, 1, 3) AS k FROM dws.tmp1 t"},
+            {"name": "再拼接", "target": "tmp3",
+             "sql": "SELECT t.id, (t.k || 'X') AS k FROM dws.tmp2 t"},
+            {"name": "关联", "target": "final_f",
+             "sql": "SELECT t.id, d.name FROM dws.tmp3 t LEFT JOIN ods.dim_d d ON t.k = d.k"},
+        ]
+        rules, pm, topo, df, fm = _run_analysis(scenario)
+        chain = build_join_key_lineage("step_4", "k", "t", rules, pm, topo, df, fm)
+        assert chain, "追溯链不应为空"
+        leaves = _collect_leaf_tables(chain)
+        assert any("src1" in t for t in leaves), f"应追到 src1，实际 {leaves}"
+        transforms = _collect_transforms(chain)
+        assert transforms.count("expression") >= 1, f"应有多层加工，实际 {transforms}"
+        steps = _collect_steps(chain)
+        assert len(steps) >= 3, f"应至少追溯3跳，实际 {steps}"
+
+    def test_inner_join_key(self):
+        """场景8：INNER JOIN 关联键追溯（不只 LEFT JOIN）"""
+        from analyzer import build_join_key_lineage
+        scenario = [
+            {"name": "源头", "target": "tmp1",
+             "sql": "SELECT a.id, a.k FROM ods.src a"},
+            {"name": "INNER关联", "target": "final_f",
+             "sql": "SELECT t.id, d.name FROM dws.tmp1 t INNER JOIN ods.dim_d d ON t.k = d.k"},
+        ]
+        rules, pm, topo, df, fm = _run_analysis(scenario)
+        chain = build_join_key_lineage("step_2", "k", "t", rules, pm, topo, df, fm)
+        assert chain, "追溯链不应为空"
+        leaves = _collect_leaf_tables(chain)
+        assert any("src" in t for t in leaves), f"INNER JOIN 也应追溯，实际 {leaves}"
+
+    def test_subquery_processing_trace(self):
+        """场景9：关联键在子查询里加工，追溯应穿透子查询到物理源表"""
+        from analyzer import build_join_key_lineage
+        scenario = [
+            {"name": "子查询加工", "target": "tmp1",
+             "sql": "SELECT t.id, t.k FROM (SELECT a.id, (a.x||a.y) AS k FROM ods.src a) t"},
+            {"name": "关联", "target": "final_f",
+             "sql": "SELECT t.id, d.name FROM dws.tmp1 t LEFT JOIN ods.dim_d d ON t.k = d.k"},
+        ]
+        rules, pm, topo, df, fm = _run_analysis(scenario)
+        chain = build_join_key_lineage("step_2", "k", "t", rules, pm, topo, df, fm)
+        assert chain, "追溯链不应为空"
+        leaves = _collect_leaf_tables(chain)
+        # 应穿透子查询追到 ods.src
+        assert any("src" in t for t in leaves), \
+            f"子查询应穿透到 src，实际 {leaves}（可能停在 subquery 假名）"
+        transforms = _collect_transforms(chain)
+        assert "expression" in transforms, f"应展示拼接加工，实际 {transforms}"
+
+    def test_union_subquery_trace(self):
+        """场景10：UNION 子查询的关联键追溯（穿透 UNION 子查询）"""
+        from analyzer import build_join_key_lineage
+        scenario = [
+            {"name": "拼接A", "target": "tmp1",
+             "sql": "SELECT a.id, (a.x||a.y) AS k FROM ods.src_a a"},
+            {"name": "拼接B", "target": "tmp2",
+             "sql": "SELECT a.id, (a.x||a.y) AS k FROM ods.src_b a"},
+            {"name": "union+关联", "target": "final_f",
+             "sql": "SELECT t.id, d.name FROM (SELECT id,k FROM dws.tmp1 UNION ALL SELECT id,k FROM dws.tmp2) t LEFT JOIN ods.dim_d d ON t.k = d.k"},
+        ]
+        rules, pm, topo, df, fm = _run_analysis(scenario)
+        chain = build_join_key_lineage("step_3", "k", "t", rules, pm, topo, df, fm)
+        assert chain, "追溯链不应为空"
+        leaves = _collect_leaf_tables(chain)
+        # 应穿透 UNION 子查询追到至少一个物理源表
+        assert any("src_a" in t or "src_b" in t for t in leaves), \
+            f"UNION 子查询应穿透到 src_a/src_b，实际 {leaves}"
