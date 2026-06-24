@@ -391,13 +391,20 @@ def build_report_data(knowledge):
     for s in steps_list:
         sid = s["step_id"]
         df_step = next((d for d in data_flow_steps if d.get("step_id") == sid), {})
+        # join_paths 合并：第一分支 + 所有 UNION 分支的 join_paths
+        # （不同分支的别名通常不同如 d1/d2，合并后渲染时按 source.alias 查找即可）
+        merged_jp = dict(df_step.get("join_paths", {}))
+        for b in df_step.get("union_branches", []):
+            for alias, info in b.get("join_paths", {}).items():
+                if alias not in merged_jp:
+                    merged_jp[alias] = info
         step_info_map[sid] = {
             "target_table": s.get("target_table", ""),
             "scenario_name": s.get("scenario_name", "默认"),
             "rule_name": s.get("rule_name", ""),
             "rule_code": s.get("rule_code", ""),
             "exec_sequence": s.get("exec_sequence", 0),
-            "join_paths": df_step.get("join_paths", {}),
+            "join_paths": merged_jp,
         }
 
     # ── field_chain_map (字段 → 完整链路树，供详情面板用) ──
