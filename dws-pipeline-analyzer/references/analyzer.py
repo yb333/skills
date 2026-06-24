@@ -20,10 +20,9 @@ import json
 import re
 import sys
 from collections import Counter
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 # Windows UTF-8
 if sys.platform == "win32":
@@ -595,8 +594,10 @@ def parse_single_sql(sql: str, dialect: str = "dws") -> ParsedSQL:
         result.parse_error = "空 SQL"
         return result
 
-    # sqlglot 解析（统一用 oracle 方言，DWS 兼容 Oracle 语法，
-    # 保持 NVL/DECODE/SUBSTR 等函数原样，不被转换为 COALESCE/CASE）
+    # sqlglot 解析（固定用 oracle 方言）。
+    # DWS/GaussDB 兼容 Oracle 语法，用 oracle 方言能保持 NVL/DECODE/SUBSTR 等函数
+    # 原样解析，不被转换为 COALESCE/CASE。dialect 参数当前仅用于 meta 记录，
+    # 不影响实际解析（如需切换方言，修改此处 sqlglot_dialect）。
     sqlglot_dialect = "oracle"
     # 整个解析流程统一兜底：制品包 SQL 质量不可控，深度嵌套可能触发
     # RecursionError，异常 AST 可能触发 AttributeError 等。任何异常都
@@ -1201,12 +1202,10 @@ def _extract_select_columns(select_node, comment_alias_map: dict | None = None, 
 
     # 构建别名回填表：如果只有一张表（或一个 FROM 主表），无前缀的列回填为该表
     fallback_alias = ""
-    fallback_table = ""
     if joins:
         from_joins = [j for j in joins if j.join_type == "FROM"]
         if len(from_joins) == 1:
             fallback_alias = from_joins[0].alias or from_joins[0].source_table.split(".")[-1]
-            fallback_table = from_joins[0].source_table
 
     for i, proj in enumerate(select_node.expressions):
         proj_sql = proj.sql(dialect=sqlglot_dialect)
@@ -3654,12 +3653,13 @@ def main():
     output_file.write_text(
         json.dumps(knowledge, ensure_ascii=False, indent=2),
         encoding="utf-8",
+        newline="\n",
     )
 
     # ── 生成 AI 增强用摘要 ──
     summary_file = output_dir / "knowledge_summary.md"
     summary_text = _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings, quality)
-    summary_file.write_text(summary_text, encoding="utf-8")
+    summary_file.write_text(summary_text, encoding="utf-8", newline="\n")
 
     print(f"\n=== 完成 ===")
     print(f"输出: {output_file}")

@@ -42,6 +42,13 @@ def _norm(name: str) -> str:
     return name.strip().lower()
 
 
+# 加工类型优先级（从轻到重）。HTML 视图和 Excel mapping 共用此口径，避免不一致。
+TRANSFORM_PRIORITY = {
+    "unknown": -1, "direct": 0, "value": 1, "fallback": 2,
+    "case_when": 3, "expression": 4, "aggregate": 5, "pivot": 6, "window": 7,
+}
+
+
 def _merge_ai_markdown(knowledge: dict, ai_text: str) -> None:
     """解析 AI 输出的自然语言 markdown，合并到 knowledge 的 business_logic。
 
@@ -183,9 +190,6 @@ def build_report_data(knowledge):
     data_flow_steps = df.get("steps", [])
     fields_list = fm.get("fields", [])
 
-    # ── 构建 CTE 索引（用于穿透）──
-    cte_index = _build_cte_index(data_flow_steps)
-    cte_names_upper = set(cte_index.keys())
     target_types = meta.get("target_field_types", {})
     patterns = meta.get("patterns", [])
 
@@ -441,7 +445,7 @@ def build_report_data(knowledge):
 
         # 取链路中最重的加工类型
         chain_for_field = field_chain_map.get(fname_lower, {}).get("chains", [])
-        chain_priority = {"unknown": -1, "direct": 0, "value": 1, "fallback": 2, "case_when": 3, "expression": 4, "aggregate": 5, "pivot": 6, "window": 7}
+        chain_priority = TRANSFORM_PRIORITY
         best_tt = f.get("transform_type", "expression")
         for cc in chain_for_field:
             cc_tt = cc.get("transform_type", "expression")
@@ -1115,7 +1119,7 @@ def generate_asset_report(knowledge, output_dir):
     # 写入
     output_path = Path(output_dir) / "asset_report.html"
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(html, encoding="utf-8")
+    output_path.write_text(html, encoding="utf-8", newline="\n")
     print(f"  [OK] 资产说明书: {output_path}")
     return True
 
@@ -1209,8 +1213,24 @@ def generate_mapping(knowledge, output_dir):
     target_cn = bl.get("summary", "").split("，")[0] if bl.get("summary") else target_table
 
     # 收集所有物理源表（含 CTE/子查询内部物理表），排除假名、CTE 名和目标表自身
-    # seen_sources 存归一化名用于去重；UNION 步骤的源表带分支归属
-    seen_sources = set()
+    def _join_type_label(jt, join_cond):
+        """把 join_type 翻译成友好关联描述"""
+        if jt == "FROM":
+            return "主表"
+        if jt == "FROM_SUBQUERY_MAIN":
+            return "子查询内部主表"
+        if jt == "FROM_SUBQUERY":
+            return "子查询内部从表"
+        if jt == "JOIN_SUBQUERY_INNER":
+            return "JOIN子查询内部从表"
+        if jt == "JOIN_SUBQUERY":
+            return "JOIN子查询"
+        return f"{jt} ON {join_cond}" if join_cond else jt
+
+    # 源表去重：seen_global（string key）跨步骤+跨段全局去重，
+    # seen_branches（tuple key）UNION 分支内去重。两者分离避免 key 类型混用。
+    seen_global = set()
+    seen_branches = set()
     entity_rows = []
     for s in steps_list:
         sid = s["step_id"]
@@ -1219,20 +1239,6 @@ def generate_mapping(knowledge, output_dir):
         ctes = df_step.get("ctes", [])
         ub_list = df_step.get("union_branches", [])
         has_union = len(ub_list) >= 1
-
-        def _join_type_label(jt, join_cond):
-            """把 join_type 翻译成友好关联描述"""
-            if jt == "FROM":
-                return "主表"
-            if jt == "FROM_SUBQUERY_MAIN":
-                return "子查询内部主表"
-            if jt == "FROM_SUBQUERY":
-                return "子查询内部从表"
-            if jt == "JOIN_SUBQUERY_INNER":
-                return "JOIN子查询内部从表"
-            if jt == "JOIN_SUBQUERY":
-                return "JOIN子查询"
-            return f"{jt} ON {join_cond}" if join_cond else jt
 
         if has_union:
             # UNION 步骤：按分支收集源表（带分支归属）
@@ -1246,11 +1252,12 @@ def generate_mapping(knowledge, output_dir):
                         continue
                     if src_full.upper() in cte_names_upper:
                         continue
-                    # 同表在不同分支都显示（用 分支+表 做去重 key）
+                    # 同表在不同分支都显示（分支+表 做去重 key）
                     dedup_key = (bidx, _norm(src_full))
-                    if dedup_key in seen_sources:
+                    if dedup_key in seen_branches:
                         continue
-                    seen_sources.add(dedup_key)
+                    seen_branches.add(dedup_key)
+                    seen_global.add(_norm(src_full))
                     sch, tbl = _split_schema_table(src_full)
                     relation = _join_type_label(j.get("join_type", ""), j.get("join_condition", ""))
                     entity_rows.append([
@@ -1264,11 +1271,11 @@ def generate_mapping(knowledge, output_dir):
                 src_full = j.get("source_table", "")
                 if not src_full or src_full.startswith("(subquery:"):
                     continue
-                if _norm(src_full) in seen_sources or _norm(src_full) in target_tables_set:
+                if _norm(src_full) in seen_global or _norm(src_full) in target_tables_set:
                     continue
                 if src_full.upper() in cte_names_upper:
                     continue
-                seen_sources.add(_norm(src_full))
+                seen_global.add(_norm(src_full))
                 sch, tbl = _split_schema_table(src_full)
                 relation = _join_type_label(j.get("join_type", ""), j.get("join_condition", ""))
                 entity_rows.append([
@@ -1281,11 +1288,11 @@ def generate_mapping(knowledge, output_dir):
         for cte in ctes:
             for st in cte.get("source_tables", []):
                 tname = st.get("name", "")
-                if not tname or _norm(tname) in seen_sources or _norm(tname) in target_tables_set:
+                if not tname or _norm(tname) in seen_global or _norm(tname) in target_tables_set:
                     continue
                 if tname.upper() in cte_names_upper:
                     continue
-                seen_sources.add(_norm(tname))
+                seen_global.add(_norm(tname))
                 sch, tbl = _split_schema_table(tname)
                 talias = st.get("alias", "")
                 jt = st.get("join_type", "FROM")
@@ -1348,7 +1355,7 @@ def generate_mapping(knowledge, output_dir):
                 if existing.get("target_field") == fname:
                     existing_tt = existing.get("transform_type", "expression")
                     new_tt = f.get("transform_type", "expression")
-                    priority = {"unknown": -1, "value": 0, "direct": 1, "expression": 2, "fallback": 3, "case_when": 4, "aggregate": 5, "pivot": 6, "window": 7}
+                    priority = TRANSFORM_PRIORITY
                     if priority.get(new_tt, 0) > priority.get(existing_tt, 0):
                         scenario_fields[scenario][i] = f
                     break
@@ -1745,7 +1752,7 @@ def generate_tech_design(knowledge, output_dir):
     # 写入
     output_path = Path(output_dir) / "tech_design.md"
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("\n".join(lines), encoding="utf-8")
+    output_path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
     print(f"  [OK] 技术设计文档: {output_path}")
     return True
 
