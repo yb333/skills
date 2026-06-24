@@ -2497,47 +2497,51 @@ function openDetail(fieldName, scenario) {
             }
             s += '</details>';
           }
-
-          // 关联键跨步骤追溯链（join_key_lineage）
-          var jkl = c.join_key_lineage || {};
-          var fieldKey = (src.field || '').toLowerCase();
-          if (jkl[fieldKey] && jkl[fieldKey].length > 0) {
-            jkl[fieldKey].forEach(function(traceChain) {
-              s += '<details style="margin-top:4px;margin-left:16px;">';
-              s += '<summary style="cursor:pointer;font-size:12px;color:#3b82f6;">🔗 关联键来源链（跨步骤追溯）</summary>';
-              s += '<div style="margin-top:4px;">';
-              function renderTraceNode(node, indent) {
-                var ns = '';
-                var shortTbl = (node.table || '').split('.').pop();
-                var tt = node.transform || 'direct';
-                var ttMap = {'direct':'直取','expression':'加工','case_when':'条件','fallback':'兜底','value':'赋值'};
-                var ttLbl = ttMap[tt] || tt;
-                var phys = node.is_physical;
-                ns += '<div style="margin-left:' + (indent * 14) + 'px;font-size:12px;color:var(--text-secondary);line-height:1.7;">';
-                ns += '← <code style="color:var(--accent);">' + escapeHtml(node.field || '?') + '</code>';
-                ns += ' from ' + escapeHtml(shortTbl);
-                if (tt !== 'direct') {
-                  ns += ' <span style="color:#f97316;font-weight:600;">[' + ttLbl + ']</span>';
-                  if (node.raw_sql) {
-                    ns += ' <code style="font-size:11px;color:var(--text-muted);">' + escapeHtml(node.raw_sql.substring(0, 50)) + '</code>';
-                  }
-                }
-                if (phys) {
-                  ns += ' <span style="color:#22c55e;font-weight:600;">★物理源表</span>';
-                }
-                ns += '</div>';
-                var children = node.children || [];
-                for (var ci = 0; ci < children.length; ci++) {
-                  ns += renderTraceNode(children[ci], indent + 1);
-                }
-                return ns;
-              }
-              s += renderTraceNode(traceChain, 0);
-              s += '</div>';
-              s += '</details>';
-            });
-          }
         });
+
+      // 关联键跨步骤追溯链（join_key_lineage）—— chain 级别渲染
+      // 这些关联键决定了当前字段能否取到，追溯它们的跨步骤来源
+      var jkl = c.join_key_lineage || {};
+      var jklKeys = Object.keys(jkl);
+      if (jklKeys.length > 0) {
+        jklKeys.forEach(function(fieldKey) {
+          var chains2 = jkl[fieldKey] || [];
+          chains2.forEach(function(traceChain) {
+            s += '<details style="margin-top:4px;margin-left:16px;">';
+            s += '<summary style="cursor:pointer;font-size:12px;color:#3b82f6;">🔗 关联键 "' + escapeHtml(fieldKey) + '" 来源链（跨步骤追溯）</summary>';
+            s += '<div style="margin-top:4px;">';
+            function renderTraceNode(node, indent) {
+              var ns = '';
+              var shortTbl = (node.table || '').split('.').pop();
+              var tt = node.transform || 'direct';
+              var ttMap = {'direct':'直取','expression':'加工','case_when':'条件','fallback':'兜底','value':'赋值'};
+              var ttLbl = ttMap[tt] || tt;
+              var phys = node.is_physical;
+              ns += '<div style="margin-left:' + (indent * 14) + 'px;font-size:12px;color:var(--text-secondary);line-height:1.7;">';
+              ns += '← <code style="color:var(--accent);">' + escapeHtml(node.field || '?') + '</code>';
+              ns += ' from ' + escapeHtml(shortTbl);
+              if (tt !== 'direct') {
+                ns += ' <span style="color:#f97316;font-weight:600;">[' + ttLbl + ']</span>';
+                if (node.raw_sql) {
+                  ns += ' <code style="font-size:11px;color:var(--text-muted);">' + escapeHtml(node.raw_sql.substring(0, 50)) + '</code>';
+                }
+              }
+              if (phys) {
+                ns += ' <span style="color:#22c55e;font-weight:600;">★物理源表</span>';
+              }
+              ns += '</div>';
+              var children = node.children || [];
+              for (var ci = 0; ci < children.length; ci++) {
+                ns += renderTraceNode(children[ci], indent + 1);
+              }
+              return ns;
+            }
+            s += renderTraceNode(traceChain, 0);
+            s += '</div>';
+            s += '</details>';
+          });
+        });
+      }
       } else if (tt === 'direct' && c.sources.length === 0) {
         s += '<div style="font-size:10px;color:var(--text-muted);">无来源</div>';
       } else {
