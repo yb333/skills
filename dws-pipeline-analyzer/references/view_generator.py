@@ -120,6 +120,60 @@ def _is_intermediate_tbl(table_name: str) -> bool:
     return bool(_INTERMEDIATE_TBL_RE.search(short))
 
 
+def _resolve_on_condition_aliases(on_condition, alias_map, join_key_lineage):
+    """把 ON 条件里的中间表别名替换成物理源表，并标注传递路径。
+
+    例: "t.bid = d.bid"，t 是中间表(tmp1)，bid 追溯到 tbl_b
+        → "tbl_b.bid = d.bid（经tmp1传递）"
+
+    Args:
+        on_condition: ON 条件字符串（如 "t.bid = d.bid"）
+        alias_map: {别名(UPPER): 物理表名}，本步骤的 FROM/JOIN 别名映射
+        join_key_lineage: {field_lower: [追溯链]}，关联键追溯数据
+    Returns: (改写后的ON条件, 传递路径标注)
+    """
+    import re as _re
+    if not on_condition:
+        return on_condition, ""
+
+    rewritten = on_condition
+    transfers = []  # 传递路径标注
+
+    # 提取所有 alias.field 模式
+    for m in _re.finditer(r'(\w+)\.(\w+)', on_condition):
+        alias = m.group(1)
+        field = m.group(2)
+        table = alias_map.get(alias.upper(), "")
+        if not table or not _is_intermediate_tbl(table):
+            continue
+        # 这个别名是中间表，追溯它的 field 到物理源表
+        trace_chains = join_key_lineage.get(field.lower(), [])
+        if not trace_chains:
+            continue
+        chain = trace_chains[0]
+        # 找物理源表（叶节点）
+        leaves = []
+        def _find_leaves(n):
+            if not n.get("children"):
+                leaves.append(n)
+            for c in n.get("children", []):
+                _find_leaves(c)
+        _find_leaves(chain)
+        if not leaves:
+            continue
+        # 取第一个叶节点的物理表短名
+        phys_table = leaves[0].get("table", "").split(".")[-1]
+        phys_field = leaves[0].get("field", field)
+        # 替换别名：t.bid → tbl_b.bid
+        old_ref = f"{alias}.{field}"
+        new_ref = f"{phys_table}.{phys_field}"
+        rewritten = rewritten.replace(old_ref, new_ref)
+        transfers.append(f"{old_ref}经{table.split('.')[-1]}来自{new_ref}")
+
+    transfer_note = "（" + "；".join(transfers) + "）" if transfers else ""
+    return rewritten, transfer_note
+
+
 def _merge_ai_markdown(knowledge: dict, ai_text: str) -> None:
     """解析 AI 输出的自然语言 markdown，合并到 knowledge 的 business_logic。
 
@@ -1349,6 +1403,12 @@ def generate_mapping(knowledge, output_dir):
         else:
             # 非 UNION：主查询 JOIN（物理表），过滤子查询假名和中间表
             where_clause = (df_step.get("where_clause", "") or "").replace("WHERE ", "")
+            # 本步骤的别名映射 + 关联键追溯（用于 ON 条件中间表别名替换）
+            step_alias_map = {}
+            for j in joins:
+                if j.get("alias") and j.get("source_table"):
+                    step_alias_map[j["alias"].upper()] = j["source_table"]
+            step_jkl = df_step.get("join_key_lineage", {})
             for j in joins:
                 src_full = j.get("source_table", "")
                 if not src_full or src_full.startswith("(subquery:"):
@@ -1362,7 +1422,13 @@ def generate_mapping(knowledge, output_dir):
                     continue
                 seen_global.add(_norm(src_full))
                 sch, tbl = _split_schema_table(src_full)
-                relation = _join_type_label(j.get("join_type", ""), j.get("join_condition", ""))
+                # ON 条件里的中间表别名替换为物理源表
+                raw_cond = j.get("join_condition", "")
+                rewritten_cond, transfer_note = _resolve_on_condition_aliases(
+                    raw_cond, step_alias_map, step_jkl)
+                relation = _join_type_label(j.get("join_type", ""), rewritten_cond)
+                if transfer_note:
+                    relation += transfer_note
                 # WHERE 条件放在备注列（只有第一个源表行放，避免重复）
                 remark = where_clause if not entity_rows or not entity_rows[-1][8] else ""
                 entity_rows.append([
