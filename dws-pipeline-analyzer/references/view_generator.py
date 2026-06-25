@@ -1182,11 +1182,27 @@ def _build_lineage_layout(topo, df, bl=None):
 
     max_seq = max(step_seq_map.values()) if step_seq_map else 0
 
+    # 写同一目标表的步骤归到同一列（exec_sequence 最小值）
+    # 避免 step3→target 的线穿过 step4（视觉回连）
+    # key: norm(target_table), value: min exec_sequence of writers
+    target_min_seq = {}
+    for s in steps_list:
+        tf = _norm(_schema_table(s.get("target_schema", ""), s.get("target_table", "")))
+        seq = s.get("exec_sequence", 0)
+        if tf not in target_min_seq or seq < target_min_seq[tf]:
+            target_min_seq[tf] = seq
+
     # 计算每个节点的列号（浮点数，整数列放步骤，小数列放表）
     node_col = {}
     for nid, ninfo in nodes.items():
         if ninfo["type"] == "step":
-            node_col[nid] = step_seq_map.get(nid, 0)
+            # 写同一 target 的步骤归一到最小 seq 列
+            s = next((st for st in steps_list if st["step_id"] == nid), {})
+            tf = _norm(_schema_table(s.get("target_schema", ""), s.get("target_table", "")))
+            if tf in target_min_seq and len([st for st in steps_list if _norm(_schema_table(st.get("target_schema",""), st.get("target_table",""))) == tf]) > 1:
+                node_col[nid] = target_min_seq[tf]
+            else:
+                node_col[nid] = step_seq_map.get(nid, 0)
         elif ninfo["type"] == "target":
             node_col[nid] = max_seq + 1
         elif ninfo["type"] == "intermediate":
