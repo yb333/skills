@@ -319,3 +319,29 @@ class TestJoinKeyLineageMultiScenario:
         # 应穿透 UNION 子查询追到至少一个物理源表
         assert any("src_a" in t or "src_b" in t for t in leaves), \
             f"UNION 子查询应穿透到 src_a/src_b，实际 {leaves}"
+
+    def test_real_world_temp_table_naming(self):
+        """场景11：生产实际临时表命名格式（xxx_tmp1 后缀，非 tmp 开头）
+
+        Bug: 旧代码 startswith("tmp") 只认 tmp 开头，后缀格式的临时表
+        被误判为物理源表，追溯链不穿透。测试用例都用 tmp1（开头），
+        掩盖了这个 bug。
+        """
+        from analyzer import build_join_key_lineage
+        scenario = [
+            {"name": "源头加工", "target": "dwl_con_pu_any_tmp1",
+             "sql": "SELECT a.id, (a.code || b.seq) AS bid FROM ods.tbl_a a LEFT JOIN ods.tbl_b b ON a.k = b.k"},
+            {"name": "中间直取", "target": "dwl_con_pu_any_tmp2",
+             "sql": "SELECT t.id, t.bid FROM dws.dwl_con_pu_any_tmp1 t"},
+            {"name": "最终关联", "target": "dwl_con_pu_any_f",
+             "sql": "SELECT t.id, d.name FROM dws.dwl_con_pu_any_tmp2 t LEFT JOIN ods.dim_d d ON t.bid = d.bid"},
+        ]
+        rules, pm, topo, df, fm = _run_analysis(scenario)
+        chain = build_join_key_lineage("step_3", "bid", "t", rules, pm, topo, df, fm)
+        assert chain, "追溯链不应为空"
+        leaves = _collect_leaf_tables(chain)
+        # 应穿透后缀格式的临时表追到物理源表
+        assert any("tbl_a" in t for t in leaves), \
+            f"后缀格式临时表应穿透到 tbl_a，实际 {leaves}（startswith bug 会停在后缀表名）"
+        assert any("tbl_b" in t for t in leaves), \
+            f"后缀格式临时表应穿透到 tbl_b，实际 {leaves}"
