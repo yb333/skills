@@ -1347,10 +1347,14 @@ def generate_mapping(knowledge, output_dir):
                         relation, "", "", f"分支{bidx}", "",
                     ])
         else:
-            # 非 UNION：主查询 JOIN（物理表），过滤子查询假名
+            # 非 UNION：主查询 JOIN（物理表），过滤子查询假名和中间表
+            where_clause = (df_step.get("where_clause", "") or "").replace("WHERE ", "")
             for j in joins:
                 src_full = j.get("source_table", "")
                 if not src_full or src_full.startswith("(subquery:"):
+                    continue
+                # 过滤中间表（实体级只显示物理源表，中间表不出现）
+                if _is_intermediate_tbl(src_full):
                     continue
                 if _norm(src_full) in seen_global or _norm(src_full) in target_tables_set:
                     continue
@@ -1359,10 +1363,12 @@ def generate_mapping(knowledge, output_dir):
                 seen_global.add(_norm(src_full))
                 sch, tbl = _split_schema_table(src_full)
                 relation = _join_type_label(j.get("join_type", ""), j.get("join_condition", ""))
+                # WHERE 条件放在备注列（只有第一个源表行放，避免重复）
+                remark = where_clause if not entity_rows or not entity_rows[-1][8] else ""
                 entity_rows.append([
                     sch, tbl, j.get("alias", ""), "",
                     target_schema, target_cn, target_table,
-                    relation, "", "", "", "",
+                    relation, remark, "", "", "",
                 ])
 
         # CTE 内部物理表（UNION 和非 UNION 都可能有 CTE）
