@@ -105,6 +105,21 @@ def _describe_transform(transform_type: str, expression: str = "", field: str = 
     return "加工"
 
 
+# 临时表/中间表判断（与 analyzer._is_intermediate_table 同款逻辑）
+_INTERMEDIATE_TBL_RE = __import__("re").compile(
+    r"(?:^tmp\d*$|_tmp\d*$|^temp\d*$|_temp\d*$|^tmp_|_tmp_|^temp_|_temp_)",
+    __import__("re").IGNORECASE,
+)
+
+
+def _is_intermediate_tbl(table_name: str) -> bool:
+    """判断表名是否为临时表/中间表。"""
+    if not table_name:
+        return False
+    short = _norm(table_name).split(".")[-1]
+    return bool(_INTERMEDIATE_TBL_RE.search(short))
+
+
 def _merge_ai_markdown(knowledge: dict, ai_text: str) -> None:
     """解析 AI 输出的自然语言 markdown，合并到 knowledge 的 business_logic。
 
@@ -1379,7 +1394,7 @@ def generate_mapping(knowledge, output_dir):
     # 源表别名放在源表物理表名后面
     headers2 = [
         "场景", "源表schema", "源表物理表名", "源表别名", "源字段名", "源字段类型",
-        "映射规则", "映射表达式",
+        "映射描述", "映射表达式",
         "目标字段名", "目标字段中文名", "目标字段类型"
     ]
     ws2.append(headers2)
@@ -1407,6 +1422,12 @@ def generate_mapping(knowledge, output_dir):
         fname = f.get("target_field", "")
         step_id = f.get("producing_step", "")
         if _is_view_step(step_id) or not fname:
+            continue
+
+        # 跳过中间表步骤的字段（只展示最终目标表，中间表靠 physical_source 穿透体现）
+        step_info = next((s for s in steps_list if s.get("step_id") == step_id), {})
+        step_target = step_info.get("target_table_full", "") or step_info.get("target_table", "")
+        if _is_intermediate_tbl(step_target):
             continue
 
         scenario = step_scenario.get(step_id, "默认场景")
@@ -1440,20 +1461,32 @@ def generate_mapping(knowledge, output_dir):
             field_cn = ddl_comments.get(target_field_name.lower(), "")
             field_type = ddl_types.get(target_field_name.lower(), "")
 
-            lineages = f.get("lineage", [])
-            physical_sources = _resolve_physical_sources(lineages, cte_index, cte_names_upper, set())
+            # 优先用跨步骤穿透的 physical_source（追到物理源表），没有则回退 CTE 穿透
+            phys_sources = f.get("physical_source", [])
+            if not phys_sources:
+                lineages = f.get("lineage", [])
+                phys_sources = _resolve_physical_sources(lineages, cte_index, cte_names_upper, set())
 
-            if not physical_sources:
+            if not phys_sources:
                 ws2.append([
                     scenario, "", "", "", "", "",
-                    rule, "",
+                    _describe_transform(tt), "",
                     target_field_name, field_cn, field_type,
                 ])
             else:
-                for ps in physical_sources:
+                for ps in phys_sources:
+                    ps_tt = ps.get("transform", tt)
+                    ps_field = ps.get("field", target_field_name)
+                    ps_raw = ps.get("raw_sql", "")
+                    describe = _describe_transform(ps_tt, ps_raw, ps_field)
+                    # schema/table 拆分
+                    ptable = ps.get("table", "")
+                    parts = ptable.split(".")
+                    p_schema = parts[0] if len(parts) > 1 else ""
+                    p_table = parts[-1] if len(parts) > 1 else parts[0]
                     ws2.append([
-                        scenario, ps["schema"], ps["table"], ps.get("alias", ""), ps["field"], "",
-                        rule, ps.get("raw_sql", ""),
+                        scenario, p_schema, p_table, ps.get("alias", ""), ps_field, "",
+                        describe, ps_raw,
                         target_field_name, field_cn, field_type,
                     ])
 

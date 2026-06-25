@@ -3391,6 +3391,98 @@ def enrich_join_key_lineage(
             step["join_key_lineage"] = key_lineage
 
 
+def enrich_field_physical_sources(
+    field_mappings: dict,
+    data_flow: dict,
+    rules: list[RawRule],
+    parsed_map: dict,
+    topology: dict,
+) -> None:
+    """对 field_mappings 的每个字段，追溯跨步骤物理来源，注入 physical_source。
+
+    直接修改 field_mappings["fields"] 的每个 field，加 "physical_source" 字段：
+        [{
+            "table": "ods.tbl_b",       # 物理源表
+            "field": "bname",           # 物理源字段
+            "alias": "b",               # 别名
+            "transform": "aggregate",   # 追溯链上最重的加工类型
+            "raw_sql": "SUM(t.bname)",  # 加工表达式
+        }, ...]
+    多源加工（如拼接）返回多个物理来源。
+    """
+    steps_list = topology.get("steps", [])
+    # step_id → df_step 的 alias_map 缓存
+    step_alias_maps = {}
+    for ds in data_flow.get("steps", []):
+        sid = ds.get("step_id", "")
+        amap = {}
+        for j in ds.get("joins", []):
+            if j.get("alias") and j.get("source_table"):
+                amap[j["alias"].upper()] = j["source_table"]
+        step_alias_maps[sid] = amap
+
+    for f in field_mappings.get("fields", []):
+        step_id = f.get("producing_step", "")
+        fname = f.get("target_field", "")
+        if not step_id or not fname:
+            continue
+
+        # 从该字段的 lineage 取第一个来源的别名，作为追溯起点
+        lineages = f.get("lineage", [])
+        if not lineages:
+            continue
+        first_src = lineages[0]
+        src_alias = first_src.get("source_table", "")
+
+        chain = build_join_key_lineage(
+            step_id, fname, src_alias, rules, parsed_map,
+            topology, data_flow, field_mappings,
+        )
+        if not chain:
+            continue
+
+        # 提取叶节点（物理源表）+ 链上最重加工
+        physical_sources = _extract_physical_sources_from_chain(chain)
+        if physical_sources:
+            f["physical_source"] = physical_sources
+
+
+def _extract_physical_sources_from_chain(chain: dict) -> list:
+    """从追溯链提取物理来源（叶节点）+ 加工信息。
+
+    Returns: [{table, field, alias, transform, raw_sql}, ...]
+    """
+    result = []
+    # 收集链上所有非 direct 的加工（取第一个作为代表）
+    processing = None
+    for node in _walk_chain_for_extract(chain):
+        tt = node.get("transform", "direct")
+        if tt != "direct":
+            processing = node
+            break
+
+    # 收集叶节点
+    leaves = [n for n in _walk_chain_for_extract(chain) if not n.get("children")]
+    for leaf in leaves:
+        result.append({
+            "table": leaf.get("table", ""),
+            "field": leaf.get("field", ""),
+            "alias": leaf.get("alias", ""),
+            "transform": (processing or leaf).get("transform", "direct"),
+            "raw_sql": (processing or leaf).get("raw_sql", ""),
+        })
+    return result
+
+
+def _walk_chain_for_extract(chain):
+    """遍历追溯链所有节点。"""
+    if not chain:
+        return
+    yield chain
+    for child in chain.get("children", []):
+        yield from _walk_chain_for_extract(child)
+
+
 # ═══════════════════════════════════════════════════════════════
 # 辅助: detect_patterns() — 加工模式标签自动检测
 # ═══════════════════════════════════════════════════════════════
@@ -3985,6 +4077,13 @@ def main():
     enrich_join_key_lineage(data_flow, rules, parsed_map, topology, field_mappings)
     traced = sum(1 for s in data_flow["steps"] if s.get("join_key_lineage"))
     print(f"  含追溯链的步骤: {traced}")
+    print()
+
+    # ── Step 5d: 字段物理来源穿透（供 mapping 用）──
+    print("Step 5d: 构建字段物理来源穿透...")
+    enrich_field_physical_sources(field_mappings, data_flow, rules, parsed_map, topology)
+    traced_f = sum(1 for f in field_mappings["fields"] if f.get("physical_source"))
+    print(f"  含物理穿透的字段: {traced_f}")
     print()
 
     # ── Step 6: 质量分析 ──
