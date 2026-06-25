@@ -120,6 +120,96 @@ def _is_intermediate_tbl(table_name: str) -> bool:
     return bool(_INTERMEDIATE_TBL_RE.search(short))
 
 
+# 写入方式标签
+_DELETE_MODE_LABEL = {
+    "0": "追加写入", "1": "覆盖写入", "2": "清空后写入",
+    "3": "按条件删除后写入", "4": "增量写入",
+}
+
+
+def _build_step_summary_inline(topo_step, df_step, fields_list):
+    """生成结构化步骤概述（自然语言，精简归类）。
+
+    格式: 从<主表>，过滤<条件>。关联<从表>带出<字段>。<写入方式><目标表>
+    主表自带字段省略，只强调从表带出和加工字段。
+    """
+    joins = df_step.get("joins", [])
+    where_clause = (df_step.get("where_clause", "") or "").replace("WHERE ", "").strip()
+    target_table = topo_step.get("target_table_full", "") or topo_step.get("target_table", "")
+    dm = (topo_step.get("delete_mode", "") or "").strip()
+    delete_label = _DELETE_MODE_LABEL.get(dm, "写入")
+    rule_type = topo_step.get("rule_type", 1)
+    step_id = topo_step.get("step_id", "")
+
+    # 分离主表和从表
+    main_table = ""
+    main_alias = ""
+    secondary_tables = []
+    for j in joins:
+        if j.get("source_table", "").startswith("(subquery:"):
+            continue
+        jt = (j.get("join_type", "") or "").upper()
+        if jt in ("FROM", "FROM_SUBQUERY_MAIN"):
+            main_table = j.get("source_table", "")
+            main_alias = j.get("alias", "")
+        else:
+            secondary_tables.append({
+                "table": j.get("source_table", ""),
+                "alias": j.get("alias", ""),
+            })
+
+    parts = []
+    main_short = main_table.split(".")[-1] if main_table else ""
+
+    if rule_type == 9:
+        parts.append("交换分区数据")
+    elif main_short:
+        if where_clause:
+            parts.append(f"从 {main_table}，过滤 {where_clause}。")
+        else:
+            parts.append(f"从 {main_table}。")
+
+    # 别名→表名映射
+    alias_map = {}
+    for j in joins:
+        if j.get("alias") and j.get("source_table"):
+            alias_map[j["alias"].upper()] = j["source_table"]
+
+    # 从表关联带出字段
+    for sec in secondary_tables:
+        sec_alias = sec["alias"].upper()
+        sec_short = sec["table"].split(".")[-1] if sec["table"] else ""
+        brought = []
+        for f in fields_list:
+            if f.get("producing_step") != step_id:
+                continue
+            for l in f.get("lineage", []):
+                if (l.get("source_table", "") or "").upper() == sec_alias:
+                    brought.append(f["target_field"])
+                    break
+        field_str = "、".join(dict.fromkeys(brought)) if brought else "字段"
+        parts.append(f"关联 {sec_short} 带出 {field_str}；")
+
+    # 加工归类
+    processing_types = set()
+    for f in fields_list:
+        if f.get("producing_step") != step_id:
+            continue
+        tt = f.get("transform_type", "direct")
+        if tt not in ("direct", "unknown"):
+            processing_types.add(tt)
+    if processing_types:
+        type_descs = [_describe_transform(tt, "", "") for tt in sorted(processing_types)]
+        parts.append("包含" + "、".join(type_descs) + "。")
+
+    if rule_type == 9:
+        parts.append(f"交换至 {target_table}")
+    else:
+        parts.append(f"{delete_label} {target_table}")
+
+    return " ".join(parts)
+
+
 def _resolve_on_condition_aliases(on_condition, alias_map, join_key_lineage):
     """把 ON 条件里的中间表别名替换成物理源表，并标注传递路径。
 
@@ -393,6 +483,7 @@ def build_report_data(knowledge):
             "scenario_id": s.get("scenario_id", ""),
             "scenario_name": s.get("scenario_name", ""),
             "is_common_step": s.get("is_common_step", False),
+            "structured_summary": _build_step_summary_inline(s, df_step, fields_list),
             "delete_mode_label": s.get("delete_mode_label", ""),
             "delete_condition": s.get("delete_condition", ""),
             "source_tables": s.get("source_tables_from_sql", []),

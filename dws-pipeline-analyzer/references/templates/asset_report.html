@@ -1961,6 +1961,10 @@ function renderSteps() {
     if (step.rule_code) html += ' <span style="color:var(--text-muted);font-weight:400;font-size:12px;">(' + escapeHtml(step.rule_code) + ')</span>';
     html += '</span>';
     html += '</div>';
+    // 结构化步骤概述（主表/关联/带出字段/写入）
+    if (step.structured_summary) {
+      html += '<div style="font-size:13px;color:var(--text-secondary);line-height:1.6;margin:4px 0 2px;padding:6px 10px;background:var(--bg-card);border-radius:4px;border-left:3px solid var(--accent);">' + escapeHtml(step.structured_summary) + '</div>';
+    }
     // Right side: delete_mode_label + exec_sequence
     if (step.delete_mode_label) {
       html += '<span class="write-mode-tag">' + escapeHtml(step.delete_mode_label) + '</span>';

@@ -1989,6 +1989,112 @@ def build_scenarios(rules: list[RawRule], parsed_map: dict) -> list[dict]:
     return scenarios
 
 
+DELETE_MODE_LABEL = {
+    "0": "追加写入", "1": "覆盖写入", "2": "清空后写入",
+    "3": "按条件删除后写入", "4": "增量写入",
+}
+
+
+def build_structured_step_summary(step: dict, df_step: dict, fields: list) -> str:
+    """生成结构化步骤概述（自然语言，精简归类）。
+
+    格式:
+        从 <主表>，过滤 <条件>。
+        关联 <从表> 带出 <字段>；
+        关联 <从表> 带出 <字段>。
+        <加工归类>。
+        <写入方式> <目标表>
+
+    主表自带字段省略，只强调从表带出和加工字段。
+    """
+    joins = df_step.get("joins", [])
+    where_clause = (df_step.get("where_clause", "") or "").replace("WHERE ", "").strip()
+    target_table = step.get("target_table_full", "") or step.get("target_table", "")
+    dm = (step.get("delete_mode", "") or "").strip()
+    delete_label = DELETE_MODE_LABEL.get(dm, "写入")
+    rule_type = step.get("rule_type", 1)
+
+    # 分离主表和从表
+    main_table = ""
+    main_alias = ""
+    secondary_tables = []  # [{table, alias, join_type, on_condition}]
+    for j in joins:
+        if j.get("source_table", "").startswith("(subquery:"):
+            continue
+        jt = (j.get("join_type", "") or "").upper()
+        if jt == "FROM" or jt == "FROM_SUBQUERY_MAIN":
+            main_table = j.get("source_table", "")
+            main_alias = j.get("alias", "")
+        else:
+            secondary_tables.append({
+                "table": j.get("source_table", ""),
+                "alias": j.get("alias", ""),
+                "join_type": j.get("join_type", ""),
+                "on_condition": j.get("join_condition", ""),
+            })
+
+    parts = []
+
+    # 1. 主表 + 过滤条件
+    main_short = main_table.split(".")[-1] if main_table else ""
+    if rule_type == 9:  # 分区交换
+        parts.append(f"交换分区数据")
+    elif main_short:
+        if where_clause:
+            parts.append(f"从 {main_table}，过滤 {where_clause}。")
+        else:
+            parts.append(f"从 {main_table}。")
+
+    # 2. 从表关联带出字段（按从表归类）
+    # 建别名→表名映射
+    alias_map = {}
+    for j in joins:
+        if j.get("alias") and j.get("source_table"):
+            alias_map[j["alias"].upper()] = j["source_table"]
+    # 主表别名
+    main_aliases = {main_alias.upper()} if main_alias else set()
+    # 找从表带出的字段
+    for sec in secondary_tables:
+        sec_alias = sec["alias"].upper()
+        sec_short = sec["table"].split(".")[-1] if sec["table"] else ""
+        # 该从表带出的字段
+        brought_fields = []
+        for f in fields:
+            if f.get("producing_step") != step.get("step_id"):
+                continue
+            for l in f.get("lineage", []):
+                src_alias = (l.get("source_table", "") or "").upper()
+                if src_alias == sec_alias:
+                    brought_fields.append(f["target_field"])
+                    break
+        # 加工类型归类（该从表的加工字段）
+        field_str = "、".join(dict.fromkeys(brought_fields)) if brought_fields else "字段"
+        parts.append(f"关联 {sec_short} 带出 {field_str}；")
+
+    # 3. 加工归类（聚合/拼接等，非从表直取的加工）
+    processing_types = set()
+    for f in fields:
+        if f.get("producing_step") != step.get("step_id"):
+            continue
+        tt = f.get("transform_type", "direct")
+        if tt not in ("direct", "unknown"):
+            processing_types.add(tt)
+    if processing_types:
+        from view_generator import _describe_transform
+        type_descs = []
+        for tt in sorted(processing_types):
+            type_descs.append(_describe_transform(tt, "", ""))
+        parts.append("包含" + "、".join(type_descs) + "。")
+
+    # 4. 写入方式
+    if rule_type == 9:
+        parts.append(f"交换至 {target_table}")
+    else:
+        parts.append(f"{delete_label} {target_table}")
+
+    return " ".join(parts)
+
+
 def generate_step_description(rule: RawRule, parsed, scenarios: list[dict], all_rules: list[RawRule]) -> dict:
     """脚本自动生成 purpose + logic 兜底描述（不依赖 AI）。
 
@@ -4085,6 +4191,15 @@ def main():
     traced_f = sum(1 for f in field_mappings["fields"] if f.get("physical_source"))
     print(f"  含物理穿透的字段: {traced_f}")
     print()
+
+    # ── Step 5e: 结构化步骤概述（供 HTML 详情用）──
+    topo_steps = topology.get("steps", [])
+    df_steps = data_flow.get("steps", [])
+    fields_list = field_mappings.get("fields", [])
+    for ts in topo_steps:
+        ds = next((s for s in df_steps if s.get("step_id") == ts.get("step_id")), None)
+        if ds:
+            ds["structured_summary"] = build_structured_step_summary(ts, ds, fields_list)
 
     # ── Step 6: 质量分析 ──
     print("Step 6: 质量分析...")
