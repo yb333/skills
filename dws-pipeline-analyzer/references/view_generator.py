@@ -1235,6 +1235,12 @@ def _build_lineage_layout(topo, df, bl=None):
 
         for ni, name in enumerate(col_nids):
             y = start_y + ni * (NODE_HEIGHT + NODE_GAP)
+            # 步骤节点按 exec_sequence 错行：奇数步骤下移一行，避免连线全挤同一水平线
+            ninfo = nodes.get(name, {})
+            if ninfo.get("type") == "step":
+                step_seq = step_seq_map.get(name, 0)
+                if step_seq % 2 == 1:
+                    y += NODE_HEIGHT + NODE_GAP
             node_id = f"n_{node_id_counter}"
             node_id_counter += 1
             positions[name] = node_id

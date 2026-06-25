@@ -1655,23 +1655,11 @@ function renderLineage() {
     var y2 = toNode.y + toNode.height / 2;
 
     var isSelfRef = selfRefs.indexOf(e.from) >= 0;
-    var isStepToTarget = (fromNode.type === 'step' && toNode.type === 'target');
-    // step→target 跨列时（写同一目标的多步骤），走下方折线避免穿过中间步骤
-    var colSpan = Math.abs(x2 - x1);
-    var useDetour = isStepToTarget && colSpan > fromNode.width * 2.5;
 
     svg += '<path class="edge-path' + (isSelfRef ? ' self-ref' : '') + '"';
     svg += ' data-from="' + escapeHtml(e.from) + '" data-to="' + escapeHtml(e.to) + '"';
-
-    if (useDetour) {
-      // 折线路径：从步骤底部出发，向下绕到 target
-      var bottomY = Math.max(fromNode.y, toNode.y) + fromNode.height + 20;
-      var midX = (x1 + x2) / 2;
-      svg += ' d="M ' + x1 + ' ' + (fromNode.y + fromNode.height) + ' L ' + x1 + ' ' + bottomY + ' L ' + midX + ' ' + bottomY + ' L ' + x2 + ' ' + bottomY + ' L ' + x2 + ' ' + y2 + '"';
-    } else {
-      var cp = Math.max(30, Math.abs(x2 - x1) * 0.4);
-      svg += ' d="M ' + x1 + ' ' + y1 + ' C ' + (x1 + cp) + ' ' + y1 + ', ' + (x2 - cp) + ' ' + y2 + ', ' + x2 + ' ' + y2 + '"';
-    }
+    var cp = Math.max(30, Math.abs(x2 - x1) * 0.4);
+    svg += ' d="M ' + x1 + ' ' + y1 + ' C ' + (x1 + cp) + ' ' + y1 + ', ' + (x2 - cp) + ' ' + y2 + ', ' + x2 + ' ' + y2 + '"';
     svg += ' marker-end="url(#' + (isSelfRef ? 'lh-arrow-self' : 'lh-arrow') + ')"';
 
     if (e.label) {
