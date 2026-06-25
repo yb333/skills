@@ -49,6 +49,62 @@ TRANSFORM_PRIORITY = {
 }
 
 
+def _describe_transform(transform_type: str, expression: str = "", field: str = "") -> str:
+    """把加工类型 + 表达式翻译成人能看懂的自然语言描述。
+
+    用于 mapping 的映射规则列（替代生硬的 SQL 表达式）。
+    """
+    tt = transform_type or "unknown"
+    expr = (expression or "").strip()
+    expr_upper = expr.upper()
+
+    if tt == "direct":
+        return "直接映射"
+    if tt == "value":
+        return "赋值：固定值" if "'" not in expr else f"赋值：固定值 {expr}"
+    if tt == "aggregate":
+        if "SUM" in expr_upper:
+            return f"聚合：对 {field or '字段'} 求和"
+        if "COUNT" in expr_upper:
+            return "聚合：计数"
+        if "AVG" in expr_upper:
+            return f"聚合：对 {field or '字段'} 求平均"
+        if "MAX" in expr_upper:
+            return f"聚合：取 {field or '字段'} 最大值"
+        if "MIN" in expr_upper:
+            return f"聚合：取 {field or '字段'} 最小值"
+        return "聚合"
+    if tt == "case_when":
+        return "条件取值"
+    if tt == "pivot":
+        return "行转列"
+    if tt == "window":
+        if "ROW_NUMBER" in expr_upper:
+            return "窗口：排序编号"
+        if "RANK" in expr_upper or "DENSE_RANK" in expr_upper:
+            return "窗口：排名"
+        if "LAG" in expr_upper:
+            return "窗口：取上一行"
+        if "LEAD" in expr_upper:
+            return "窗口：取下一行"
+        return "窗口函数"
+    if tt == "fallback":
+        if "COALESCE" in expr_upper or "NVL" in expr_upper:
+            return f"兜底：{field or '字段'} 为空取默认值"
+        return "兜底"
+    if tt == "expression":
+        if "||" in expr or "CONCAT" in expr_upper:
+            return "拼接字段"
+        if "SUBSTR" in expr_upper or "SUBSTRING" in expr_upper:
+            return f"截取：{field or '字段'}"
+        if "CAST" in expr_upper:
+            return f"类型转换"
+        if "+" in expr or "-" in expr or "*" in expr or "/" in expr:
+            return "算术加工"
+        return "表达式加工"
+    return "加工"
+
+
 def _merge_ai_markdown(knowledge: dict, ai_text: str) -> None:
     """解析 AI 输出的自然语言 markdown，合并到 knowledge 的 business_logic。
 
