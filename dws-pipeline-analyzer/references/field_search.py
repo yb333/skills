@@ -3,6 +3,9 @@
 从多个规则组的 Excel 中，按关键字搜索字段的使用情况，
 输出一张 Excel（按目标表分组）。
 
+设计原则: 复用 analyzer 的完整解析能力（含 enrich 追溯），
+field_search 只负责"搜索关键字 + 组织输出"，不复制解析逻辑。
+
 使用:
     python run.py field_search --input execution_tasks.xlsx --keyword amount --output field_usage.xlsx
     python run.py field_search --input execution_tasks.xlsx --keyword "amount,user_id" --output field_usage.xlsx
@@ -29,9 +32,8 @@ def read_excel_grouped(excel_path: str) -> list:
 
     Returns: [{rule_group_code, rule_group_en, rules: [RawRule], ...}, ...]
     """
-    # 复用 analyzer 的 read_excel 拿到所有行，再按 rule_group_code 分组
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from analyzer import read_excel, detect_dialect, parse_single_sql
+    from analyzer import read_excel
 
     raw = read_excel(excel_path)
     all_rules = raw["rules"]
@@ -54,6 +56,9 @@ def read_excel_grouped(excel_path: str) -> list:
 def search_field_usage(excel_path: str, keywords: list) -> list:
     """主入口：搜索字段使用情况。
 
+    对每个规则组跑完整 analyzer 解析（含 enrich 追溯），复用所有解析逻辑。
+    field_search 只负责搜索 + 组织输出。
+
     Args:
         excel_path: Excel 文件路径
         keywords: 关键字列表（如 ["amount", "user_id"]）
@@ -61,7 +66,9 @@ def search_field_usage(excel_path: str, keywords: list) -> list:
     Returns: [FieldUsage, ...] 按目标表分组排序
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from analyzer import detect_dialect, parse_single_sql, build_field_mappings
+    from analyzer import (detect_dialect, parse_single_sql, build_topology,
+                          build_data_flow, build_field_mappings,
+                          enrich_join_key_lineage, enrich_field_physical_sources)
 
     groups = read_excel_grouped(excel_path)
     all_usages = []
@@ -72,99 +79,127 @@ def search_field_usage(excel_path: str, keywords: list) -> list:
         if not rules:
             continue
 
-        # 轻量解析：只 parse SQL + field_mappings，跳过 topology/data_flow
+        # 完整解析（复用 analyzer 全部能力，含 enrich 追溯）
         sqls = [r.query_sql for r in rules if r.query_sql]
         dialect = detect_dialect(sqls)
         parsed_map = {r.rule_code: parse_single_sql(r.query_sql, dialect) for r in rules}
-        fm = build_field_mappings(rules, parsed_map, {})
+        topology = build_topology(rules, parsed_map)
+        data_flow = build_data_flow(rules, parsed_map)
+        field_mappings = build_field_mappings(rules, parsed_map, {})
+        enrich_join_key_lineage(data_flow, rules, parsed_map, topology, field_mappings)
+        enrich_field_physical_sources(field_mappings, data_flow, rules, parsed_map, topology)
 
-        # 该规则组的目标表（最终表，非 tmp）
-        target_table = _get_final_target_table(rules)
-
-        for rule in rules:
-            parsed = parsed_map.get(rule.rule_code)
-            if not parsed or parsed.parse_error:
-                continue
-
-            step_id = f"step_{rules.index(rule) + 1}"
-            rule_target = rule.target_table
-            is_final = not _is_intermediate(rule_target)
-
-            # 1. 搜索 SELECT 字段（写入/临时）
-            for f in fm["fields"]:
-                if f.get("producing_step") != step_id:
-                    continue
-                fname = f.get("target_field", "")
-                # 匹配字段名或加工表达式
-                matched = _match_field(fname, f, keywords_lower)
-                if not matched:
-                    continue
-
-                transform = f.get("transform_type", "direct")
-                # 最初来源（穿透 lineage 找物理源表）
-                source = _trace_source(f, parsed_map, rules)
-                situation = _situation_label(transform, f)
-                detail = _detail_label(f, parsed)
-
-                role = "写入目标表" if is_final else "临时过程使用"
-                all_usages.append(FieldUsage(
-                    target_table=f"{rule.target_schema}.{rule_target}" if rule.target_schema else rule_target,
-                    field_name=fname,
-                    role=role,
-                    situation=situation,
-                    source=source,
-                    detail=detail,
-                ))
-
-            # 2. 搜索辅助字段（关联键 + 过滤条件）
-            # 辅助字段不去重（同一字段名可同时是写入字段和辅助字段，信息不同）
-            seen_aux = set()  # 只对同类辅助字段去重（避免 join_usage 的重复项）
-            for ju in parsed.join_usage:
-                jf = ju.get("field", "")
-                if not _match_keyword(jf, keywords_lower):
-                    continue
-                aux_key = (jf, "关联键")
-                if aux_key in seen_aux:
-                    continue
-                seen_aux.add(aux_key)
-                on_cond = ju.get("on_condition", "")
-                all_usages.append(FieldUsage(
-                    target_table=f"{rule.target_schema}.{rule_target}" if rule.target_schema else rule_target,
-                    field_name=jf,
-                    role="辅助字段",
-                    situation="关联键",
-                    source=step_id,
-                    detail=on_cond,
-                ))
-
-            for wu in parsed.where_usage:
-                wf = wu.get("field", "")
-                if not _match_keyword(wf, keywords_lower):
-                    continue
-                aux_key = (wf, "过滤条件")
-                if aux_key in seen_aux:
-                    continue
-                seen_aux.add(aux_key)
-                cond = wu.get("condition", "")
-                all_usages.append(FieldUsage(
-                    target_table=f"{rule.target_schema}.{rule_target}" if rule.target_schema else rule_target,
-                    field_name=wf,
-                    role="辅助字段",
-                    situation="过滤条件",
-                    source=step_id,
-                    detail=cond,
-                ))
+        # 搜索字段
+        _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
 
     # 按目标表分组排序
     all_usages.sort(key=lambda u: (u.target_table, u.role, u.field_name))
     return all_usages
 
 
+def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages):
+    """搜索单个规则组的字段使用情况。"""
+    fields_list = field_mappings.get("fields", [])
+
+    for rule in rules:
+        parsed = parsed_map.get(rule.rule_code)
+        if not parsed or parsed.parse_error:
+            continue
+
+        rule_idx = rules.index(rule)
+        step_id = f"step_{rule_idx + 1}"
+        rule_target = rule.target_table
+        is_final = not _is_intermediate(rule_target)
+        target_full = f"{rule.target_schema}.{rule_target}" if rule.target_schema else rule_target
+
+        # 1. 搜索 SELECT 字段（写入/临时）
+        for f in fields_list:
+            if f.get("producing_step") != step_id:
+                continue
+            fname = f.get("target_field", "")
+            matched = _match_field(fname, f, keywords_lower)
+            if not matched:
+                continue
+
+            transform = f.get("transform_type", "direct")
+            # 最初来源：优先用 enrich 注入的 physical_source（穿透中间表到物理源表）
+            source = _get_physical_source(f)
+            situation = _situation_label(transform)
+            detail = _detail_label(f)
+
+            role = "写入目标表" if is_final else "临时过程使用"
+            all_usages.append(FieldUsage(
+                target_table=target_full,
+                field_name=fname,
+                role=role,
+                situation=situation,
+                source=source,
+                detail=detail,
+            ))
+
+        # 2. 搜索辅助字段（关联键 + 过滤条件）
+        seen_aux = set()
+        for ju in parsed.join_usage:
+            jf = ju.get("field", "")
+            if not _match_keyword(jf, keywords_lower):
+                continue
+            aux_key = (jf, "关联键")
+            if aux_key in seen_aux:
+                continue
+            seen_aux.add(aux_key)
+            all_usages.append(FieldUsage(
+                target_table=target_full, field_name=jf,
+                role="辅助字段", situation="关联键",
+                source=step_id, detail=ju.get("on_condition", ""),
+            ))
+
+        for wu in parsed.where_usage:
+            wf = wu.get("field", "")
+            if not _match_keyword(wf, keywords_lower):
+                continue
+            aux_key = (wf, "过滤条件")
+            if aux_key in seen_aux:
+                continue
+            seen_aux.add(aux_key)
+            all_usages.append(FieldUsage(
+                target_table=target_full, field_name=wf,
+                role="辅助字段", situation="过滤条件",
+                source=step_id, detail=wu.get("condition", ""),
+            ))
+
+
+def _get_physical_source(f):
+    """从 field 的 physical_source（enrich 注入）取物理源表.字段。"""
+    ps_list = f.get("physical_source", [])
+    if not ps_list:
+        # 回退：用 lineage 第一项
+        lineages = f.get("lineage", [])
+        if lineages:
+            src = lineages[0].get("source_table", "")
+            field = lineages[0].get("source_field", "")
+            if src and field:
+                return f"{src}.{field}"
+        return ""
+    parts = []
+    for ps in ps_list:
+        tbl = ps.get("table", "")
+        fld = ps.get("field", "")
+        if tbl and fld:
+            parts.append(f"{tbl}.{fld}")
+    return "；".join(parts) if parts else ""
+
+
+def _is_intermediate(table_name):
+    """判断是否中间表（复用 analyzer 逻辑）。"""
+    import re
+    short = (table_name or "").strip().lower().split(".")[-1]
+    return bool(re.search(r"(?:^tmp\d*$|_tmp\d*$|^temp\d*$|_temp\d*$|^tmp_|_tmp_|^temp_|_temp_)", short))
+
+
 def _match_field(fname, f, keywords_lower):
     """字段名或加工表达式匹配关键字。"""
     if _match_keyword(fname, keywords_lower):
         return True
-    # 加工表达式里的字段
     for l in f.get("lineage", []):
         if _match_keyword(l.get("source_field", ""), keywords_lower):
             return True
@@ -181,31 +216,7 @@ def _match_keyword(text, keywords_lower):
     return any(k in text_lower for k in keywords_lower)
 
 
-def _already_recorded(field_name, usages, rule):
-    """该字段是否已作为 SELECT 字段记录过。"""
-    rule_target = rule.target_table
-    for u in usages:
-        if u.field_name == field_name and rule_target in u.target_table:
-            return True
-    return False
-
-
-def _get_final_target_table(rules):
-    """取最终目标表（最后一个规则的 target，通常是非 tmp 表）。"""
-    for r in reversed(rules):
-        if not _is_intermediate(r.target_table):
-            return f"{r.target_schema}.{r.target_table}" if r.target_schema else r.target_table
-    return ""
-
-
-def _is_intermediate(table_name):
-    """判断是否中间表（复用 view_generator 的逻辑）。"""
-    import re
-    short = (table_name or "").strip().lower().split(".")[-1]
-    return bool(re.search(r"(?:^tmp\d*$|_tmp\d*$|^temp\d*$|_temp\d*$|^tmp_|_tmp_|^temp_|_temp_)", short))
-
-
-def _situation_label(transform, f):
+def _situation_label(transform):
     """字段情况标签。"""
     tt = transform or "direct"
     labels = {
@@ -213,16 +224,10 @@ def _situation_label(transform, f):
         "expression": "加工", "case_when": "加工(条件)", "fallback": "加工(兜底)",
         "window": "加工(窗口)", "pivot": "加工(行转列)",
     }
-    base = labels.get(tt, tt)
-    # 如果有关联（lineage 来自从表），标注关联带出
-    for l in f.get("lineage", []):
-        src = l.get("source_table", "")
-        if l.get("transform") == "direct" and src:
-            return base
-    return base
+    return labels.get(tt, tt)
 
 
-def _detail_label(f, parsed):
+def _detail_label(f):
     """详情标签（加工表达式 / 关联信息）。"""
     parts = []
     for l in f.get("lineage", []):
@@ -234,62 +239,6 @@ def _detail_label(f, parsed):
         elif src_field:
             parts.append(src_field)
     return "；".join(parts) if parts else ""
-
-
-def _get_field_mappings_single(rule, parsed_map):
-    """获取单条规则的 field_mappings（轻量，用于追溯）。"""
-    from analyzer import build_field_mappings
-    fm = build_field_mappings([rule], parsed_map, {})
-    return fm.get("fields", [])
-
-
-def _trace_source(f, parsed_map, rules, visited=None, depth=0):
-    """追溯字段的最初来源（物理源表.字段），跨步骤穿透中间表。
-
-    沿 lineage 追，遇到中间表就找它产出的规则继续追，直到物理源表。
-    """
-    if visited is None:
-        visited = set()
-    if depth > 10:
-        return ""
-
-    lineages = f.get("lineage", [])
-    if not lineages:
-        return ""
-
-    first = lineages[0]
-    src_alias = first.get("source_table", "")
-    src_field = first.get("source_field", f.get("target_field", ""))
-
-    # 从 parsed_map 解析别名 → 物理表
-    for rule in rules:
-        parsed = parsed_map.get(rule.rule_code)
-        if not parsed:
-            continue
-        for j in parsed.source_tables:
-            if j.alias and j.alias.upper() == src_alias.upper():
-                table = j.source_table
-                if table.startswith("(subquery:"):
-                    continue
-                # 物理源表 → 直接返回
-                if not _is_intermediate(table):
-                    return f"{table}.{src_field}"
-                # 中间表 → 找它产出的规则，继续追
-                visit_key = (table.lower(), src_field.lower())
-                if visit_key in visited:
-                    return f"{table}.{src_field}"
-                visited.add(visit_key)
-                # 找产出该中间表 src_field 的规则
-                for r2 in rules:
-                    if r2.target_table and r2.target_table.lower() == table.split(".")[-1].lower():
-                        fm2 = _get_field_mappings_single(r2, parsed_map)
-                        for f2 in fm2:
-                            if f2.get("target_field", "").lower() == src_field.lower():
-                                result = _trace_source(f2, parsed_map, rules, visited, depth + 1)
-                                if result:
-                                    return result
-                return f"{table}.{src_field}"
-    return src_field
 
 
 def output_excel(usages: list, output_path: str) -> bool:
@@ -305,7 +254,6 @@ def output_excel(usages: list, output_path: str) -> bool:
     ws = wb.active
     ws.title = "字段使用情况"
 
-    # 表头
     headers = ["目标表", "字段名", "字段角色", "字段情况", "最初来源", "详情"]
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     header_font = Font(color="FFFFFF", bold=True, size=11)
@@ -316,17 +264,13 @@ def output_excel(usages: list, output_path: str) -> bool:
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center")
 
-    # 数据行（按目标表分组，组间空行）
     prev_table = None
     for u in usages:
         if prev_table and u.target_table != prev_table:
-            ws.append([])  # 组间空行
-        ws.append([
-            u.target_table, u.field_name, u.role, u.situation, u.source, u.detail
-        ])
+            ws.append([])
+        ws.append([u.target_table, u.field_name, u.role, u.situation, u.source, u.detail])
         prev_table = u.target_table
 
-    # 列宽
     col_widths = [25, 20, 14, 16, 30, 40]
     for i, w in enumerate(col_widths, 1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
@@ -383,4 +327,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
