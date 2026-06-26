@@ -123,6 +123,19 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
         step_id = f"step_{rule_idx + 1}"
         is_final_step = not _is_intermediate(rule.target_table)
 
+        # 别名→物理表映射（用于详情里的别名替换）
+        alias_map = {}
+        for j in parsed.source_tables:
+            if j.alias and not j.source_table.startswith("(subquery:"):
+                alias_map[j.alias] = j.source_table.split(".")[-1]  # 短名（不带 schema，避免太长）
+
+        def _resolve_aliases(text):
+            """把文本里的别名.field 替换成 物理表短名.field"""
+            import re
+            for alias, table in alias_map.items():
+                text = re.sub(r'\b' + re.escape(alias) + r'\.', table + '.', text)
+            return text
+
         # 1. SELECT 字段（写入/临时）
         for f in fields_list:
             if f.get("producing_step") != step_id:
@@ -179,7 +192,7 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
             entry = field_usage_map[fl]
             if "关联键" not in entry["roles"]:
                 entry["roles"].append("关联键")
-            cond = ju.get("on_condition", "")
+            cond = _resolve_aliases(ju.get("on_condition", ""))
             detail_join = f"[关联/{step_id}] {cond}" if cond else ""
             if detail_join and detail_join not in entry["details"]:
                 entry["details"].append(detail_join)
@@ -199,7 +212,7 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
             entry = field_usage_map[fl]
             if "过滤条件" not in entry["roles"]:
                 entry["roles"].append("过滤条件")
-            cond = wu.get("condition", "")
+            cond = _resolve_aliases(wu.get("condition", ""))
             detail_where = f"[过滤/{step_id}] {cond}" if cond else ""
             if detail_where and detail_where not in entry["details"]:
                 entry["details"].append(detail_where)
