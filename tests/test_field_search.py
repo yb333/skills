@@ -78,23 +78,25 @@ class TestSearchFieldUsage:
     """字段搜索 + 角色判断。"""
 
     def test_search_amount_write_field(self, multi_group_xlsx):
-        """amount 关键字：找到写入目标表的字段"""
+        """amount 关键字：找到写入目标表的字段（角色含"写入目标表"）"""
         usages = search_field_usage(multi_group_xlsx, ["amount"])
-        write_fields = [u for u in usages if u.role == "写入目标表" and "amount" in u.field_name.lower()]
+        write_fields = [u for u in usages if "写入目标表" in u.role and "amount" in u.field_name.lower()]
         assert len(write_fields) >= 1, f"应找到 amount 写入字段，实际 {usages}"
 
-    def test_search_amount_temp_field(self, multi_group_xlsx):
-        """amount 关键字：找到临时过程使用的字段"""
+    def test_search_amount_only_final_target(self, multi_group_xlsx):
+        """amount 关键字：目标表只显示最终表，不显示中间表"""
         usages = search_field_usage(multi_group_xlsx, ["amount"])
-        temp_fields = [u for u in usages if u.role == "临时过程使用"]
-        assert len(temp_fields) >= 1, f"应找到 amount 临时字段（tmp1），实际 {[u.field_name for u in usages]}"
+        tables = {u.target_table for u in usages}
+        assert "dws.tmp1" not in tables, f"不应出现中间表 tmp1，实际 {tables}"
+        assert "dws.final_f" in tables, f"应有最终表 final_f，实际 {tables}"
 
     def test_search_amount_aux_field(self, multi_group_xlsx):
-        """amount 关键字：找到辅助字段（关联键/过滤）"""
+        """amount 关键字：角色含关联键/过滤条件（合并到一行）"""
         usages = search_field_usage(multi_group_xlsx, ["amount"])
-        aux_fields = [u for u in usages if u.role == "辅助字段"]
-        # amount 在 WHERE 和 JOIN ON 里都用了
-        assert len(aux_fields) >= 1, f"应找到 amount 辅助字段，实际 {[u.field_name for u in usages]}"
+        amount_usages = [u for u in usages if "amount" in u.field_name.lower()]
+        # 至少有一个 amount 的角色含关联键或过滤条件
+        has_aux = any("关联键" in u.role or "过滤条件" in u.role for u in amount_usages)
+        assert has_aux, f"应含关联键/过滤条件角色，实际 roles: {[u.role for u in amount_usages]}"
 
     def test_search_multiple_keywords(self, multi_group_xlsx):
         """多关键字：amount + user_id 同时搜索"""

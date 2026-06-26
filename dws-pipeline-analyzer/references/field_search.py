@@ -98,8 +98,21 @@ def search_field_usage(excel_path: str, keywords: list) -> list:
 
 
 def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages):
-    """搜索单个规则组的字段使用情况。"""
+    """搜索单个规则组的字段使用情况。
+
+    每个字段穿透到最终目标表，合并所有步骤的角色（斜杠分隔），一行输出。
+    """
     fields_list = field_mappings.get("fields", [])
+
+    # 最终目标表（非中间表的最后一个步骤的 target）
+    final_target = ""
+    for rule in reversed(rules):
+        if not _is_intermediate(rule.target_table):
+            final_target = f"{rule.target_schema}.{rule.target_table}" if rule.target_schema else rule.target_table
+            break
+
+    # 收集所有匹配字段的使用信息，按字段名（小写）合并
+    field_usage_map = {}  # {field_lower: {roles: set, situations: set, source, details: []}}
 
     for rule in rules:
         parsed = parsed_map.get(rule.rule_code)
@@ -108,11 +121,9 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
 
         rule_idx = rules.index(rule)
         step_id = f"step_{rule_idx + 1}"
-        rule_target = rule.target_table
-        is_final = not _is_intermediate(rule_target)
-        target_full = f"{rule.target_schema}.{rule_target}" if rule.target_schema else rule_target
+        is_final_step = not _is_intermediate(rule.target_table)
 
-        # 1. 搜索 SELECT 字段（写入/临时）
+        # 1. SELECT 字段（写入/临时）
         for f in fields_list:
             if f.get("producing_step") != step_id:
                 continue
@@ -121,51 +132,81 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
             if not matched:
                 continue
 
+            fl = fname.lower()
+            if fl not in field_usage_map:
+                field_usage_map[fl] = {"name": fname, "roles": [], "situations": [], "source": "", "details": []}
+
+            entry = field_usage_map[fl]
             transform = f.get("transform_type", "direct")
-            # 最初来源：优先用 enrich 注入的 physical_source（穿透中间表到物理源表）
-            source = _get_physical_source(f)
-            situation = _situation_label(transform)
-            detail = _detail_label(f)
+            source = _get_physical_source(f) if is_final_step else ""
 
-            role = "写入目标表" if is_final else "临时过程使用"
-            all_usages.append(FieldUsage(
-                target_table=target_full,
-                field_name=fname,
-                role=role,
-                situation=situation,
-                source=source,
-                detail=detail,
-            ))
+            if is_final_step:
+                if "写入目标表" not in entry["roles"]:
+                    entry["roles"].append("写入目标表")
+                if not entry["source"]:
+                    entry["source"] = source
+                sit = _situation_label(transform)
+                if sit not in entry["situations"]:
+                    entry["situations"].append(sit)
+                detail = _detail_label(f)
+                if detail and detail not in entry["details"]:
+                    entry["details"].append(detail)
+            else:
+                # 中间步骤的字段，只在详情里体现传递路径
+                pass
 
-        # 2. 搜索辅助字段（关联键 + 过滤条件）
+        # 2. 辅助字段（关联键 + 过滤条件）
         seen_aux = set()
         for ju in parsed.join_usage:
             jf = ju.get("field", "")
             if not _match_keyword(jf, keywords_lower):
                 continue
-            aux_key = (jf, "关联键")
+            aux_key = (jf.lower(), "关联键")
             if aux_key in seen_aux:
                 continue
             seen_aux.add(aux_key)
-            all_usages.append(FieldUsage(
-                target_table=target_full, field_name=jf,
-                role="辅助字段", situation="关联键",
-                source=step_id, detail=ju.get("on_condition", ""),
-            ))
+
+            fl = jf.lower()
+            if fl not in field_usage_map:
+                field_usage_map[fl] = {"name": jf, "roles": [], "situations": [], "source": "", "details": []}
+            entry = field_usage_map[fl]
+            if "关联键" not in entry["roles"]:
+                entry["roles"].append("关联键")
+            cond = ju.get("on_condition", "")
+            if cond and cond not in entry["details"]:
+                entry["details"].append(f"关联: {cond}")
 
         for wu in parsed.where_usage:
             wf = wu.get("field", "")
             if not _match_keyword(wf, keywords_lower):
                 continue
-            aux_key = (wf, "过滤条件")
+            aux_key = (wf.lower(), "过滤条件")
             if aux_key in seen_aux:
                 continue
             seen_aux.add(aux_key)
-            all_usages.append(FieldUsage(
-                target_table=target_full, field_name=wf,
-                role="辅助字段", situation="过滤条件",
-                source=step_id, detail=wu.get("condition", ""),
-            ))
+
+            fl = wf.lower()
+            if fl not in field_usage_map:
+                field_usage_map[fl] = {"name": wf, "roles": [], "situations": [], "source": "", "details": []}
+            entry = field_usage_map[fl]
+            if "过滤条件" not in entry["roles"]:
+                entry["roles"].append("过滤条件")
+            cond = wu.get("condition", "")
+            if cond and cond not in entry["details"]:
+                entry["details"].append(f"过滤: {cond}")
+
+    # 输出合并后的字段使用记录（目标表 = 最终目标表）
+    for fl, entry in field_usage_map.items():
+        if not entry["roles"]:
+            continue
+        all_usages.append(FieldUsage(
+            target_table=final_target,
+            field_name=entry["name"],
+            role="/".join(entry["roles"]),
+            situation="/".join(entry["situations"]) if entry["situations"] else "-",
+            source=entry["source"] or "-",
+            detail="；".join(entry["details"]) if entry["details"] else "-",
+        ))
 
 
 def _get_physical_source(f):
@@ -264,12 +305,8 @@ def output_excel(usages: list, output_path: str) -> bool:
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center")
 
-    prev_table = None
     for u in usages:
-        if prev_table and u.target_table != prev_table:
-            ws.append([])
         ws.append([u.target_table, u.field_name, u.role, u.situation, u.source, u.detail])
-        prev_table = u.target_table
 
     col_widths = [25, 20, 14, 16, 30, 40]
     for i, w in enumerate(col_widths, 1):
