@@ -148,9 +148,16 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
                 sit = _situation_label(transform)
                 if sit not in entry["situations"]:
                     entry["situations"].append(sit)
-                detail = _detail_label(f)
-                if detail and detail not in entry["details"]:
-                    entry["details"].append(detail)
+                # 写入字段的详情：[来源] + [加工]
+                if source and source != "-":
+                    detail_src = f"[来源] {source}"
+                    if detail_src not in entry["details"]:
+                        entry["details"].append(detail_src)
+                raw_expr = _detail_label(f)
+                if raw_expr and transform != "direct":
+                    detail_expr = f"[加工] {raw_expr}"
+                    if detail_expr not in entry["details"]:
+                        entry["details"].append(detail_expr)
             else:
                 # 中间步骤的字段，只在详情里体现传递路径
                 pass
@@ -173,8 +180,9 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
             if "关联键" not in entry["roles"]:
                 entry["roles"].append("关联键")
             cond = ju.get("on_condition", "")
-            if cond and cond not in entry["details"]:
-                entry["details"].append(f"关联: {cond}")
+            detail_join = f"[关联] {cond}" if cond else ""
+            if detail_join and detail_join not in entry["details"]:
+                entry["details"].append(detail_join)
 
         for wu in parsed.where_usage:
             wf = wu.get("field", "")
@@ -192,8 +200,9 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
             if "过滤条件" not in entry["roles"]:
                 entry["roles"].append("过滤条件")
             cond = wu.get("condition", "")
-            if cond and cond not in entry["details"]:
-                entry["details"].append(f"过滤: {cond}")
+            detail_where = f"[过滤] {cond}" if cond else ""
+            if detail_where and detail_where not in entry["details"]:
+                entry["details"].append(detail_where)
 
     # 输出合并后的字段使用记录（目标表 = 最终目标表）
     for fl, entry in field_usage_map.items():
