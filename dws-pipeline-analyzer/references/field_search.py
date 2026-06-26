@@ -148,14 +148,14 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
                 sit = _situation_label(transform)
                 if sit not in entry["situations"]:
                     entry["situations"].append(sit)
-                # 写入字段的详情：[来源] + [加工]
+                # 写入字段的详情：[来源/stepN] + [加工/stepN]
                 if source and source != "-":
-                    detail_src = f"[来源] {source}"
+                    detail_src = f"[来源/{step_id}] {source}"
                     if detail_src not in entry["details"]:
                         entry["details"].append(detail_src)
                 raw_expr = _detail_label(f)
                 if raw_expr and transform != "direct":
-                    detail_expr = f"[加工] {raw_expr}"
+                    detail_expr = f"[加工/{step_id}] {raw_expr}"
                     if detail_expr not in entry["details"]:
                         entry["details"].append(detail_expr)
             else:
@@ -180,7 +180,7 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
             if "关联键" not in entry["roles"]:
                 entry["roles"].append("关联键")
             cond = ju.get("on_condition", "")
-            detail_join = f"[关联] {cond}" if cond else ""
+            detail_join = f"[关联/{step_id}] {cond}" if cond else ""
             if detail_join and detail_join not in entry["details"]:
                 entry["details"].append(detail_join)
 
@@ -200,7 +200,7 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
             if "过滤条件" not in entry["roles"]:
                 entry["roles"].append("过滤条件")
             cond = wu.get("condition", "")
-            detail_where = f"[过滤] {cond}" if cond else ""
+            detail_where = f"[过滤/{step_id}] {cond}" if cond else ""
             if detail_where and detail_where not in entry["details"]:
                 entry["details"].append(detail_where)
 
