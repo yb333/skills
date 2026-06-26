@@ -121,6 +121,7 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
 
         rule_idx = rules.index(rule)
         step_id = f"step_{rule_idx + 1}"
+        rule_code = rule.rule_code or step_id  # 详情标签用规则编码（用户能对应到真实代码）
         is_final_step = not _is_intermediate(rule.target_table)
 
         # 别名→物理表映射（用于详情里的别名替换）
@@ -151,7 +152,7 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
 
             entry = field_usage_map[fl]
             transform = f.get("transform_type", "direct")
-            source = _get_physical_source(f) if is_final_step else ""
+            source = _get_physical_source(f, parsed_map, rules) if is_final_step else ""
 
             if is_final_step:
                 if "写入目标表" not in entry["roles"]:
@@ -163,12 +164,12 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
                     entry["situations"].append(sit)
                 # 写入字段的详情：[来源/stepN] + [加工/stepN]
                 if source and source != "-":
-                    detail_src = f"[来源/{step_id}] {source}"
+                    detail_src = f"[来源/{rule_code}] {source}"
                     if detail_src not in entry["details"]:
                         entry["details"].append(detail_src)
                 raw_expr = _detail_label(f)
                 if raw_expr and transform != "direct":
-                    detail_expr = f"[加工/{step_id}] {raw_expr}"
+                    detail_expr = f"[加工/{rule_code}] {raw_expr}"
                     if detail_expr not in entry["details"]:
                         entry["details"].append(detail_expr)
             else:
@@ -193,7 +194,7 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
             if "关联键" not in entry["roles"]:
                 entry["roles"].append("关联键")
             cond = _resolve_aliases(ju.get("on_condition", ""))
-            detail_join = f"[关联/{step_id}] {cond}" if cond else ""
+            detail_join = f"[关联/{rule_code}] {cond}" if cond else ""
             if detail_join and detail_join not in entry["details"]:
                 entry["details"].append(detail_join)
 
@@ -213,7 +214,7 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
             if "过滤条件" not in entry["roles"]:
                 entry["roles"].append("过滤条件")
             cond = _resolve_aliases(wu.get("condition", ""))
-            detail_where = f"[过滤/{step_id}] {cond}" if cond else ""
+            detail_where = f"[过滤/{rule_code}] {cond}" if cond else ""
             if detail_where and detail_where not in entry["details"]:
                 entry["details"].append(detail_where)
 
@@ -231,23 +232,70 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
         ))
 
 
-def _get_physical_source(f):
-    """从 field 的 physical_source（enrich 注入）取物理源表.字段。"""
+def _get_physical_source(f, parsed_map=None, rules=None):
+    """从 field 的 physical_source（enrich 注入）取物理源表.字段。
+
+    如果 physical_source 停在 CTE 别名（如 c.amount），用 lineage 的
+    cte_source_fields 穿透到 CTE 内部的物理表。
+    """
     ps_list = f.get("physical_source", [])
+    lineages = f.get("lineage", [])
+
+    # CTE 穿透信息（lineage 里的 cte_source_fields + cte_name）
+    cte_source_fields = None
+    cte_name = ""
+    for l in lineages:
+        if l.get("cte_source_fields"):
+            cte_source_fields = l["cte_source_fields"]
+            cte_name = l.get("cte_name", "")
+            break
+
+    # 构建 CTE 内部 alias→物理表 映射
+    cte_alias_map = {}
+    if cte_name and parsed_map:
+        for rule in (rules or []):
+            p = parsed_map.get(rule.rule_code)
+            if p:
+                for ct in p.ctes:
+                    if ct.name.upper() == cte_name.upper():
+                        for st in ct.source_tables:
+                            if st.get("alias") and st.get("name"):
+                                cte_alias_map[st["alias"].upper()] = st["name"]
+
     if not ps_list:
         # 回退：用 lineage 第一项
-        lineages = f.get("lineage", [])
         if lineages:
             src = lineages[0].get("source_table", "")
             field = lineages[0].get("source_field", "")
+            # CTE 穿透
+            if cte_source_fields and cte_alias_map:
+                parts = []
+                for csf in cte_source_fields:
+                    csf_alias = (csf.get("alias", "") or "").upper()
+                    csf_field = csf.get("field", "")
+                    phys = cte_alias_map.get(csf_alias, csf_alias)
+                    parts.append(f"{phys}.{csf_field}")
+                return "；".join(parts) if parts else f"{src}.{field}"
             if src and field:
                 return f"{src}.{field}"
         return ""
+
     parts = []
     for ps in ps_list:
         tbl = ps.get("table", "")
         fld = ps.get("field", "")
-        if tbl and fld:
+        # 如果 table 不是物理表（CTE 别名如 c），用 CTE 穿透
+        if tbl and "." not in tbl and cte_source_fields and cte_alias_map:
+            for csf in cte_source_fields:
+                if (csf.get("field", "")).lower() == fld.lower():
+                    csf_alias = (csf.get("alias", "") or "").upper()
+                    phys = cte_alias_map.get(csf_alias, csf_alias)
+                    parts.append(f"{phys}.{csf_field if False else fld}")
+                    break
+            else:
+                if tbl and fld:
+                    parts.append(f"{tbl}.{fld}")
+        elif tbl and fld:
             parts.append(f"{tbl}.{fld}")
     return "；".join(parts) if parts else ""
 
