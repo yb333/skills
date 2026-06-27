@@ -2219,9 +2219,9 @@ function renderQuality() {
   }
 
   var issues = q.issues || [];
-  var aiInsights = q.ai_insights || [];
+  var aiInsights = q.ai_insights || [];  // 保留兼容（AI 洞察已移除）
   var complexity = q.complexity || {};
-  document.getElementById('qualityCount').textContent = issues.length + ' 问题 / ' + aiInsights.length + ' 洞察';
+  document.getElementById('qualityCount').textContent = issues.length + ' 问题';
 
   var html = '';
 
@@ -2329,21 +2329,6 @@ function renderQuality() {
       });
       html += '</div>'; // issue-group-body
       html += '</div>'; // issue-group
-    });
-  }
-
-  // AI Insights — 只显示有实际问题的（severity 非 info）
-  var problemInsights = aiInsights.filter(function(ins) {
-    return ins.severity && ins.severity !== 'info';
-  });
-  if (problemInsights.length > 0) {
-    html += '<div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin:16px 0 8px;">AI 洞察 <span style="font-weight:400;color:var(--text-muted);">(' + problemInsights.length + ' 个需关注)</span></div>';
-    problemInsights.forEach(function(ins) {
-      html += '<div class="insight-card">';
-      html += '<div class="insight-title">' + escapeHtml(ins.title || '') + '</div>';
-      if (ins.detail) html += '<div class="insight-detail">' + escapeHtml(ins.detail) + '</div>';
-      if (ins.suggestion) html += '<div class="insight-suggestion">&#9656; ' + escapeHtml(ins.suggestion) + '</div>';
-      html += '</div>';
     });
   }
 
