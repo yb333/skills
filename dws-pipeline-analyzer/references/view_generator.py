@@ -1161,7 +1161,11 @@ def _build_lineage_layout(topo, df, bl=None):
                     table_to_steps.setdefault(tname_actual, []).append(sid)
 
     # 数据依赖（中间表 → 后续步骤）
+    # 排除 delete_before_write 类型（它只是执行顺序依赖，不是数据传递，
+    # 画成"目标表→步骤"会误导，让人以为步骤从目标表取数据）
     for dep in data_deps:
+        if dep.get("type") == "delete_before_write":
+            continue
         from_step = dep.get("from", "")
         to_step = dep.get("to", "")
         intermediate_table = step_to_table.get(from_step, "")
