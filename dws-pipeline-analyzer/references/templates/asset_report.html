@@ -2001,11 +2001,6 @@ function renderSteps() {
     html += '<span class="exec-seq">seq=' + (step.exec_sequence || 0) + '</span>';
     html += '</div>';
 
-    // 结构化步骤概述（标题下方、SQL 上方）
-    if (step.structured_summary) {
-      html += '<div style="font-size:13px;color:var(--text-secondary);line-height:1.6;margin:0;padding:8px 16px;background:var(--bg-card);border-radius:4px;border-left:3px solid var(--accent);word-break:break-all;overflow-wrap:anywhere;">' + escapeHtml(step.structured_summary) + '</div>';
-    }
-
     // Body
     html += '<div class="step-body"><div class="step-body-inner">';
 
@@ -2017,6 +2012,11 @@ function renderSteps() {
     // Logic description (加工逻辑总结)
     if (step.logic) {
       html += '<div class="step-logic" style="font-size:13px;line-height:1.7;color:var(--text-secondary);white-space:pre-wrap;">' + escapeHtml(step.logic) + '</div>';
+    }
+
+    // 结构化步骤概述（AI 内容下方、SQL 上方）
+    if (step.structured_summary) {
+      html += '<div style="font-size:13px;color:var(--text-secondary);line-height:1.6;margin:8px 0 0;padding:8px 12px;background:var(--bg-card);border-radius:4px;border-left:3px solid var(--accent);word-break:break-all;overflow-wrap:anywhere;"><span style="font-size:11px;color:var(--text-muted);font-weight:600;">脚本概述:</span> ' + escapeHtml(step.structured_summary) + '</div>';
     }
 
     // SQL 全文（折叠）
