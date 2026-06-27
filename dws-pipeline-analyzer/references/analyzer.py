@@ -2872,12 +2872,35 @@ def analyze_quality(
 
         # ── 反模式检测 ──
 
-        # 1. JOIN 缺少 ON 条件（排除子查询假名和子查询内部表）
+        # 1. JOIN 缺少 ON 条件（排除子查询/逗号关联/CROSS JOIN/USING 等正常无 ON 场景）
+        # 先收集 Oracle (+) 逗号关联的表（这些表没有 JOIN 节点，条件在 WHERE 里）
+        plus_join_tables = set()
+        raw_sql_check = parsed.raw_sql or ""
+        if "(+)" in raw_sql_check:
+            # (+) 语法：逗号关联的表，条件在 WHERE 里，不算缺 ON
+            for j in parsed.source_tables:
+                jt = (j.join_type or "").upper()
+                if jt not in ("FROM", "FROM_SUBQUERY_MAIN") and not j.join_condition:
+                    plus_join_tables.add(j.source_table)
+
         for j in parsed.source_tables:
             if j.source_table.startswith("(subquery:"):
                 continue
             if "SUBQUERY" in j.join_type.upper():
-                continue  # 子查询内部表/子查询假名没有ON条件是正常的
+                continue
+            jt = (j.join_type or "").upper()
+            # CROSS JOIN 本来就没有 ON 条件
+            if "CROSS" in jt:
+                continue
+            # Oracle (+) 逗号关联的表（条件在 WHERE 里）
+            if j.source_table in plus_join_tables:
+                continue
+            # join_condition 可能为 USING 形式或 ON 形式，检查 SQL 里是否有 USING
+            if not j.join_condition and raw_sql_check:
+                # 检查是不是 USING 语法（sqlglot 不设 join_condition 但 SQL 有 USING）
+                tbl_short = j.source_table.split(".")[-1].upper()
+                if f"USING(" in raw_sql_check.upper().replace(" ", "") or "USING (" in raw_sql_check.upper():
+                    continue
             if j.join_type not in ("FROM",) and not j.join_condition:
                 issue_id += 1
                 issues.append({
