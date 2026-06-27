@@ -307,6 +307,45 @@ def _get_val(row: tuple, idx: int | None) -> str:
     return _safe_str(val)
 
 
+def _read_query_sql(row: tuple, col_idx: dict) -> str:
+    """读取查询语句（支持多列拼接）。
+
+    超长 SQL 会分散在「查询语句1」「查询语句2」... 多列。
+    按列序号拼接非空内容，最后一个非空列去掉末尾 \\r\\n。
+    不 strip 中间列（保留列内的空格和换行，避免拼接时 SQL 断裂）。
+    """
+    import re as _re
+    # 找所有「查询语句N」列，按 N 排序
+    sql_cols = []
+    for col_name, idx in col_idx.items():
+        m = _re.match(r'.*查询语句\s*(\d+)', str(col_name))
+        if m:
+            sql_cols.append((int(m.group(1)), idx))
+    sql_cols.sort()
+
+    if not sql_cols:
+        return ""
+
+    # 直接读取原始值（不走 _get_val 的 strip），保留列内空格换行
+    parts = []
+    for _, idx in sql_cols:
+        if idx is None or idx >= len(row):
+            continue
+        val = row[idx]
+        if val is None:
+            continue
+        val_str = str(val)
+        if val_str.strip():  # 整列只有空白/换行则跳过，但保留非空内容
+            parts.append(val_str)
+
+    if not parts:
+        return ""
+
+    # 最后一个非空部分去掉末尾 \r\n（Excel 可能残留两个字节）
+    parts[-1] = parts[-1].rstrip("\r\n")
+    return "".join(parts)
+
+
 _SYSDATE_PATTERN = re.compile(r"\bSYSDATE\s*\(\s*\)", re.IGNORECASE)
 _SYSDATE_NOPAREN_PATTERN = re.compile(r"\bSYSDATE\b(?!\s*\()", re.IGNORECASE)
 
@@ -462,7 +501,7 @@ def read_excel(excel_path: str) -> dict:
         except (ValueError, TypeError):
             rt = 0
 
-        query = _get_val(row, ci.get("query_sql"))
+        query = _read_query_sql(row, col_idx)
         exec_seq_str = _get_val(row, ci.get("exec_sequence"))
         try:
             # int(float()) 兼容数值、字符串 "1"、字符串 "1.0" 三种格式
