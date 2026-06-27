@@ -2981,7 +2981,7 @@ def analyze_quality(
                 "id": f"ISS_{issue_id:03d}",
                 "severity": "medium",
                 "category": "maintainability",
-                "title": f"CTE 数量 {cte_count}，嵌套过深",
+                "title": f"CTE 数量 {cte_count}，建议拆分",
                 "rule_code": rc,
                 "step_id": step_id,
             })
