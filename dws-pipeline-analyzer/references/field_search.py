@@ -38,14 +38,19 @@ def read_excel_grouped(excel_path: str) -> list:
     raw = read_excel(excel_path)
     all_rules = raw["rules"]
 
-    # 按 rule_group_code 分组
+    # 按 rule_group_code 分组；无 code 的行不混入同一组，按 rule_code 单独成组
     groups_map = {}
+    unknown_idx = 0
     for rule in all_rules:
-        code = rule.rule_group_code or "UNKNOWN"
+        code = rule.rule_group_code
+        if not code:
+            # 无规则组编码：按 rule_code 单独成组（避免无关规则混入）
+            code = f"_SOLO_{rule.rule_code or f'ROW{unknown_idx}'}"
+            unknown_idx += 1
         if code not in groups_map:
             groups_map[code] = {
                 "rule_group_code": code,
-                "rule_group_en": raw.get("rule_group_en", code),
+                "rule_group_en": code,
                 "rules": [],
             }
         groups_map[code]["rules"].append(rule)
@@ -87,6 +92,16 @@ def search_field_usage(excel_path: str, keywords: list) -> list:
         dialect = detect_dialect(sqls)
         parsed_map = {r.rule_code: parse_single_sql(r.query_sql, dialect) for r in rules}
         field_mappings = build_field_mappings(rules, parsed_map, {})
+
+        # 检测 SELECT * 和解析失败（提示用户）
+        for r in rules:
+            p = parsed_map.get(r.rule_code)
+            if not p:
+                continue
+            if p.has_star:
+                print(f"  [WARN] 规则 {r.rule_code} 使用了 SELECT *（{r.target_table}），无法追踪字段血缘", file=sys.stderr)
+            if p.parse_error:
+                print(f"  [WARN] 规则 {r.rule_code} SQL 解析失败: {p.parse_error[:50]}", file=sys.stderr)
 
         # 搜索字段（按需追溯，只对匹配字段算）
         _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)

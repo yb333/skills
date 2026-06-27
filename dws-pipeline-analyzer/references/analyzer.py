@@ -247,6 +247,7 @@ class ParsedSQL:
     ctes: list = field(default_factory=list)  # list[ParsedCTE]
     raw_sql: str = ""
     parse_error: str = ""
+    has_star: bool = False  # SELECT * 或 t.* 检测
     # UNION/集合操作：每个分支独立记录（分支=步骤内场景）
     # 每个 branch: {"branch_index": 1, "op": "UNION ALL",
     #               "source_tables": [ParsedJoin...], "columns": [ParsedColumn...],
@@ -668,6 +669,9 @@ def parse_single_sql(sql: str, dialect: str = "dws") -> ParsedSQL:
     # 一律降级为带 parse_error 的 ParsedSQL，让该规则标记失败后继续。
     try:
         tree = sqlglot.parse_one(clean, dialect=sqlglot_dialect)
+        # SELECT * / t.* 检测
+        if tree.find(exp.Star) is not None:
+            result.has_star = True
     except Exception as e:
         result.parse_error = f"{type(e).__name__}: {e}"
         print(f"  [SQL解析错误] {e}", file=sys.stderr)
@@ -676,7 +680,9 @@ def parse_single_sql(sql: str, dialect: str = "dws") -> ParsedSQL:
     try:
         # ── 检测 UNION/INTERSECT/EXCEPT（SetOperation）──
         if isinstance(tree, (exp.Union, exp.Intersect, exp.Except)):
-            return _parse_set_operation(tree, sqlglot_dialect, comment_alias_map, sql)
+            r = _parse_set_operation(tree, sqlglot_dialect, comment_alias_map, sql)
+            r.has_star = result.has_star
+            return r
 
         # ── 普通 SELECT / WITH...SELECT ──
         select_node = tree.find(exp.Select)
@@ -684,7 +690,9 @@ def parse_single_sql(sql: str, dialect: str = "dws") -> ParsedSQL:
             result.parse_error = "未找到 SELECT 节点"
             return result
 
-        return _parse_select(tree, select_node, sqlglot_dialect, comment_alias_map, sql)
+        r = _parse_select(tree, select_node, sqlglot_dialect, comment_alias_map, sql)
+        r.has_star = result.has_star
+        return r
     except RecursionError:
         result.parse_error = "RecursionError: SQL 嵌套层级过深"
         print(f"  [SQL解析错误] 嵌套层级过深，已跳过", file=sys.stderr)
@@ -2928,6 +2936,32 @@ def analyze_quality(
                 "step_id": step_id,
             })
 
+        # 1c. SELECT * / t.* 检测（规范不允许，必须明确列出字段）
+        if parsed.has_star:
+            issue_id += 1
+            issues.append({
+                "id": f"ISS_{issue_id:03d}",
+                "severity": "critical",
+                "category": "code_quality",
+                "title": "使用 SELECT *，违反编码规范",
+                "description": "SELECT * 无法追踪字段血缘，必须明确列出所需字段",
+                "rule_code": rc,
+                "step_id": step_id,
+            })
+
+        # 1d. SQL 解析失败检测（提示用户 SQL 可能有语法问题）
+        if parsed.parse_error:
+            issue_id += 1
+            issues.append({
+                "id": f"ISS_{issue_id:03d}",
+                "severity": "critical",
+                "category": "parse_error",
+                "title": f"SQL 解析失败: {parsed.parse_error[:60]}",
+                "description": f"该规则的 SQL 无法正常解析，字段映射和血缘可能不完整。错误: {parsed.parse_error}",
+                "rule_code": rc,
+                "step_id": step_id,
+            })
+
         # 2. 单规则 JOIN 过多（含 CTE 内部 JOIN，阈值翻倍）
         if total_join_count > 16:
             issue_id += 1
@@ -3005,8 +3039,12 @@ def analyze_quality(
         })
 
     # ── 字段无别名回溯预警 ──
+    # 排除字面量字段（value/expression 类型无别名是正常的，不是从表取的）
     for f in field_mappings.get("fields", []):
         step_id = f.get("producing_step", "")
+        # 字面量/赋值/无来源的字段不报"无别名前缀"
+        if f.get("transform_type") in ("value", "expression", "unknown"):
+            continue
         for lin in f.get("lineage", []):
             if not lin.get("source_table"):
                 field_name = f.get("target_field", "?")
