@@ -239,7 +239,7 @@ def _trace_physical_source(f, parsed_map, rules, depth=0, visited=None):
     """
     if visited is None:
         visited = set()
-    if depth > 12:
+    if depth > 25:
         return ""
 
     lineages = f.get("lineage", [])

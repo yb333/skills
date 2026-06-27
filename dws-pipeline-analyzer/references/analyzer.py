@@ -1284,6 +1284,21 @@ def _extract_select_columns(select_node, comment_alias_map: dict | None = None, 
 # 字段使用信息提取（JOIN ON / WHERE / GROUP BY）
 # ═══════════════════════════════════════════════════════════════
 
+def _split_where_conditions(node) -> list:
+    """把 WHERE 条件按 AND 拆分成独立条件列表。
+
+    Oracle (+) 外关联场景: WHERE a.id=b.id(+) AND a.del='N'
+    需要拆成 [a.id=b.id(+), a.del='N'] 分别判断是关联还是过滤。
+    """
+    if node is None:
+        return []
+    if isinstance(node, exp.And):
+        return _split_where_conditions(node.left) + _split_where_conditions(node.right)
+    if isinstance(node, exp.Paren):
+        return _split_where_conditions(node.this)
+    return [node]
+
+
 def _extract_field_usage(tree, select_node, joins: list, sqlglot_dialect: str) -> tuple:
     """提取 JOIN ON / WHERE / GROUP BY 中的字段级使用信息。
 
@@ -1362,18 +1377,59 @@ def _extract_field_usage(tree, select_node, joins: list, sqlglot_dialect: str) -
                 })
 
     # ── WHERE 字段使用 ──
+    # Oracle (+) 外关联语法: WHERE a.id = b.id(+) 的条件，b 的 Column 有 join_mark=True
+    # 这种条件本质是 JOIN 条件，应归到 join_usage，不是 where_usage
     where_node = select_node.args.get("where")
     if where_node:
-        for col in where_node.find_all(exp.Column):
-            col_name = _clean_name(col.name).lower()
-            col_alias = _clean_name(col.table).lower() if col.table else ""
-            if col_name:
-                # 获取包含这个字段的条件表达式
-                where_usage.append({
-                    "field": col_name,
-                    "alias": col_alias,
-                    "condition": where_node.sql(dialect=sqlglot_dialect),
-                })
+        where_sql = where_node.sql(dialect=sqlglot_dialect)
+        # 检查 WHERE 条件里有没有 join_mark（Oracle (+) 外关联）
+        has_join_mark = any(
+            col.args.get("join_mark") for col in where_node.find_all(exp.Column)
+        )
+        if has_join_mark:
+            # 有 (+) 的条件：拆分成关联条件和真正的过滤条件
+            # 遍历 WHERE 的 AND 连接的条件
+            conditions = _split_where_conditions(where_node.this)
+            for cond in conditions:
+                cond_sql = cond.sql(dialect=sqlglot_dialect)
+                cond_cols = list(cond.find_all(exp.Column))
+                is_join_cond = any(c.args.get("join_mark") for c in cond_cols)
+                for col in cond_cols:
+                    col_name = _clean_name(col.name).lower()
+                    col_alias = _clean_name(col.table).lower() if col.table else ""
+                    if not col_name:
+                        continue
+                    if is_join_cond:
+                        # (+) 关联条件 → join_usage
+                        # 构建简化的 tables_info（从 alias_map）
+                        plus_tables = [
+                            {"alias": a, "table": alias_map.get(a, a)}
+                            for a in {c.table.lower() for c in cond_cols if c.table}
+                        ]
+                        join_usage.append({
+                            "field": col_name,
+                            "alias": col_alias,
+                            "join_type": "LEFT JOIN",
+                            "on_condition": cond_sql,
+                            "tables": plus_tables,
+                        })
+                    else:
+                        # 真正的过滤条件 → where_usage
+                        where_usage.append({
+                            "field": col_name,
+                            "alias": col_alias,
+                            "condition": cond_sql,
+                        })
+        else:
+            for col in where_node.find_all(exp.Column):
+                col_name = _clean_name(col.name).lower()
+                col_alias = _clean_name(col.table).lower() if col.table else ""
+                if col_name:
+                    where_usage.append({
+                        "field": col_name,
+                        "alias": col_alias,
+                        "condition": where_sql,
+                    })
 
     # ── GROUP BY 字段使用 ──
     group_node = select_node.args.get("group")
