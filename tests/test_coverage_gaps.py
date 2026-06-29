@@ -235,3 +235,57 @@ class TestLiteralFieldNoAliasWarning:
         q = analyze_quality(topo, df, fm, pm)
         alias_issues = [i for i in q["issues"] if "无别名" in i.get("title", "")]
         assert len(alias_issues) == 0, f"字面量字段不应报无别名，实际 {alias_issues}"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 7. 嵌套子查询 JOIN/WHERE 提取
+# ═══════════════════════════════════════════════════════════════
+
+class TestNestedSubqueryUsage:
+    """嵌套子查询内部的 JOIN ON 和 WHERE 条件应正确提取到 join_usage/where_usage。"""
+
+    NESTED_SQL = """SELECT t.region, t.total_amt
+FROM (
+    SELECT m.region, SUM(m.amt) AS total_amt
+    FROM (
+        SELECT a.region, a.amt, a.cust_id
+        FROM ods.fact_a a
+        INNER JOIN ods.dim_b b ON a.cust_id = b.cust_id
+        INNER JOIN ods.dim_c c ON a.cat_id = c.cat_id
+        WHERE a.del_flag = 'N'
+    ) m
+    INNER JOIN (
+        SELECT d.cust_id, COUNT(*) AS cnt
+        FROM ods.fact_d d
+        LEFT JOIN ods.dim_e e ON d.cust_id = e.cust_id
+        WHERE d.sts = 'A'
+    ) s ON m.cust_id = s.cust_id
+) t
+WHERE t.total_amt > 0"""
+
+    def test_inner_join_conditions_extracted(self):
+        """内层 JOIN 的 ON 条件应出现在 join_usage"""
+        p = parse_single_sql(self.NESTED_SQL, "dws")
+        join_fields = {ju["field"] for ju in p.join_usage}
+        join_conds = [ju.get("on_condition", "") for ju in p.join_usage]
+        # cust_id 出现在多层 JOIN 里
+        assert "cust_id" in join_fields, f"cust_id 应在 join_usage，实际 {join_fields}"
+        # cat_id 只在内层 JOIN
+        assert "cat_id" in join_fields, f"cat_id 应在 join_usage（内层），实际 {join_fields}"
+        # 确认 ON 条件文本
+        assert any("b.cust_id" in c for c in join_conds), f"应含 a.cust_id=b.cust_id"
+
+    def test_inner_where_extracted(self):
+        """内层 WHERE 条件应出现在 where_usage"""
+        p = parse_single_sql(self.NESTED_SQL, "dws")
+        where_fields = {wu["field"] for wu in p.where_usage}
+        assert "del_flag" in where_fields, f"del_flag 应在 where_usage（内层），实际 {where_fields}"
+        assert "sts" in where_fields, f"sts 应在 where_usage（内层），实际 {where_fields}"
+        assert "total_amt" in where_fields, f"total_amt 应在 where_usage（外层）"
+
+    def test_no_duplicate_usage(self):
+        """不应有重复的 JOIN/WHERE 条件"""
+        p = parse_single_sql(self.NESTED_SQL, "dws")
+        # 每个唯一的 ON 条件只出现一次
+        on_conds = [ju.get("on_condition", "") for ju in p.join_usage]
+        assert len(on_conds) == len(set(on_conds)), f"JOIN 条件有重复: {on_conds}"

@@ -1330,6 +1330,77 @@ def _extract_select_columns(select_node, comment_alias_map: dict | None = None, 
 # 字段使用信息提取（JOIN ON / WHERE / GROUP BY）
 # ═══════════════════════════════════════════════════════════════
 
+def _extract_subquery_usage(tree, join_usage: list, where_usage: list, depth=0):
+    """递归提取所有嵌套子查询内部的 JOIN 条件和 WHERE 条件。
+
+    嵌套子查询（FROM (SELECT ... INNER JOIN ... WHERE ...)）的内部 JOIN 和 WHERE
+    不在顶层 select_node 上，_extract_field_usage 看不到。这里递归进入所有子查询，
+    把内层的 JOIN ON 和 WHERE 条件提取出来，合并到外层。
+    """
+    if depth > 8:
+        return
+
+    # 遍历所有子查询
+    for sq in tree.find_all(exp.Subquery):
+        inner_select = sq.find(exp.Select)
+        if not inner_select:
+            continue
+
+        # 提取内层 JOIN 的 ON 条件里的字段
+        for join_node in inner_select.args.get("joins", []):
+            on_expr = join_node.args.get("on")
+            if not on_expr:
+                continue
+            on_sql = on_expr.sql(dialect="oracle")
+            for col in on_expr.find_all(exp.Column):
+                col_name = _clean_name(col.name).lower()
+                col_alias = _clean_name(col.table).lower() if col.table else ""
+                if col_name:
+                    # 避免重复
+                    if not any(ju["field"] == col_name and ju.get("on_condition","") == on_sql for ju in join_usage):
+                        join_usage.append({
+                            "field": col_name,
+                            "alias": col_alias,
+                            "join_type": "INNER JOIN",
+                            "on_condition": on_sql,
+                            "tables": [],
+                        })
+
+        # 提取内层 WHERE 的字段
+        where_node = inner_select.args.get("where")
+        if where_node:
+            # 检查是否含 (+) 外关联
+            has_join_mark = any(
+                col.args.get("join_mark") for col in where_node.find_all(exp.Column)
+            )
+            if has_join_mark:
+                conditions = _split_where_conditions(where_node.this)
+                for cond in conditions:
+                    cond_sql = cond.sql(dialect="oracle")
+                    is_join = any(c.args.get("join_mark") for c in cond.find_all(exp.Column))
+                    for col in cond.find_all(exp.Column):
+                        col_name = _clean_name(col.name).lower()
+                        if not col_name:
+                            continue
+                        if is_join:
+                            if not any(ju["field"] == col_name and ju.get("on_condition","") == cond_sql for ju in join_usage):
+                                join_usage.append({"field": col_name, "alias": "", "join_type": "LEFT JOIN", "on_condition": cond_sql, "tables": []})
+                        else:
+                            if not any(wu["field"] == col_name and wu.get("condition","") == cond_sql for wu in where_usage):
+                                where_usage.append({"field": col_name, "alias": "", "condition": cond_sql})
+            else:
+                where_sql = where_node.sql(dialect="oracle")
+                for col in where_node.find_all(exp.Column):
+                    col_name = _clean_name(col.name).lower()
+                    col_alias = _clean_name(col.table).lower() if col.table else ""
+                    if col_name:
+                        if not any(wu["field"] == col_name and wu.get("condition","") == where_sql for wu in where_usage):
+                            where_usage.append({"field": col_name, "alias": col_alias, "condition": where_sql})
+
+        # 递归进入更深层子查询
+        _extract_subquery_usage(inner_select, join_usage, where_usage, depth + 1)
+
+
 def _split_where_conditions(node) -> list:
     """把 WHERE 条件按 AND 拆分成独立条件列表。
 
@@ -1356,6 +1427,9 @@ def _extract_field_usage(tree, select_node, joins: list, sqlglot_dialect: str) -
     join_usage = []
     where_usage = []
     groupby_usage = []
+
+    # 提取嵌套子查询内部的 JOIN/WHERE 条件（内层子查询的关联键和过滤条件）
+    _extract_subquery_usage(tree, join_usage, where_usage)
 
     # ── 构建 alias → 物理表名 映射（含子查询）──
     alias_map = {}  # {alias_lower: table_name}
