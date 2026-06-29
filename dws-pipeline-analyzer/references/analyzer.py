@@ -712,6 +712,19 @@ def _parse_select(tree, select_node, sqlglot_dialect: str, comment_alias_map: di
     # ── 提取源表和 JOIN ──
     result.source_tables = _extract_joins(tree, select_node)
 
+    # ── 检测 FROM 子查询内部是否为 UNION（常见场景：FROM (SELECT... UNION SELECT...) t）──
+    from_clause = select_node.args.get("from_")
+    if from_clause and isinstance(from_clause.this, exp.Subquery):
+        inner_node = from_clause.this.this  # Subquery 内部的节点
+        if isinstance(inner_node, (exp.Union, exp.Intersect, exp.Except)):
+            # FROM 子查询内部是 UNION —— 解析 UNION 分支
+            union_result = _parse_set_operation(inner_node, sqlglot_dialect, comment_alias_map, inner_node.sql(dialect=sqlglot_dialect))
+            result.union_branches = union_result.union_branches
+            # UNION 内部的 JOIN/WHERE 也要提取（子查询内部关联和过滤）
+            inner_join_usage, inner_where_usage, _ = _extract_field_usage(
+                inner_node, inner_node, [], sqlglot_dialect)
+            # 这些 JOIN/WHERE 已经被 _extract_subquery_usage 覆盖，不重复
+
     # ── 提取 SELECT 列 ──
     result.select_columns = _extract_select_columns(select_node, comment_alias_map, result.source_tables)
 
@@ -2306,9 +2319,17 @@ def _build_blocks_from_ast(tree, df_step, fields, step_id):
             if blk:
                 blocks.append(blk)
         elif isinstance(main_expr, exp.Subquery):
-            blk = _make_subquery_block(main_expr, "主查询来源", "", alias_fields)
-            if blk:
-                blocks.append(blk)
+            # 检查子查询内部是否为 UNION
+            inner_node = main_expr.this
+            if isinstance(inner_node, (exp.Union, exp.Intersect, exp.Except)):
+                # FROM 子查询内部是 UNION —— 构建 UNION 块
+                blk = _make_union_block(main_expr, inner_node, alias_fields)
+                if blk:
+                    blocks.append(blk)
+            else:
+                blk = _make_subquery_block(main_expr, "主查询来源", "", alias_fields)
+                if blk:
+                    blocks.append(blk)
 
     # 处理 JOIN
     for jn in select_node.args.get("joins", []):
@@ -2364,6 +2385,92 @@ def _make_table_block(table_node, block_type, role, join_type, on_condition, ali
         "ops": [],
         "children": [],
     }
+
+
+def _make_union_block(subquery_node, union_node, alias_fields):
+    """构建 UNION 块（FROM 子查询内部是 UNION ALL/UNION/INTERSECT/EXCEPT）。
+
+    每个分支作为一个子块，展示分支内的表和关联。
+    """
+    from sqlglot import exp
+    alias = (subquery_node.alias or "").lower()
+
+    blk = {
+        "type": "union",
+        "table": f"UNION ({alias})",
+        "alias": alias,
+        "role": "合并来源",
+        "join_type": "",
+        "on_condition": "",
+        "brought_fields": _dedup_fields(alias_fields.get(alias, [])),
+        "ops": ["合并"],
+        "children": [],
+    }
+
+    # 提取 UNION 分支
+    branches = []
+    _collect_set_branches(union_node, branches)
+
+    for idx, branch in enumerate(branches):
+        if not isinstance(branch, exp.Select):
+            continue
+
+        branch_blk = {
+            "type": "union_branch",
+            "table": f"UNION 分支{idx+1}",
+            "alias": "",
+            "role": f"UNION 分支{idx+1}",
+            "join_type": "",
+            "on_condition": "",
+            "brought_fields": [],
+            "ops": [],
+            "children": [],
+        }
+
+        # 分支内部的表
+        inner_from = branch.args.get("from_")
+        if inner_from:
+            main_expr = inner_from.this
+            if isinstance(main_expr, exp.Table):
+                child = _make_table_block(main_expr, "inner_main", "分支主表", "", "", alias_fields)
+                if child:
+                    branch_blk["children"].append(child)
+            elif isinstance(main_expr, exp.Subquery):
+                # 分支内部还有子查询（递归）
+                inner_inner = main_expr.this
+                if isinstance(inner_inner, (exp.Union,)):
+                    child = _make_union_block(main_expr, inner_inner, alias_fields)
+                else:
+                    child = _make_subquery_block(main_expr, "分支子查询", "", alias_fields)
+                if child:
+                    branch_blk["children"].append(child)
+
+        for jn in branch.args.get("joins", []):
+            jt_node = jn.this
+            on_expr = jn.args.get("on")
+            on_sql = on_expr.sql(dialect="oracle") if on_expr else ""
+            join_kind = (jn.args.get("kind") or jn.args.get("side") or "JOIN").strip()
+            join_type = f"{join_kind} JOIN" if join_kind and join_kind != "JOIN" else "INNER JOIN"
+            if isinstance(jt_node, exp.Table):
+                is_inner = join_type.upper() in ("INNER JOIN", "CROSS JOIN", "JOIN")
+                role = "分支关联表" if is_inner else "分支从表"
+                child = _make_table_block(jt_node, "inner_secondary", role, join_type, on_sql, alias_fields)
+                if child:
+                    branch_blk["children"].append(child)
+
+        # 分支的过滤和收敛
+        inner_where = branch.args.get("where")
+        inner_group = branch.args.get("group")
+        if inner_where:
+            branch_blk["ops"].append("过滤")
+            branch_blk["where_clause"] = inner_where.sql(dialect="oracle").replace("WHERE ", "")
+        if inner_group:
+            branch_blk["ops"].append("收敛")
+            branch_blk["group_by"] = [g.sql(dialect="oracle") for g in inner_group.expressions]
+
+        blk["children"].append(branch_blk)
+
+    return blk
 
 
 def _make_subquery_block(subquery_node, role, on_condition, alias_fields):
