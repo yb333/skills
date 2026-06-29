@@ -633,6 +633,357 @@ def detect_dialect(sql_texts: list[str]) -> str:
 # ═══════════════════════════════════════════════════════════════
 # Step 3: parse_single_sql() — sqlglot AST
 # ═══════════════════════════════════════════════════════════════
+# 递归解析核心（重构）：统一处理 SELECT / UNION / CTE / 子查询的任意嵌套组合
+# ═══════════════════════════════════════════════════════════════
+
+
+@dataclass
+class TableRef:
+    """表引用（FROM/JOIN 的表）。"""
+    table: str = ""
+    alias: str = ""
+    join_type: str = ""       # FROM / LEFT JOIN / INNER JOIN / ...
+    on_condition: str = ""    # ON 条件
+
+
+@dataclass
+class ColumnRef:
+    """列引用。"""
+    alias: str = ""
+    expression: str = ""
+    source_fields: list = None  # [{alias, field}]
+    transform_type: str = "direct"
+
+    def __post_init__(self):
+        if self.source_fields is None:
+            self.source_fields = []
+
+
+@dataclass
+class QueryUnit:
+    """一个 SQL 查询单元（递归解析的核心结构）。
+
+    支持三种类型：
+    - "select": 普通 SELECT（含 FROM 子查询 / JOIN 子查询 / CTE）
+    - "union": UNION/INTERSECT/EXCEPT（含 branches）
+    - "cte": CTE 定义（含 cte_name + cte_body）
+    """
+    type: str = "select"
+
+    # SELECT 类型
+    tables: list = None          # [TableRef] FROM 主表 + JOIN 从表
+    columns: list = None         # [ColumnRef]
+    where: str = ""
+    group_by: list = None
+    from_subquery: object = None  # QueryUnit（FROM 子查询，如果有）
+    join_subqueries: list = None # [{alias, on_condition, body: QueryUnit}]
+    cte_defs: list = None        # [{name, body: QueryUnit}] 该 SELECT 里定义的 CTE
+
+    # UNION 类型
+    branches: list = None        # [QueryUnit] UNION 分支
+
+    # CTE 类型
+    cte_name: str = ""
+    cte_body: object = None      # QueryUnit
+
+    # 通用
+    depth: int = 0               # 嵌套深度
+
+    def __post_init__(self):
+        if self.tables is None:
+            self.tables = []
+        if self.columns is None:
+            self.columns = []
+        if self.group_by is None:
+            self.group_by = []
+        if self.join_subqueries is None:
+            self.join_subqueries = []
+        if self.cte_defs is None:
+            self.cte_defs = []
+        if self.branches is None:
+            self.branches = []
+
+
+def parse_query_unit(node, dialect="oracle", depth=0, comment_alias_map=None):
+    """递归解析任意 AST 节点为 QueryUnit。
+
+    不管节点在顶层、子查询里、CTE 里、还是 UNION 分支里，统一处理。
+    """
+    if comment_alias_map is None:
+        comment_alias_map = {}
+
+    # UNION / INTERSECT / EXCEPT
+    if isinstance(node, (exp.Union, exp.Intersect, exp.Except)):
+        branches_raw = []
+        _collect_set_branches(node, branches_raw)
+        unit = QueryUnit(type="union", depth=depth)
+        for b in branches_raw:
+            if isinstance(b, exp.Select):
+                unit.branches.append(parse_query_unit(b, dialect, depth + 1, comment_alias_map))
+        return unit
+
+    # SELECT
+    if isinstance(node, exp.Select):
+        return _parse_select_to_unit(node, node, dialect, depth, comment_alias_map)
+
+    # 有 WITH 的顶层（tree 本身可能是 With + Select）
+    # 这种情况在 parse_single_sql 里已处理（tree.find(exp.Select)）
+    return QueryUnit(type="select", depth=depth)
+
+
+def _enhance_with_query_unit(parsed_sql, tree, dialect, comment_alias_map):
+    """用 QueryUnit 递归解析补充 ParsedSQL 的盲区。
+
+    补充内容：
+    - UNION 在子查询内部时的 union_branches
+    - CTE 内部的 JOIN/WHERE 条件（collect_all_usage 递归覆盖）
+    - 顶层 UNION 分支的 JOIN/WHERE（collect_all_usage 覆盖）
+    - 所有层级的物理表（collect_all_tables 递归覆盖）
+    """
+    try:
+        unit = parse_query_unit(tree, dialect, 0, comment_alias_map)
+
+        # 补充 UNION 分支（FROM 子查询内部 UNION 的情况）
+        if not parsed_sql.union_branches:
+            if unit.type == "select" and unit.from_subquery:
+                sub = unit.from_subquery
+                if sub.type == "union":
+                    for idx, b in enumerate(sub.branches):
+                        all_tables = collect_all_tables(b)
+                        parsed_sql.union_branches.append({
+                            "branch_index": idx + 1,
+                            "source_tables": all_tables,
+                            "columns": [],  # 列由原有逻辑处理
+                        })
+
+        # 补充 JOIN/WHERE（递归所有层级，去重）
+        all_join, all_where = collect_all_usage(unit)
+
+        # 合并到 parsed_sql（去重）
+        existing_join_keys = {(j["field"], j.get("on_condition", "")) for j in parsed_sql.join_usage}
+        for j in all_join:
+            key = (j["field"], j.get("on_condition", ""))
+            if key not in existing_join_keys:
+                parsed_sql.join_usage.append(j)
+                existing_join_keys.add(key)
+
+        existing_where_keys = {(w["field"], w.get("condition", "")) for w in parsed_sql.where_usage}
+        for w in all_where:
+            key = (w["field"], w.get("condition", ""))
+            if key not in existing_where_keys:
+                parsed_sql.where_usage.append(w)
+                existing_where_keys.add(key)
+
+        # 补充 source_tables（递归收集所有物理表）
+        existing_tables = {j.source_table.lower() for j in parsed_sql.source_tables}
+        all_tables = collect_all_tables(unit)
+        # CTE 名集合（CTE 名不是物理表，不加入）
+        cte_names = set()
+        if unit.type == "select":
+            for cte_def in unit.cte_defs:
+                cte_names.add(cte_def["name"])
+        for t in all_tables:
+            if t.table and t.table.lower() not in existing_tables and t.table.lower() not in cte_names:
+                from analyzer import ParsedJoin
+                parsed_sql.source_tables.append(ParsedJoin(
+                    source_table=t.table, alias=t.alias,
+                    join_type=t.join_type if t.join_type != "FROM" else "FROM_SUBQUERY_MAIN",
+                    join_condition=t.on_condition,
+                ))
+                existing_tables.add(t.table.lower())
+
+    except Exception:
+        pass  # QueryUnit 补充失败不影响原有解析结果
+
+
+def _parse_select_to_unit(tree, select_node, dialect, depth, comment_alias_map):
+    """解析 SELECT 节点为 QueryUnit。"""
+    unit = QueryUnit(type="select", depth=depth)
+
+    # FROM
+    from_clause = select_node.args.get("from_")
+    if from_clause:
+        main_expr = from_clause.this
+        if isinstance(main_expr, exp.Table):
+            unit.tables.append(TableRef(
+                table=".".join(_clean_name(p.name) for p in main_expr.parts),
+                alias=(main_expr.alias or "").lower(),
+                join_type="FROM",
+            ))
+        elif isinstance(main_expr, exp.Subquery):
+            inner = main_expr.this
+            sub_unit = parse_query_unit(inner, dialect, depth + 1, comment_alias_map)
+            sub_unit.cte_name = (main_expr.alias or "").lower()  # 复用 cte_name 存子查询别名
+            unit.from_subquery = sub_unit
+
+    # JOIN
+    for jn in select_node.args.get("joins", []):
+        jt_node = jn.this
+        on_expr = jn.args.get("on")
+        on_sql = on_expr.sql(dialect=dialect) if on_expr else ""
+        join_kind = (jn.args.get("kind") or jn.args.get("side") or "JOIN").strip()
+        join_type = f"{join_kind} JOIN" if join_kind and join_kind != "JOIN" else "INNER JOIN"
+
+        if isinstance(jt_node, exp.Table):
+            unit.tables.append(TableRef(
+                table=".".join(_clean_name(p.name) for p in jt_node.parts),
+                alias=(jt_node.alias or "").lower(),
+                join_type=join_type,
+                on_condition=on_sql,
+            ))
+        elif isinstance(jt_node, exp.Subquery):
+            inner = jt_node.this
+            sub_unit = parse_query_unit(inner, dialect, depth + 1, comment_alias_map)
+            sub_unit.cte_name = (jt_node.alias or "").lower()
+            unit.join_subqueries.append({
+                "alias": (jt_node.alias or "").lower(),
+                "on_condition": on_sql,
+                "join_type": join_type,
+                "body": sub_unit,
+            })
+
+    # WHERE
+    where_node = select_node.args.get("where")
+    if where_node:
+        unit.where = where_node.sql(dialect=dialect).replace("WHERE ", "")
+
+    # GROUP BY
+    group_node = select_node.args.get("group")
+    if group_node:
+        unit.group_by = [g.sql(dialect=dialect) for g in group_node.expressions]
+
+    # CTE 定义（WITH ... AS (...)）
+    with_node = tree.args.get("with") if hasattr(tree, "args") else None
+    if with_node:
+        for cte_expr in with_node.expressions:
+            cte_name = cte_expr.alias or ""
+            cte_inner = cte_expr.this  # CTE 内部的 SELECT 或 UNION
+            cte_unit = parse_query_unit(cte_inner, dialect, depth + 1, comment_alias_map)
+            cte_unit.cte_name = cte_name.lower()
+            cte_unit.type = "cte_def"
+            unit.cte_defs.append({"name": cte_name.lower(), "body": cte_unit})
+
+    # SELECT 列
+    for i, proj in enumerate(select_node.expressions):
+        col = _parse_column_ref(proj, i, comment_alias_map)
+        unit.columns.append(col)
+
+    return unit
+
+
+def _parse_column_ref(proj, position, comment_alias_map):
+    """解析 SELECT 投影列为 ColumnRef。"""
+    if isinstance(proj, exp.Alias):
+        alias = _clean_name(proj.alias).lower()
+        inner = proj.this
+    elif isinstance(proj, exp.Column):
+        alias = _clean_name(proj.name).lower()
+        inner = proj
+    else:
+        # 字面量/表达式
+        alias = comment_alias_map.get(position, f"_col_{position}")
+        if isinstance(proj, exp.Alias):
+            alias = _clean_name(proj.alias).lower()
+            inner = proj.this
+        else:
+            inner = proj
+
+    col = ColumnRef(alias=alias, expression=inner.sql(dialect="oracle"))
+    col.transform_type = classify_transform(inner, inner.sql(dialect="oracle"))
+
+    # source_fields
+    if isinstance(inner, exp.Column):
+        col.source_fields = [{
+            "alias": _clean_name(inner.table).lower() if inner.table else "",
+            "field": _clean_name(inner.name).lower(),
+        }]
+    else:
+        # 表达式：提取引用的列
+        for c in inner.find_all(exp.Column):
+            col.source_fields.append({
+                "alias": _clean_name(c.table).lower() if c.table else "",
+                "field": _clean_name(c.name).lower(),
+            })
+
+    return col
+
+
+def collect_all_tables(unit, exclude_cte_names=None):
+    """递归收集 QueryUnit 里所有物理表（含子查询/CTE/UNION 分支内部）。
+
+    Returns: [TableRef, ...]
+    """
+    if exclude_cte_names is None:
+        exclude_cte_names = set()
+
+    result = []
+    if unit.type == "select":
+        for t in unit.tables:
+            if t.table.lower() not in exclude_cte_names:
+                result.append(t)
+        if unit.from_subquery:
+            result.extend(collect_all_tables(unit.from_subquery, exclude_cte_names))
+        for jsq in unit.join_subqueries:
+            result.extend(collect_all_tables(jsq["body"], exclude_cte_names))
+        for cte_def in unit.cte_defs:
+            result.extend(collect_all_tables(cte_def["body"], exclude_cte_names))
+    elif unit.type == "union":
+        for b in unit.branches:
+            result.extend(collect_all_tables(b, exclude_cte_names))
+    elif unit.type in ("cte", "cte_def"):
+        if unit.cte_body:
+            result.extend(collect_all_tables(unit.cte_body, exclude_cte_names))
+
+    return result
+
+
+def collect_all_usage(unit, depth=0):
+    """递归收集 QueryUnit 里所有 JOIN ON 和 WHERE 条件。
+
+    Returns: (join_usage, where_usage)
+    """
+    join_usage = []
+    where_usage = []
+
+    if unit.type == "select":
+        # JOIN 条件
+        for t in unit.tables:
+            if t.on_condition:
+                # 提取 ON 条件里的字段
+                for m in re.finditer(r'(\w+)\.(\w+)', t.on_condition):
+                    field = m.group(2).lower()
+                    join_usage.append({"field": field, "alias": m.group(1).lower(),
+                                       "join_type": t.join_type, "on_condition": t.on_condition})
+
+        # WHERE 条件
+        if unit.where:
+            for m in re.finditer(r'(\w+)\.(\w+)', unit.where):
+                field = m.group(2).lower()
+                where_usage.append({"field": field, "alias": m.group(1).lower(),
+                                    "condition": unit.where})
+
+        # 递归子查询
+        if unit.from_subquery:
+            j, w = collect_all_usage(unit.from_subquery, depth + 1)
+            join_usage.extend(j)
+            where_usage.extend(w)
+        for jsq in unit.join_subqueries:
+            j, w = collect_all_usage(jsq["body"], depth + 1)
+            join_usage.extend(j)
+            where_usage.extend(w)
+        for cte_def in unit.cte_defs:
+            j, w = collect_all_usage(cte_def["body"], depth + 1)
+            join_usage.extend(j)
+            where_usage.extend(w)
+
+    elif unit.type == "union":
+        for b in unit.branches:
+            j, w = collect_all_usage(b, depth + 1)
+            join_usage.extend(j)
+            where_usage.extend(w)
+
+    return join_usage, where_usage
+
 
 def parse_single_sql(sql: str, dialect: str = "dws") -> ParsedSQL:
     """用 sqlglot AST 解析单条 SQL（纯 SELECT/WITH/UNION）。
@@ -684,6 +1035,8 @@ def parse_single_sql(sql: str, dialect: str = "dws") -> ParsedSQL:
         if isinstance(tree, (exp.Union, exp.Intersect, exp.Except)):
             r = _parse_set_operation(tree, sqlglot_dialect, comment_alias_map, sql)
             r.has_star = result.has_star
+            # 用 QueryUnit 递归补充 JOIN/WHERE（顶层 UNION 分支的遗漏）
+            _enhance_with_query_unit(r, tree, sqlglot_dialect, comment_alias_map)
             return r
 
         # ── 普通 SELECT / WITH...SELECT ──
@@ -694,6 +1047,8 @@ def parse_single_sql(sql: str, dialect: str = "dws") -> ParsedSQL:
 
         r = _parse_select(tree, select_node, sqlglot_dialect, comment_alias_map, sql)
         r.has_star = result.has_star
+        # 用 QueryUnit 递归补充（CTE 内部结构、UNION 分支等遗漏）
+        _enhance_with_query_unit(r, tree, sqlglot_dialect, comment_alias_map)
         return r
     except RecursionError:
         result.parse_error = "RecursionError: SQL 嵌套层级过深"
