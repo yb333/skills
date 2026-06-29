@@ -956,7 +956,7 @@ def collect_all_usage(unit, depth=0):
     join_usage = []
     where_usage = []
 
-    if unit.type == "select":
+    if unit.type in ("select", "cte_def", "cte"):
         # JOIN 条件
         for t in unit.tables:
             if t.on_condition:
@@ -980,6 +980,10 @@ def collect_all_usage(unit, depth=0):
             where_usage.extend(w)
         for jsq in unit.join_subqueries:
             j, w = collect_all_usage(jsq["body"], depth + 1)
+            join_usage.extend(j)
+            where_usage.extend(w)
+        for cte_def in unit.cte_defs:
+            j, w = collect_all_usage(cte_def["body"], depth + 1)
             join_usage.extend(j)
             where_usage.extend(w)
         for cte_def in unit.cte_defs:
@@ -2689,13 +2693,15 @@ def _enhance_blocks_with_cte(blocks, tree, df_step, fields, step_id):
                 if tbl in cte_map:
                     cte_unit = cte_map[tbl]
                     if not blk.get("children"):
-                        blk["children"] = _unit_to_blocks(cte_unit, alias_fields)
-                        # CTE 操作标签
-                        if cte_unit.where:
-                            blk["ops"].append("过滤")
-                            blk["where_clause"] = cte_unit.where
-                        if cte_unit.group_by:
-                            blk["ops"].append("收敛")
+                        children = _unit_to_blocks(cte_unit, alias_fields)
+                        blk["children"] = children
+                        # CTE 内部的操作标签加到 children 的第一个块（内部主表），不加到 CTE 块本身
+                        if children:
+                            if cte_unit.where:
+                                children[0]["ops"].append("过滤")
+                                children[0]["where_clause"] = cte_unit.where
+                            if cte_unit.group_by:
+                                children[0]["ops"].append("收敛")
                 _enhance_recursive(blk.get("children", []))
 
         _enhance_recursive(blocks)
