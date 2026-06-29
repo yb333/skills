@@ -4459,7 +4459,52 @@ def build_source(
 # AI 摘要生成（给 AI 增强用的精简输入，2-3KB）
 # ═══════════════════════════════════════════════════════════════
 
-def _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings, quality) -> str:
+def _append_block_summary(lines, blk, idx, indent=1):
+    """在 summary 里输出逻辑块的结构信息（供 AI 读）。"""
+    prefix = "  " * indent
+    role = blk.get("role", "")
+    table = blk.get("table", "")
+    alias = blk.get("alias", "")
+    ops = blk.get("ops", [])
+    on_cond = blk.get("on_condition", "")
+    join_type = blk.get("join_type", "")
+    block_id = f"块{idx+1}"
+
+    desc = f"{prefix}  - {block_id}: {role} {table}"
+    if alias:
+        desc += f" ({alias})"
+    if join_type and join_type != "FROM":
+        desc += f" {join_type}"
+    if on_cond:
+        desc += f" ON {on_cond}"
+    if ops:
+        desc += f" [{', '.join(ops)}]"
+    lines.append(desc)
+
+    # 带出字段
+    brought = blk.get("brought_fields", [])
+    if brought:
+        field_names = [f["name"] if isinstance(f, dict) else f for f in brought]
+        lines.append(f"{prefix}    带出: {', '.join(field_names)}")
+
+    # 递归子块
+    for cidx, child in enumerate(blk.get("children", [])):
+        _append_block_summary(lines, child, cidx, indent + 1)
+
+
+def _append_block_template(lines, blk, idx, indent=0):
+    """在 AI 输出模板里列出块（让 AI 为每个块写目的）。"""
+    prefix = "  " * indent
+    block_id = f"块{idx+1}"
+    table = blk.get("table", "")
+    role = blk.get("role", "")
+    lines.append(f"{prefix}- {block_id} ({role} {table}): （这个块的业务目的）")
+
+    for cidx, child in enumerate(blk.get("children", [])):
+        _append_block_template(lines, child, cidx, indent + 1)
+
+
+def _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings, quality, data_flow) -> str:
     """生成 AI 增强用的精简摘要 markdown。
 
     包含:
@@ -4531,6 +4576,13 @@ def _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings,
             sql_preview = rule.query_sql[:200].replace("\n", " ")
             lines.append(f"- SQL 摘要: {sql_preview}...")
 
+        # 逻辑块结构（供 AI 补充块目的）
+        df_step = next((s for s in data_flow.get("steps", []) if s.get("step_id") == sid), None)
+        if df_step and df_step.get("data_blocks"):
+            lines.append(f"- 逻辑块:")
+            for idx, blk in enumerate(df_step["data_blocks"]):
+                _append_block_summary(lines, blk, idx, indent=1)
+
         # 兜底描述（脚本已生成）
         if auto_desc.get("purpose"):
             lines.append(f"- 脚本兜底 purpose: {auto_desc['purpose']}")
@@ -4560,6 +4612,12 @@ def _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings,
         sid = step["step_id"] if step else ""
         lines.append(f"## {sid}")
         lines.append(f"（描述这步的业务目的和加工逻辑）")
+        lines.append(f"### 块目的")
+        # 列出该步骤的逻辑块，让 AI 为每个块补充目的
+        df_step_tpl = next((s for s in data_flow.get("steps", []) if s.get("step_id") == sid), None)
+        if df_step_tpl and df_step_tpl.get("data_blocks"):
+            for idx, blk in enumerate(df_step_tpl["data_blocks"]):
+                _append_block_template(lines, blk, idx, indent=0)
         lines.append("")
     lines.append("## 关键字段")
     lines.append("- 字段名: 业务含义")
@@ -4860,7 +4918,7 @@ def main():
 
     # ── 生成 AI 增强用摘要 ──
     summary_file = output_dir / "knowledge_summary.md"
-    summary_text = _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings, quality)
+    summary_text = _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings, quality, data_flow)
     summary_file.write_text(summary_text, encoding="utf-8", newline="\n")
 
     print(f"\n=== 完成 ===")

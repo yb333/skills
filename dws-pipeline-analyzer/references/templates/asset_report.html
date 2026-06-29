@@ -2050,6 +2050,9 @@ function renderSteps() {
           }).join('、');
           h += '<div style="font-size:11px;color:var(--text-muted);padding-left:8px;">带出：' + fieldsHtml + '</div>';
         }
+        if (blk.purpose) {
+          h += '<div style="font-size:11px;color:var(--accent);font-style:italic;padding-left:8px;">' + escapeHtml(blk.purpose) + '</div>';
+        }
         h += '</div>';
 
         // 递归渲染子块

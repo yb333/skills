@@ -127,6 +127,35 @@ _DELETE_MODE_LABEL = {
 }
 
 
+def _merge_block_purposes(blocks, block_purposes, depth=0):
+    """把 AI 生成的块目的合并到 data_blocks。
+
+    block_purposes 格式: {"块1": "目的描述", "块1.1": "子块目的", ...}
+    块编号规则: 块N（顶层），块N.M（子块），块N.M.K（更深层）
+    """
+    if not block_purposes:
+        return blocks
+
+    def _merge_recursive(blocks_list, parent_prefix, depth):
+        for idx, blk in enumerate(blocks_list):
+            block_id = f"块{parent_prefix}{idx+1}" if parent_prefix else f"块{idx+1}"
+            # 尝试匹配（块1 / 块1 (主表 xxx) 等格式）
+            matched_purpose = None
+            for key, val in block_purposes.items():
+                if key.startswith(block_id):
+                    matched_purpose = val
+                    break
+            if matched_purpose:
+                blk["purpose"] = matched_purpose
+            # 递归子块
+            if blk.get("children"):
+                child_prefix = f"{parent_prefix}{idx+1}." if parent_prefix else f"{idx+1}."
+                _merge_recursive(blk["children"], child_prefix, depth + 1)
+
+    _merge_recursive(blocks, "", 0)
+    return blocks
+
+
 def _build_step_summary_inline(topo_step, df_step, fields_list):
     """生成结构化步骤概述（自然语言，精简归类）。
 
@@ -317,19 +346,48 @@ def _merge_ai_markdown(knowledge: dict, ai_text: str) -> None:
             step_match = re.match(r"(step_\d+)", title)
             if step_match:
                 step_id = step_match.group(1)
+
+                # 分离块目的和步骤描述
+                block_purposes = {}  # {块名: 目的}
+                step_content_lines = []
+                in_block_section = False
+                for cl in content.split("\n"):
+                    cl_stripped = cl.strip()
+                    if cl_stripped.startswith("### 块目的"):
+                        in_block_section = True
+                        continue
+                    if cl_stripped.startswith("### ") and in_block_section:
+                        in_block_section = False
+                    if in_block_section and (cl_stripped.startswith("- ") or cl_stripped.startswith("* ")):
+                        # 解析 "- 块1 (xxx): 目的描述"
+                        bp_match = re.match(r"[-*]\s*(块\d+[^:]*?):\s*(.*)", cl_stripped)
+                        if bp_match:
+                            block_purposes[bp_match.group(1).strip()] = bp_match.group(2).strip()
+                            continue
+                    if not in_block_section:
+                        step_content_lines.append(cl)
+
+                step_content = "\n".join(step_content_lines).strip()
+
                 # 找已有的 step_description
                 desc = next((d for d in bl["step_descriptions"] if d.get("step_id") == step_id), None)
                 if desc:
-                    desc["purpose"] = content.split("\n")[0] if content else desc.get("purpose", "")
-                    desc["logic"] = content
+                    desc["purpose"] = step_content.split("\n")[0] if step_content else desc.get("purpose", "")
+                    desc["logic"] = step_content
                     desc["is_auto_generated"] = False
                 else:
                     bl["step_descriptions"].append({
                         "step_id": step_id,
-                        "purpose": content.split("\n")[0] if content else "",
-                        "logic": content,
+                        "purpose": step_content.split("\n")[0] if step_content else "",
+                        "logic": step_content,
                         "is_auto_generated": False,
                     })
+
+                # 存块目的到 step_descriptions（供 data_blocks 合并用）
+                if block_purposes:
+                    desc = next((d for d in bl["step_descriptions"] if d.get("step_id") == step_id), None)
+                    if desc:
+                        desc["block_purposes"] = block_purposes
 
         elif "关键字段" in title:
             # 解析 - 字段名: 含义
@@ -484,7 +542,8 @@ def build_report_data(knowledge):
             "scenario_name": s.get("scenario_name", ""),
             "is_common_step": s.get("is_common_step", False),
             "structured_summary": _build_step_summary_inline(s, df_step, fields_list),
-            "data_blocks": df_step.get("data_blocks", []),
+            "data_blocks": _merge_block_purposes(df_step.get("data_blocks", []),
+                                                  ai_step.get("block_purposes", {})),
             "delete_mode_label": s.get("delete_mode_label", ""),
             "delete_condition": s.get("delete_condition", ""),
             "source_tables": s.get("source_tables_from_sql", []),
