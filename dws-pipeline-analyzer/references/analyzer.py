@@ -2659,13 +2659,94 @@ def build_data_blocks(step: dict, df_step: dict, parsed, fields: list) -> list:
         tree = None
 
     if tree:
-        blocks = _build_blocks_from_ast(tree, df_step, fields, step.get("step_id", ""))
-        # 用 QueryUnit 补充 CTE 内部结构（AST 构建不展示 CTE 内部的表/JOIN）
-        _enhance_blocks_with_cte(blocks, tree, df_step, fields, step.get("step_id", ""))
+        # 检测顶层是否为 UNION（走 UNION 块构建，不走普通 SELECT）
+        if isinstance(tree, (exp.Union, exp.Intersect, exp.Except)):
+            blocks = _build_union_blocks_top(tree, df_step, fields, step.get("step_id", ""))
+        else:
+            blocks = _build_blocks_from_ast(tree, df_step, fields, step.get("step_id", ""))
+            # 用 QueryUnit 补充 CTE 内部结构（AST 构建不展示 CTE 内部的表/JOIN）
+            _enhance_blocks_with_cte(blocks, tree, df_step, fields, step.get("step_id", ""))
     else:
         blocks = _build_blocks_flat(df_step, fields, step.get("step_id", ""))
 
     return blocks
+
+
+def _build_union_blocks_top(tree, df_step, fields, step_id):
+    """顶层 UNION 的逻辑块构建——每个分支独立构建，WHERE 不混在一起。"""
+    from sqlglot import exp
+    branches = []
+    _collect_set_branches(tree, branches)
+
+    alias_fields = _build_alias_fields(fields, step_id)
+
+    union_block = {
+        "type": "union", "table": "UNION ALL", "alias": "",
+        "role": "合并来源", "join_type": "", "on_condition": "",
+        "brought_fields": [], "ops": ["合并"], "children": [],
+    }
+
+    for idx, branch in enumerate(branches):
+        if not isinstance(branch, exp.Select):
+            continue
+
+        branch_block = {
+            "type": "union_branch", "table": f"UNION 分支{idx+1}", "alias": "",
+            "role": f"UNION 分支{idx+1}", "join_type": "", "on_condition": "",
+            "brought_fields": [], "ops": [], "children": [],
+        }
+
+        # 分支内部的表和 JOIN
+        from_clause = branch.args.get("from_")
+        if from_clause:
+            main_expr = from_clause.this
+            if isinstance(main_expr, exp.Table):
+                child = _make_table_block(main_expr, "inner_main", "分支主表", "", "", alias_fields)
+                if child:
+                    branch_block["children"].append(child)
+            elif isinstance(main_expr, exp.Subquery):
+                inner = main_expr.this
+                if isinstance(inner, (exp.Union,)):
+                    sub_blk = _make_union_block(main_expr, inner, alias_fields)
+                else:
+                    sub_blk = _make_subquery_block(main_expr, "分支子查询", "", alias_fields)
+                if sub_blk:
+                    branch_block["children"].append(sub_blk)
+
+        for jn in branch.args.get("joins", []):
+            jt_node = jn.this
+            on_expr = jn.args.get("on")
+            on_sql = on_expr.sql(dialect="oracle") if on_expr else ""
+            join_kind = (jn.args.get("kind") or jn.args.get("side") or "JOIN").strip()
+            join_type = f"{join_kind} JOIN" if join_kind and join_kind != "JOIN" else "INNER JOIN"
+            if isinstance(jt_node, exp.Table):
+                is_inner = join_type.upper() in ("INNER JOIN", "CROSS JOIN", "JOIN")
+                role = "分支关联表" if is_inner else "分支从表"
+                child = _make_table_block(jt_node, "inner_secondary", role, join_type, on_sql, alias_fields)
+                if child:
+                    branch_block["children"].append(child)
+            elif isinstance(jt_node, exp.Subquery):
+                child = _make_subquery_block(jt_node, "分支关联子查询", on_sql, alias_fields)
+                if child:
+                    child["join_type"] = join_type
+                    branch_block["children"].append(child)
+
+        # 分支的过滤和收敛（各自独立，不混在一起）
+        inner_where = branch.args.get("where")
+        inner_group = branch.args.get("group")
+        if inner_where:
+            branch_block["ops"].append("过滤")
+            branch_block["where_clause"] = inner_where.sql(dialect="oracle").replace("WHERE ", "")
+        if inner_group:
+            branch_block["ops"].append("收敛")
+            branch_block["group_by"] = [g.sql(dialect="oracle") for g in inner_group.expressions]
+
+        union_block["children"].append(branch_block)
+
+    # CTE 补充
+    _enhance_blocks_with_cte([union_block], tree, df_step, fields, step_id)
+
+    return [union_block]
 
 
 def _enhance_blocks_with_cte(blocks, tree, df_step, fields, step_id):
