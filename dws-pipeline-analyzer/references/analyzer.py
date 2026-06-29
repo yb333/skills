@@ -713,6 +713,9 @@ def _parse_select(tree, select_node, sqlglot_dialect: str, comment_alias_map: di
     # ── 提取 SELECT 列 ──
     result.select_columns = _extract_select_columns(select_node, comment_alias_map, result.source_tables)
 
+    # ── FROM 子查询字段穿透（递归到内层找物理来源）──
+    _penetrate_subquery_columns(tree, result.select_columns)
+
     # ── WHERE ──
     where_node = select_node.args.get("where")
     if where_node:
@@ -1324,6 +1327,87 @@ def _extract_select_columns(select_node, comment_alias_map: dict | None = None, 
         ))
 
     return columns
+
+
+def _penetrate_subquery_columns(tree, columns: list, depth=0):
+    """对 FROM 子查询的 SELECT 字段做穿透——递归到内层子查询找物理来源。
+
+    当 FROM 是子查询（如 FROM (...) t），顶层列 t.field 的 source_fields 停在
+    子查询别名层。这里递归进入子查询，找到 field 在内层的真实物理表来源。
+    支持多层嵌套（递归穿透直到物理表）。
+    """
+    if depth > 8 or not columns:
+        return
+
+    # 找 FROM 子查询
+    select_node = tree.find(exp.Select)
+    if not select_node:
+        return
+    from_clause = select_node.args.get("from_")
+    if not from_clause:
+        return
+    main_expr = from_clause.this
+    if not isinstance(main_expr, exp.Subquery):
+        return
+
+    sub_alias = (main_expr.alias or "").lower()
+    if not sub_alias:
+        return
+
+    # 内层子查询
+    inner_select = main_expr.find(exp.Select)
+    if not inner_select:
+        return
+
+    # 内层别名 → 物理表映射
+    inner_alias_map = {}
+    inner_from = inner_select.args.get("from_")
+    if inner_from:
+        if isinstance(inner_from.this, exp.Table):
+            t = inner_from.this
+            inner_alias_map[t.alias.lower() if t.alias else ""] = ".".join(_clean_name(p.name) for p in t.parts)
+        elif isinstance(inner_from.this, exp.Subquery):
+            # 内层 FROM 也是子查询，记下别名
+            inner_sub = inner_from.this
+            inner_alias_map[inner_sub.alias.lower() if inner_sub.alias else ""] = inner_sub.alias.lower() if inner_sub.alias else ""
+    for jn in inner_select.args.get("joins", []):
+        jt = jn.this
+        if isinstance(jt, exp.Table):
+            inner_alias_map[jt.alias.lower() if jt.alias else ""] = ".".join(_clean_name(p.name) for p in jt.parts)
+
+    # 内层 SELECT 列 → {列名(LOWER): (别名, 字段名)}
+    inner_cols = {}
+    for proj in inner_select.expressions:
+        if isinstance(proj, exp.Alias):
+            alias_name = proj.alias.lower()
+            col_node = proj.this
+        elif isinstance(proj, exp.Column):
+            alias_name = proj.name.lower()
+            col_node = proj
+        else:
+            continue
+        if isinstance(col_node, exp.Column):
+            inner_cols[alias_name] = (col_node.table.lower() if col_node.table else "",
+                                      col_node.name.lower())
+
+    # 对顶层 columns 穿透
+    changed = False
+    for col in columns:
+        for sf in col.source_fields:
+            sf_alias = (sf.get("alias", "") or "").lower()
+            sf_field = (sf.get("field", "") or "").lower()
+            if sf_alias == sub_alias and sf_field in inner_cols:
+                inner_alias, inner_field = inner_cols[sf_field]
+                phys_table = inner_alias_map.get(inner_alias, inner_alias)
+                sf["alias"] = inner_alias
+                sf["field"] = inner_field
+                if phys_table and phys_table != sub_alias:
+                    col.source_tables = [phys_table]
+                changed = True
+
+    # 如果穿透后仍有 source_fields 的别名指向子查询（多层嵌套），递归
+    if changed:
+        _penetrate_subquery_columns(main_expr, columns, depth + 1)
 
 
 # ═══════════════════════════════════════════════════════════════
