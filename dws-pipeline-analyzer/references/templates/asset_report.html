@@ -2048,6 +2048,12 @@ function renderSteps() {
         if (blk.purpose) {
           h += '<div style="font-size:11px;color:var(--accent);font-style:italic;padding-left:8px;">' + escapeHtml(blk.purpose) + '</div>';
         }
+        if (blk.where_clause) {
+          h += '<div style="font-size:11px;color:#ef4444;padding-left:8px;">过滤: <code style="font-size:10px;">' + escapeHtml(blk.where_clause) + '</code></div>';
+        }
+        if (blk.group_by && blk.group_by.length > 0) {
+          h += '<div style="font-size:11px;color:#f97316;padding-left:8px;">收敛: ' + escapeHtml(blk.group_by.join(', ')) + '</div>';
+        }
         h += '</div>';
 
         // 递归渲染子块

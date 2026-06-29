@@ -2331,13 +2331,15 @@ def _build_blocks_from_ast(tree, df_step, fields, step_id):
                 blk["join_type"] = join_type
                 blocks.append(blk)
 
-    # 给主表加操作标签
+    # 给主表加操作标签 + 过滤条件
     if blocks and blocks[0].get("type") == "main":
         ops = []
         if where_clause:
             ops.append("过滤")
+            blocks[0]["where_clause"] = where_clause
         if group_by:
             ops.append("收敛")
+            blocks[0]["group_by"] = group_by
         blocks[0]["ops"] = ops
 
     return blocks
@@ -2417,13 +2419,15 @@ def _make_subquery_block(subquery_node, role, on_condition, alias_fields):
                 child["join_type"] = join_type
                 blk["children"].append(child)
 
-    # 子查询内部操作标签
+    # 子查询内部操作标签 + 过滤条件
     inner_where = inner_select.args.get("where")
     inner_group = inner_select.args.get("group")
     if inner_where:
         blk["ops"].append("过滤")
+        blk["where_clause"] = inner_where.sql(dialect="oracle").replace("WHERE ", "")
     if inner_group:
         blk["ops"].append("收敛")
+        blk["group_by"] = [g.sql(dialect="oracle") for g in inner_group.expressions] if hasattr(inner_group, "expressions") else []
 
     return blk
 
