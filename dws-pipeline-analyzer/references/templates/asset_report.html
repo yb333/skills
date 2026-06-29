@@ -2900,23 +2900,46 @@ function drawChainLinks(treeId, layerCount, fieldName) {
 // 表搜索（筛选步骤卡片）
 var _tableSearchTimer = null;
 function handleTableSearch() {
-  var query = document.getElementById('tableSearch').value.trim().toLowerCase();
+  var query = document.getElementById('tableSearch').value.trim();
+  var queryLower = query.toLowerCase();
   var cards = document.querySelectorAll('#stepsContainer .step-card');
+
+  // 移除之前的高亮
+  cards.forEach(function(card) {
+    card.querySelectorAll('mark.table-hl').forEach(function(m) {
+      var parent = m.parentNode;
+      parent.replaceChild(document.createTextNode(m.textContent), m);
+      parent.normalize();
+    });
+  });
+
   cards.forEach(function(card) {
     if (!query) {
       card.style.display = '';
       card.style.border = '';
       return;
     }
-    // 检查 data_blocks 里的表名
-    var blocks = card.querySelectorAll('[style*="border-left"]');
     var found = false;
-    // 也检查整个卡片的文本内容（含 SQL、字段等）
     var text = card.textContent.toLowerCase();
-    if (text.indexOf(query) >= 0) found = true;
+    if (text.indexOf(queryLower) >= 0) found = true;
+
     if (found) {
       card.style.display = '';
       card.style.border = '2px solid var(--accent)';
+      // 在逻辑块的 code（表名）里高亮匹配
+      if (query.length >= 2) {
+        card.querySelectorAll('code').forEach(function(codeEl) {
+          var content = codeEl.textContent;
+          var lower = content.toLowerCase();
+          var idx = lower.indexOf(queryLower);
+          if (idx >= 0) {
+            var before = content.substring(0, idx);
+            var match = content.substring(idx, idx + query.length);
+            var after = content.substring(idx + query.length);
+            codeEl.innerHTML = escapeHtml(before) + '<mark class="table-hl" style="background:#fef08a;color:#1e293b;padding:1px 2px;border-radius:2px;">' + escapeHtml(match) + '</mark>' + escapeHtml(after);
+          }
+        });
+      }
     } else {
       card.style.display = 'none';
     }
