@@ -2015,41 +2015,54 @@ function renderSteps() {
       html += '<div class="step-logic" style="font-size:13px;line-height:1.7;color:var(--text-secondary);white-space:pre-wrap;">' + escapeHtml(step.logic) + '</div>';
     }
 
-    // 逻辑块展示（加工逻辑）
+    // 逻辑块展示（加工逻辑）— 递归渲染嵌套结构
     var blocks = step.data_blocks || [];
     if (blocks.length > 0) {
       html += '<details style="margin:8px 0 0;padding:0;background:var(--bg-card);border-radius:6px;border:1px solid var(--border);" open>';
       html += '<summary style="cursor:pointer;font-size:12px;font-weight:700;color:var(--text-secondary);padding:10px 12px;">逻辑块（' + blocks.length + '）</summary>';
-      html += '<div style="padding:0 12px 10px;">';
+      html += '<div style="padding:4px 12px 10px;">';
 
-      blocks.forEach(function(blk) {
-        var roleColor = blk.type === 'main' ? '#3b82f6' : (blk.type.indexOf('subquery') >= 0 ? '#8b5cf6' : (blk.type === 'union_branch' ? '#f97316' : '#22c55e'));
-        var roleLabel = blk.role || '';
+      function renderBlock(blk, depth) {
+        var indent = depth * 16;
+        var isSubquery = blk.type === 'subquery' || (blk.children && blk.children.length > 0);
+        var colorMap = {'main': '#3b82f6', 'inner_main': '#3b82f6', 'secondary': '#22c55e',
+                        'inner_secondary': '#22c55e', 'subquery': '#8b5cf6', 'union_branch': '#f97316'};
+        var color = colorMap[blk.type] || '#64748b';
         var opsLabel = (blk.ops && blk.ops.length) ? ' <span style="font-size:10px;color:#f97316;">[' + blk.ops.join('、') + ']</span>' : '';
 
-        html += '<div style="margin-bottom:6px;padding-left:8px;border-left:3px solid ' + roleColor + ';">';
-        html += '<div style="font-size:13px;line-height:1.5;">';
-        html += '<span style="font-weight:600;color:' + roleColor + ';">' + escapeHtml(roleLabel) + '</span> ';
-        html += '<code style="color:var(--accent);">' + escapeHtml(blk.table) + '</code>';
-        if (blk.alias) html += ' <span style="color:var(--text-muted);">(' + escapeHtml(blk.alias) + ')</span>';
-        html += opsLabel;
-        html += '</div>';
+        var h = '<div style="margin-bottom:6px;margin-left:' + indent + 'px;padding-left:8px;border-left:3px solid ' + color + ';">';
+        h += '<div style="font-size:13px;line-height:1.5;">';
+        h += '<span style="font-weight:600;color:' + color + ';">' + escapeHtml(blk.role || '') + '</span> ';
+        h += '<code style="color:var(--accent);">' + escapeHtml(blk.table) + '</code>';
+        if (blk.alias) h += ' <span style="color:var(--text-muted);">(' + escapeHtml(blk.alias) + ')</span>';
+        h += opsLabel;
+        h += '</div>';
 
-        if (blk.join_type && blk.join_type !== 'FROM' && blk.join_type !== 'UNION') {
-          html += '<div style="font-size:12px;color:var(--text-secondary);padding-left:8px;">' + escapeHtml(blk.join_type) + (blk.on_condition ? ' ON ' + escapeHtml(blk.on_condition) : '') + '</div>';
+        if (blk.join_type && blk.join_type !== 'FROM') {
+          h += '<div style="font-size:12px;color:var(--text-secondary);padding-left:8px;">' + escapeHtml(blk.join_type) + (blk.on_condition ? ' ON ' + escapeHtml(blk.on_condition) : '') + '</div>';
         }
         if (blk.brought_fields && blk.brought_fields.length > 0) {
           var fieldsHtml = blk.brought_fields.map(function(f) {
-            if (typeof f === 'string') {
-              return escapeHtml(f);
-            }
+            if (typeof f === 'string') return escapeHtml(f);
             var name = escapeHtml(f.name || '');
             var tt = f.type ? ' <span style="font-size:10px;color:#f97316;font-weight:600;">[' + escapeHtml(f.type) + ']</span>' : '';
             return name + tt;
           }).join('、');
-          html += '<div style="font-size:11px;color:var(--text-muted);padding-left:8px;">带出：' + fieldsHtml + '</div>';
+          h += '<div style="font-size:11px;color:var(--text-muted);padding-left:8px;">带出：' + fieldsHtml + '</div>';
         }
-        html += '</div>';
+        h += '</div>';
+
+        // 递归渲染子块
+        if (blk.children && blk.children.length > 0) {
+          blk.children.forEach(function(child) {
+            h += renderBlock(child, depth + 1);
+          });
+        }
+        return h;
+      }
+
+      blocks.forEach(function(blk) {
+        html += renderBlock(blk, 0);
       });
 
       html += '</div>';

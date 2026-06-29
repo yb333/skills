@@ -2258,19 +2258,173 @@ DELETE_MODE_LABEL = {
 
 
 def build_data_blocks(step: dict, df_step: dict, parsed, fields: list) -> list:
-    """构建步骤的"数据块"结构——展示每个数据来源的角色、关联方式、带出字段。
+    """构建步骤的逻辑块（嵌套树形结构）——体现子查询层级。
 
-    返回 [{type, table, alias, role, join_type, on_condition, brought_fields, ops}]
-    - type: main(主表)/secondary(从表)/subquery(子查询块)/union(UNION合并块)
-    - ops: 该块的操作标签列表（如"过滤""聚合""去重"）
+    返回顶层块列表，每个块可含 children 表示嵌套:
+    [{type, table, alias, role, join_type, on_condition, brought_fields, ops, children}]
     """
-    joins = df_step.get("joins", [])
+    import sqlglot
+    from sqlglot import exp as _exp
+
+    # 从 AST 递归构建嵌套结构
+    if parsed and not parsed.parse_error:
+        try:
+            tree = sqlglot.parse_one(_strip_dws_clauses(parsed.raw_sql), dialect="oracle")
+        except Exception:
+            tree = None
+    else:
+        tree = None
+
+    if tree:
+        blocks = _build_blocks_from_ast(tree, df_step, fields, step.get("step_id", ""))
+    else:
+        blocks = _build_blocks_flat(df_step, fields, step.get("step_id", ""))
+
+    return blocks
+
+
+def _build_blocks_from_ast(tree, df_step, fields, step_id):
+    """从 AST 递归构建嵌套逻辑块。"""
+    from sqlglot import exp
+    select_node = tree.find(exp.Select)
+    if not select_node:
+        return _build_blocks_flat(df_step, fields, step_id)
+
+    # alias → 带出字段
+    alias_fields = _build_alias_fields(fields, step_id)
     where_clause = (df_step.get("where_clause", "") or "").replace("WHERE ", "").strip()
     group_by = df_step.get("group_by", [])
-    step_id = step.get("step_id", "")
 
     blocks = []
-    # alias → 该从表带出的字段（含加工类型标签）
+
+    # 处理 FROM
+    from_clause = select_node.args.get("from_")
+    if from_clause:
+        main_expr = from_clause.this
+        if isinstance(main_expr, exp.Table):
+            blk = _make_table_block(main_expr, "main", "主表", "", "", alias_fields)
+            if blk:
+                blocks.append(blk)
+        elif isinstance(main_expr, exp.Subquery):
+            blk = _make_subquery_block(main_expr, "主查询来源", "", alias_fields)
+            if blk:
+                blocks.append(blk)
+
+    # 处理 JOIN
+    for jn in select_node.args.get("joins", []):
+        jt_node = jn.this
+        on_expr = jn.args.get("on")
+        on_sql = on_expr.sql(dialect="oracle") if on_expr else ""
+        join_kind = (jn.args.get("kind") or jn.args.get("side") or "JOIN").strip()
+        join_type = f"{join_kind} JOIN" if join_kind and join_kind != "JOIN" else "INNER JOIN"
+
+        if isinstance(jt_node, exp.Table):
+            blk = _make_table_block(jt_node, "secondary", "从表", join_type, on_sql, alias_fields)
+            if blk:
+                blocks.append(blk)
+        elif isinstance(jt_node, exp.Subquery):
+            blk = _make_subquery_block(jt_node, "关联子查询", on_sql, alias_fields)
+            if blk:
+                blk["join_type"] = join_type
+                blocks.append(blk)
+
+    # 给主表加操作标签
+    if blocks and blocks[0].get("type") == "main":
+        ops = []
+        if where_clause:
+            ops.append("过滤")
+        if group_by:
+            ops.append("收敛")
+        blocks[0]["ops"] = ops
+
+    return blocks
+
+
+def _make_table_block(table_node, block_type, role, join_type, on_condition, alias_fields):
+    """构建物理表块。"""
+    from sqlglot import exp
+    if not isinstance(table_node, exp.Table):
+        return None
+    tname = ".".join(_clean_name(p.name) for p in table_node.parts)
+    alias = (table_node.alias or "").lower()
+    brought = _dedup_fields(alias_fields.get(alias, []))
+    return {
+        "type": block_type,
+        "table": tname,
+        "alias": alias,
+        "role": role,
+        "join_type": join_type,
+        "on_condition": on_condition,
+        "brought_fields": brought,
+        "ops": [],
+        "children": [],
+    }
+
+
+def _make_subquery_block(subquery_node, role, on_condition, alias_fields):
+    """构建子查询块（含内部嵌套结构）。"""
+    from sqlglot import exp
+    alias = (subquery_node.alias or "").lower()
+    inner_select = subquery_node.find(exp.Select)
+    if not inner_select:
+        return None
+
+    # 子查询别名作为展示名
+    blk = {
+        "type": "subquery",
+        "table": f"({alias})",
+        "alias": alias,
+        "role": role,
+        "join_type": "",
+        "on_condition": on_condition,
+        "brought_fields": _dedup_fields(alias_fields.get(alias, [])),
+        "ops": [],
+        "children": [],
+    }
+
+    # 递归提取子查询内部的表和 JOIN
+    inner_from = inner_select.args.get("from_")
+    if inner_from:
+        main_expr = inner_from.this
+        if isinstance(main_expr, exp.Table):
+            child = _make_table_block(main_expr, "inner_main", "内部主表", "", "", alias_fields)
+            if child:
+                blk["children"].append(child)
+        elif isinstance(main_expr, exp.Subquery):
+            # 更深层嵌套
+            child = _make_subquery_block(main_expr, "内部子查询", "", alias_fields)
+            if child:
+                blk["children"].append(child)
+
+    for jn in inner_select.args.get("joins", []):
+        jt_node = jn.this
+        on_expr = jn.args.get("on")
+        on_sql = on_expr.sql(dialect="oracle") if on_expr else ""
+        join_kind = (jn.args.get("kind") or jn.args.get("side") or "JOIN").strip()
+        join_type = f"{join_kind} JOIN" if join_kind and join_kind != "JOIN" else "INNER JOIN"
+        if isinstance(jt_node, exp.Table):
+            child = _make_table_block(jt_node, "inner_secondary", "内部从表", join_type, on_sql, alias_fields)
+            if child:
+                blk["children"].append(child)
+        elif isinstance(jt_node, exp.Subquery):
+            child = _make_subquery_block(jt_node, "内部关联子查询", on_sql, alias_fields)
+            if child:
+                child["join_type"] = join_type
+                blk["children"].append(child)
+
+    # 子查询内部操作标签
+    inner_where = inner_select.args.get("where")
+    inner_group = inner_select.args.get("group")
+    if inner_where:
+        blk["ops"].append("过滤")
+    if inner_group:
+        blk["ops"].append("收敛")
+
+    return blk
+
+
+def _build_alias_fields(fields, step_id):
+    """构建 alias → 带出字段映射（含加工类型）。"""
     alias_fields = {}
     for f in fields:
         if f.get("producing_step") != step_id:
@@ -2286,131 +2440,46 @@ def build_data_blocks(step: dict, df_step: dict, parsed, fields: list) -> list:
                     "name": f["target_field"],
                     "type": tt_short if tt != "direct" else "",
                 })
+    return alias_fields
 
-    # CTE 名集合（用于识别 CTE 子查询块）
-    cte_names = set()
-    if parsed and hasattr(parsed, "ctes"):
-        cte_names = {c.name.lower() for c in parsed.ctes if c.name}
 
-    has_subquery = False
+def _dedup_fields(field_list):
+    """字段去重（dict 列表）。"""
+    seen = set()
+    result = []
+    for item in field_list:
+        fn = item["name"] if isinstance(item, dict) else item
+        if fn not in seen:
+            seen.add(fn)
+            result.append(item)
+    return result
+
+
+def _build_blocks_flat(df_step, fields, step_id):
+    """回退：解析失败时用 data_flow 的 joins 平铺构建。"""
+    joins = df_step.get("joins", [])
+    alias_fields = _build_alias_fields(fields, step_id)
+    blocks = []
     for j in joins:
         src_table = j.get("source_table", "")
+        if src_table.startswith("(subquery:"):
+            continue
         jt = (j.get("join_type", "") or "").upper()
         alias = (j.get("alias", "") or "").lower()
-
-        # 跳过子查询假名
-        if src_table.startswith("(subquery:"):
-            has_subquery = True
-            continue
-
         if jt in ("FROM", "FROM_SUBQUERY_MAIN"):
-            # 主表（含子查询内部主表）
-            block_type = "main"
-            if "SUBQUERY" in jt:
-                block_type = "subquery_main"
-            seen_names = set()
-            brought = []
-            for item in alias_fields.get(alias, []):
-                fn = item["name"] if isinstance(item, dict) else item
-                if fn not in seen_names:
-                    seen_names.add(fn)
-                    brought.append(item)
             blocks.append({
-                "type": block_type,
-                "table": src_table,
-                "alias": alias,
-                "role": "主表",
-                "join_type": "",
-                "on_condition": "",
-                "brought_fields": brought,
-                "ops": [],
+                "type": "main", "table": src_table, "alias": alias, "role": "主表",
+                "join_type": "", "on_condition": "",
+                "brought_fields": _dedup_fields(alias_fields.get(alias, [])),
+                "ops": [], "children": [],
             })
-        elif "SUBQUERY" in jt:
-            # 子查询内部从表
-            seen_names = set()
-            brought = []
-            for item in alias_fields.get(alias, []):
-                fn = item["name"] if isinstance(item, dict) else item
-                if fn not in seen_names:
-                    seen_names.add(fn)
-                    brought.append(item)
+        elif "SUBQUERY" not in jt:
             blocks.append({
-                "type": "subquery_secondary",
-                "table": src_table,
-                "alias": alias,
-                "role": "子查询内从表",
-                "join_type": "",
-                "on_condition": "",
-                "brought_fields": brought,
-                "ops": [],
+                "type": "secondary", "table": src_table, "alias": alias, "role": "从表",
+                "join_type": j.get("join_type", ""), "on_condition": j.get("join_condition", ""),
+                "brought_fields": _dedup_fields(alias_fields.get(alias, [])),
+                "ops": [], "children": [],
             })
-        else:
-            # 从表
-            seen_names = set()
-            brought = []
-            for item in alias_fields.get(alias, []):
-                fn = item["name"] if isinstance(item, dict) else item
-                if fn not in seen_names:
-                    seen_names.add(fn)
-                    brought.append(item)
-            blocks.append({
-                "type": "secondary",
-                "table": src_table,
-                "alias": alias,
-                "role": "从表",
-                "join_type": j.get("join_type", ""),
-                "on_condition": j.get("join_condition", ""),
-                "brought_fields": brought,
-                "ops": [],
-            })
-
-    # 给主表块加操作标签
-    if blocks:
-        main_ops = []
-        if where_clause:
-            main_ops.append("过滤")
-        if group_by:
-            main_ops.append("收敛")
-        if blocks[0]["ops"] is not None:
-            blocks[0]["ops"].extend(main_ops)
-
-    # 如果有子查询，给第一个子查询主表块标注内部操作
-    if has_subquery:
-        where_usages = df_step.get("where_clause", "")
-        join_usages = []
-        # 从 parsed 的 join_usage 和 where_usage 提取子查询内部操作
-        if parsed and hasattr(parsed, "join_usage"):
-            inner_joins = [ju for ju in parsed.join_usage]
-            if inner_joins:
-                for b in blocks:
-                    if b["type"] in ("subquery_main", "subquery_secondary"):
-                        b["ops"].append("内部关联")
-                        break
-        if parsed and hasattr(parsed, "where_usage"):
-            inner_wheres = [wu for wu in parsed.where_usage]
-            if inner_wheres:
-                for b in blocks:
-                    if b["type"] in ("subquery_main", "subquery_secondary"):
-                        if "内部过滤" not in b["ops"]:
-                            b["ops"].append("内部过滤")
-                        break
-
-    # UNION 分支
-    if parsed and hasattr(parsed, "union_branches") and parsed.union_branches:
-        for idx, branch in enumerate(parsed.union_branches):
-            branch_tables = [j.source_table for j in branch.get("source_tables", [])
-                             if not j.source_table.startswith("(subquery:")]
-            blocks.append({
-                "type": "union_branch",
-                "table": "、".join(branch_tables),
-                "alias": "",
-                "role": f"UNION 分支{branch.get('branch_index', idx+1)}",
-                "join_type": "UNION",
-                "on_condition": "",
-                "brought_fields": [{"name": c.alias, "type": ""} for c in branch.get("columns", [])],
-                "ops": [],
-            })
-
     return blocks
 
 
