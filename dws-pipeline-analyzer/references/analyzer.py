@@ -724,7 +724,18 @@ def parse_query_unit(node, dialect="oracle", depth=0, comment_alias_map=None):
 
     # SELECT
     if isinstance(node, exp.Select):
-        return _parse_select_to_unit(node, node, dialect, depth, comment_alias_map)
+        unit = _parse_select_to_unit(node, node, dialect, depth, comment_alias_map)
+        # CTE 定义可能在 WITH 节点上（sqlglot 用 "with_" 键）
+        with_node = node.args.get("with") or node.args.get("with_")
+        if with_node:
+            for cte_expr in with_node.expressions:
+                cte_name = (cte_expr.alias or "").lower()
+                cte_inner = cte_expr.this
+                cte_unit = parse_query_unit(cte_inner, dialect, depth + 1, comment_alias_map)
+                cte_unit.cte_name = cte_name
+                cte_unit.type = "cte_def"
+                unit.cte_defs.append({"name": cte_name, "body": cte_unit})
+        return unit
 
     # 有 WITH 的顶层（tree 本身可能是 With + Select）
     # 这种情况在 parse_single_sql 里已处理（tree.find(exp.Select)）
@@ -2645,8 +2656,137 @@ def build_data_blocks(step: dict, df_step: dict, parsed, fields: list) -> list:
 
     if tree:
         blocks = _build_blocks_from_ast(tree, df_step, fields, step.get("step_id", ""))
+        # 用 QueryUnit 补充 CTE 内部结构（AST 构建不展示 CTE 内部的表/JOIN）
+        _enhance_blocks_with_cte(blocks, tree, df_step, fields, step.get("step_id", ""))
     else:
         blocks = _build_blocks_flat(df_step, fields, step.get("step_id", ""))
+
+    return blocks
+
+
+def _enhance_blocks_with_cte(blocks, tree, df_step, fields, step_id):
+    """用 QueryUnit 补充 CTE 内部结构到逻辑块。
+
+    当前 _build_blocks_from_ast 只展示 CTE 名（如 tm），不展示 CTE 内部的表/JOIN。
+    这里用 QueryUnit 解析 CTE 定义，把内部结构作为 children 加到 CTE 块上。
+    """
+    try:
+        unit = parse_query_unit(tree, "oracle", 0, {})
+        alias_fields = _build_alias_fields(fields, step_id)
+
+        # 收集所有 CTE 定义
+        cte_map = {}  # {cte_name(LOWER): QueryUnit}
+        _collect_cte_defs(unit, cte_map)
+
+        if not cte_map:
+            return
+
+        # 遍历 blocks，找到 CTE 块（table 名匹配 CTE 名），补充 children
+        def _enhance_recursive(block_list):
+            for blk in block_list:
+                tbl = blk.get("table", "").lower()
+                # CTE 名可能是 tm，块 table 也可能是 tm
+                if tbl in cte_map:
+                    cte_unit = cte_map[tbl]
+                    if not blk.get("children"):
+                        blk["children"] = _unit_to_blocks(cte_unit, alias_fields)
+                        # CTE 操作标签
+                        if cte_unit.where:
+                            blk["ops"].append("过滤")
+                            blk["where_clause"] = cte_unit.where
+                        if cte_unit.group_by:
+                            blk["ops"].append("收敛")
+                _enhance_recursive(blk.get("children", []))
+
+        _enhance_recursive(blocks)
+    except Exception:
+        pass
+
+
+def _collect_cte_defs(unit, cte_map):
+    """递归收集 QueryUnit 里所有 CTE 定义。"""
+    if unit.type == "select":
+        for cte_def in unit.cte_defs:
+            cte_map[cte_def["name"]] = cte_def["body"]
+            # CTE 内部可能还有 CTE
+            _collect_cte_defs(cte_def["body"], cte_map)
+        if unit.from_subquery:
+            _collect_cte_defs(unit.from_subquery, cte_map)
+        for jsq in unit.join_subqueries:
+            _collect_cte_defs(jsq["body"], cte_map)
+    elif unit.type == "union":
+        for b in unit.branches:
+            _collect_cte_defs(b, cte_map)
+
+
+def _unit_to_blocks(unit, alias_fields):
+    """从 QueryUnit 递归构建逻辑块（用于 CTE 内部结构展示）。"""
+    blocks = []
+
+    if unit.type in ("select", "cte_def", "cte"):
+        # 主表
+        for t in unit.tables:
+            if t.join_type == "FROM":
+                is_inner = False
+                brought = _dedup_fields(alias_fields.get(t.alias, []))
+                blocks.append({
+                    "type": "inner_main", "table": t.table, "alias": t.alias,
+                    "role": "内部主表", "join_type": "", "on_condition": "",
+                    "brought_fields": brought, "ops": [], "children": [],
+                })
+            else:
+                is_inner = t.join_type.upper() in ("INNER JOIN", "CROSS JOIN", "JOIN")
+                role = "内部关联表" if is_inner else "内部从表"
+                brought = _dedup_fields(alias_fields.get(t.alias, []))
+                blocks.append({
+                    "type": "inner_secondary", "table": t.table, "alias": t.alias,
+                    "role": role, "join_type": t.join_type, "on_condition": t.on_condition,
+                    "brought_fields": brought, "ops": [], "children": [],
+                })
+
+        # FROM 子查询
+        if unit.from_subquery:
+            sub = unit.from_subquery
+            sub_blocks = _unit_to_blocks(sub, alias_fields)
+            blocks.append({
+                "type": "subquery", "table": f"({sub.cte_name})", "alias": sub.cte_name,
+                "role": "内部子查询", "join_type": "", "on_condition": "",
+                "brought_fields": [], "ops": [], "children": sub_blocks,
+            })
+
+        # JOIN 子查询
+        for jsq in unit.join_subqueries:
+            sub = jsq["body"]
+            sub_blocks = _unit_to_blocks(sub, alias_fields)
+            blocks.append({
+                "type": "subquery", "table": f"({sub.cte_name})", "alias": sub.cte_name,
+                "role": "内部关联子查询", "join_type": jsq.get("join_type", ""),
+                "on_condition": jsq.get("on_condition", ""),
+                "brought_fields": [], "ops": [], "children": sub_blocks,
+            })
+
+        # 操作标签
+        if blocks:
+            if unit.where:
+                blocks[0]["ops"].append("过滤")
+                blocks[0]["where_clause"] = unit.where
+            if unit.group_by:
+                blocks[0]["ops"].append("收敛")
+
+    elif unit.type == "union":
+        union_block = {
+            "type": "union", "table": "UNION", "alias": "",
+            "role": "合并", "join_type": "", "on_condition": "",
+            "brought_fields": [], "ops": ["合并"], "children": [],
+        }
+        for idx, b in enumerate(unit.branches):
+            branch_blocks = _unit_to_blocks(b, alias_fields)
+            union_block["children"].append({
+                "type": "union_branch", "table": f"UNION 分支{idx+1}", "alias": "",
+                "role": f"UNION 分支{idx+1}", "join_type": "", "on_condition": "",
+                "brought_fields": [], "ops": [], "children": branch_blocks,
+            })
+        blocks.append(union_block)
 
     return blocks
 
