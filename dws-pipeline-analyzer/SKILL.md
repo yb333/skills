@@ -36,7 +36,7 @@ python -c "import openpyxl, sqlglot; print('OK')"
 > **安装方式说明**：
 > - 用 `install.sh` / `install.bat` 安装：会创建 venv 并装依赖（偏好隔离环境）
 > - 手工复制 skill 目录：只要系统 python 装好依赖即可，run.py 会自检提示
-> - 本文档统一用 `python`。Windows 直接用 `python`；macOS/Linux 如果只有 `python3`，请用 `python3` 替代。
+> - 本文档统一用 `python`。Windows 直接用 `python`（如果 PATH 里有 `py` launcher 也可用 `py -3`）；macOS/Linux 如果只有 `python3`，请用 `python3` 替代。注意：Windows 上不要用 `py3`（不存在这个命令）。
 
 ---
 

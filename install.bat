@@ -1,12 +1,13 @@
 @echo off
 cd /d "%~dp0"
 
-REM 找 Python（先试 py launcher，再试 python）
-py -3 --version >nul 2>&1
-if not errorlevel 1 goto run_py3
-
+REM 找 Python（先试 python，再试 py launcher）
+REM 很多 Windows 用户有 python 但没有 py launcher
 python --version >nul 2>&1
 if not errorlevel 1 goto run_python
+
+py -3 --version >nul 2>&1
+if not errorlevel 1 goto run_py3
 
 echo.
 echo ==========================================
@@ -20,12 +21,12 @@ echo.
 pause
 exit /b 1
 
-:run_py3
-py -3 install.py %*
-goto finish
-
 :run_python
 python install.py %*
+goto finish
+
+:run_py3
+py -3 install.py %*
 goto finish
 
 :finish
