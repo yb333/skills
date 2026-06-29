@@ -2370,7 +2370,11 @@ function renderQuality() {
         html += '<div class="issue-item">';
         html += '<span class="issue-severity severity-' + (iss.severity || 'info') + '">' + escapeHtml(iss.severity || 'info') + '</span>';
         html += '<div>';
-        html += '<div style="font-weight:500;">' + escapeHtml(iss.title || '') + '</div>';
+        html += '<div style="font-weight:500;">' + escapeHtml(iss.title || '');
+        if (iss.rule_code) {
+          html += ' <span style="font-size:11px;color:var(--text-muted);font-weight:400;">[' + escapeHtml(iss.rule_code) + ']</span>';
+        }
+        html += '</div>';
         if (iss.detail) html += '<div style="color:var(--text-secondary);font-size:12px;margin-top:2px;">' + escapeHtml(iss.detail) + '</div>';
         html += '</div>';
         html += '</div>';

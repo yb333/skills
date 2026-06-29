@@ -2319,7 +2319,10 @@ def _build_blocks_from_ast(tree, df_step, fields, step_id):
         join_type = f"{join_kind} JOIN" if join_kind and join_kind != "JOIN" else "INNER JOIN"
 
         if isinstance(jt_node, exp.Table):
-            blk = _make_table_block(jt_node, "secondary", "从表", join_type, on_sql, alias_fields)
+            # INNER JOIN 不分主从，标"关联表"；LEFT/RIGHT/FULL JOIN 标"从表"
+            is_inner = join_type.upper() in ("INNER JOIN", "CROSS JOIN", "JOIN")
+            role = "关联表" if is_inner else "从表"
+            blk = _make_table_block(jt_node, "secondary", role, join_type, on_sql, alias_fields)
             if blk:
                 blocks.append(blk)
         elif isinstance(jt_node, exp.Subquery):
@@ -2403,7 +2406,9 @@ def _make_subquery_block(subquery_node, role, on_condition, alias_fields):
         join_kind = (jn.args.get("kind") or jn.args.get("side") or "JOIN").strip()
         join_type = f"{join_kind} JOIN" if join_kind and join_kind != "JOIN" else "INNER JOIN"
         if isinstance(jt_node, exp.Table):
-            child = _make_table_block(jt_node, "inner_secondary", "内部从表", join_type, on_sql, alias_fields)
+            is_inner = join_type.upper() in ("INNER JOIN", "CROSS JOIN", "JOIN")
+            role = "内部关联表" if is_inner else "内部从表"
+            child = _make_table_block(jt_node, "inner_secondary", role, join_type, on_sql, alias_fields)
             if child:
                 blk["children"].append(child)
         elif isinstance(jt_node, exp.Subquery):
@@ -3473,13 +3478,16 @@ def analyze_quality(
     # ── 调度过度约束 ──
     for oc in topology.get("over_constraints", []):
         if oc.get("over_constrained_on"):
+            # 找 rule_code
+            oc_step_info = next((s for s in topo_steps if s.get("step_id") == oc["step"]), {})
+            oc_rule = oc_step_info.get("rule_code", oc["step"])
             issue_id += 1
             issues.append({
                 "id": f"ISS_{issue_id:03d}",
                 "severity": "info",
                 "category": "scheduling",
-                "title": f"step {oc['step']} 调度过度约束，不必要等待 {len(oc['over_constrained_on'])} 个步骤",
-                "rule_code": "",
+                "title": f"规则 {oc_rule} 调度过度约束，不必要等待 {len(oc['over_constrained_on'])} 个步骤",
+                "rule_code": oc_rule,
                 "step_id": oc["step"],
                 "detail": oc["over_constrained_on"],
             })
@@ -4578,6 +4586,13 @@ def _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings,
         if rule.query_sql:
             sql_preview = rule.query_sql[:200].replace("\n", " ")
             lines.append(f"- SQL 摘要: {sql_preview}...")
+
+        # SQL 注释（帮助 AI 理解业务含义）
+        if rule.query_sql and parsed and not parsed.parse_error:
+            import re as _re
+            comments = _re.findall(r'/\*\s*(.*?)\s*\*/', rule.query_sql)
+            if comments:
+                lines.append(f"- SQL 注释: {'; '.join(comments[:5])}")
 
         # 逻辑块结构（供 AI 补充块目的）
         df_step = next((s for s in data_flow.get("steps", []) if s.get("step_id") == sid), None)
