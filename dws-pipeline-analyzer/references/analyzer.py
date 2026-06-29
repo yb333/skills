@@ -2268,15 +2268,22 @@ def build_data_blocks(step: dict, df_step: dict, parsed, fields: list) -> list:
     step_id = step.get("step_id", "")
 
     blocks = []
-    # alias → 该从表带出的字段
+    # alias → 该从表带出的字段（含加工类型标签）
     alias_fields = {}
     for f in fields:
         if f.get("producing_step") != step_id:
             continue
+        tt = f.get("transform_type", "direct")
+        tt_short = {"direct": "直取", "aggregate": "聚合", "expression": "加工",
+                    "case_when": "条件", "fallback": "兜底", "window": "窗口",
+                    "pivot": "行转列", "value": "赋值"}.get(tt, "加工")
         for l in f.get("lineage", []):
             src_alias = (l.get("source_table", "") or "").lower()
             if src_alias:
-                alias_fields.setdefault(src_alias, []).append(f["target_field"])
+                alias_fields.setdefault(src_alias, []).append({
+                    "name": f["target_field"],
+                    "type": tt_short if tt != "direct" else "",
+                })
 
     # CTE 名集合（用于识别 CTE 子查询块）
     cte_names = set()
@@ -2299,7 +2306,13 @@ def build_data_blocks(step: dict, df_step: dict, parsed, fields: list) -> list:
             block_type = "main"
             if "SUBQUERY" in jt:
                 block_type = "subquery_main"
-            brought = list(dict.fromkeys(alias_fields.get(alias, [])))
+            seen_names = set()
+            brought = []
+            for item in alias_fields.get(alias, []):
+                fn = item["name"] if isinstance(item, dict) else item
+                if fn not in seen_names:
+                    seen_names.add(fn)
+                    brought.append(item)
             blocks.append({
                 "type": block_type,
                 "table": src_table,
@@ -2312,7 +2325,13 @@ def build_data_blocks(step: dict, df_step: dict, parsed, fields: list) -> list:
             })
         elif "SUBQUERY" in jt:
             # 子查询内部从表
-            brought = list(dict.fromkeys(alias_fields.get(alias, [])))
+            seen_names = set()
+            brought = []
+            for item in alias_fields.get(alias, []):
+                fn = item["name"] if isinstance(item, dict) else item
+                if fn not in seen_names:
+                    seen_names.add(fn)
+                    brought.append(item)
             blocks.append({
                 "type": "subquery_secondary",
                 "table": src_table,
@@ -2325,7 +2344,13 @@ def build_data_blocks(step: dict, df_step: dict, parsed, fields: list) -> list:
             })
         else:
             # 从表
-            brought = list(dict.fromkeys(alias_fields.get(alias, [])))
+            seen_names = set()
+            brought = []
+            for item in alias_fields.get(alias, []):
+                fn = item["name"] if isinstance(item, dict) else item
+                if fn not in seen_names:
+                    seen_names.add(fn)
+                    brought.append(item)
             blocks.append({
                 "type": "secondary",
                 "table": src_table,
@@ -2380,7 +2405,7 @@ def build_data_blocks(step: dict, df_step: dict, parsed, fields: list) -> list:
                 "role": f"UNION 分支{branch.get('branch_index', idx+1)}",
                 "join_type": "UNION",
                 "on_condition": "",
-                "brought_fields": [c.alias for c in branch.get("columns", [])],
+                "brought_fields": [{"name": c.alias, "type": ""} for c in branch.get("columns", [])],
                 "ops": [],
             })
 

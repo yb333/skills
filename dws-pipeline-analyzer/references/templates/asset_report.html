@@ -2017,8 +2017,9 @@ function renderSteps() {
     // 数据块展示（加工逻辑）
     var blocks = step.data_blocks || [];
     if (blocks.length > 0) {
-      html += '<div style="margin:8px 0 0;padding:10px 12px;background:var(--bg-card);border-radius:6px;border:1px solid var(--border);">';
-      html += '<div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:8px;">数据块</div>';
+      html += '<details style="margin:8px 0 0;padding:0;background:var(--bg-card);border-radius:6px;border:1px solid var(--border);" open>';
+      html += '<summary style="cursor:pointer;font-size:12px;font-weight:700;color:var(--text-secondary);padding:10px 12px;">数据块（' + blocks.length + '）</summary>';
+      html += '<div style="padding:0 12px 10px;">';
 
       blocks.forEach(function(blk) {
         var roleColor = blk.type === 'main' ? '#3b82f6' : (blk.type.indexOf('subquery') >= 0 ? '#8b5cf6' : (blk.type === 'union_branch' ? '#f97316' : '#22c55e'));
@@ -2037,12 +2038,21 @@ function renderSteps() {
           html += '<div style="font-size:12px;color:var(--text-secondary);padding-left:8px;">' + escapeHtml(blk.join_type) + (blk.on_condition ? ' ON ' + escapeHtml(blk.on_condition) : '') + '</div>';
         }
         if (blk.brought_fields && blk.brought_fields.length > 0) {
-          html += '<div style="font-size:11px;color:var(--text-muted);padding-left:8px;">带出：' + escapeHtml(blk.brought_fields.join('、')) + '</div>';
+          var fieldsHtml = blk.brought_fields.map(function(f) {
+            if (typeof f === 'string') {
+              return escapeHtml(f);
+            }
+            var name = escapeHtml(f.name || '');
+            var tt = f.type ? ' <span style="font-size:10px;color:#f97316;font-weight:600;">[' + escapeHtml(f.type) + ']</span>' : '';
+            return name + tt;
+          }).join('、');
+          html += '<div style="font-size:11px;color:var(--text-muted);padding-left:8px;">带出：' + fieldsHtml + '</div>';
         }
         html += '</div>';
       });
 
       html += '</div>';
+      html += '</details>';
     }
 
     // SQL 全文（折叠）
