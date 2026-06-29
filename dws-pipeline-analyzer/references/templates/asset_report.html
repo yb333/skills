@@ -2010,11 +2010,6 @@ function renderSteps() {
       html += '<div class="step-purpose" style="font-size:14px;font-weight:600;color:var(--accent);margin-bottom:8px;">' + escapeHtml(step.purpose) + '</div>';
     }
 
-    // Logic description (加工逻辑总结) — purpose 和 logic 相同时不重复显示
-    if (step.logic && step.logic !== step.purpose) {
-      html += '<div class="step-logic" style="font-size:13px;line-height:1.7;color:var(--text-secondary);white-space:pre-wrap;">' + escapeHtml(step.logic) + '</div>';
-    }
-
     // 逻辑块展示（加工逻辑）— 递归渲染嵌套结构
     var blocks = step.data_blocks || [];
     if (blocks.length > 0) {
