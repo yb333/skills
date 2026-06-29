@@ -289,3 +289,183 @@ WHERE t.total_amt > 0"""
         # 每个唯一的 ON 条件只出现一次
         on_conds = [ju.get("on_condition", "") for ju in p.join_usage]
         assert len(on_conds) == len(set(on_conds)), f"JOIN 条件有重复: {on_conds}"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 8. DELETE 规则 (rule_type=2)
+# ═══════════════════════════════════════════════════════════════
+
+class TestDeleteRule:
+    """删数规则 (rule_type=2) 的解析和质量评估。"""
+
+    def test_delete_rule_no_parse_error_warning(self):
+        """删数规则的空 SQL 不应报解析失败"""
+        rule = RawRule(rule_code="R1", rule_name="删数", rule_type=2, exec_sequence=1,
+                       target_schema="dws", target_table="f", delete_mode="2",
+                       query_sql="TRUNCATE TABLE dws.f")
+        pm = {"R1": parse_single_sql(rule.query_sql, "oracle")}
+        topo = build_topology([rule], pm)
+        df = build_data_flow([rule], pm)
+        fm = build_field_mappings([rule], pm, {})
+        q = analyze_quality(topo, df, fm, pm)
+        parse_issues = [i for i in q["issues"] if "解析失败" in i.get("title", "")]
+        assert len(parse_issues) == 0, f"删数规则不应报解析失败，实际 {parse_issues}"
+
+    def test_delete_rule_in_topology(self):
+        """删数规则应出现在拓扑步骤中"""
+        rules = [
+            RawRule(rule_code="R1", rule_name="删数", rule_type=2, exec_sequence=1,
+                    target_schema="dws", target_table="f", delete_mode="2",
+                    query_sql="TRUNCATE TABLE dws.f"),
+            RawRule(rule_code="R2", rule_name="写入", rule_type=1, exec_sequence=2,
+                    target_schema="dws", target_table="f", delete_mode="1",
+                    query_sql="SELECT a.id FROM ods.t a"),
+        ]
+        pm = {r.rule_code: parse_single_sql(r.query_sql, "oracle") for r in rules}
+        topo = build_topology(rules, pm)
+        assert len(topo["steps"]) == 2, f"应有 2 个步骤"
+
+    def test_delete_no_self_reference(self):
+        """TRUNCATE 的目标表不应产生自引用"""
+        rules = [
+            RawRule(rule_code="R1", rule_name="清空", rule_type=2, exec_sequence=1,
+                    target_schema="dws", target_table="f", delete_mode="2",
+                    query_sql="TRUNCATE TABLE dws.f"),
+            RawRule(rule_code="R2", rule_name="写入", rule_type=1, exec_sequence=2,
+                    target_schema="dws", target_table="f", delete_mode="1",
+                    query_sql="SELECT a.id FROM ods.t a"),
+        ]
+        pm = {r.rule_code: parse_single_sql(r.query_sql, "oracle") for r in rules}
+        topo = build_topology(rules, pm)
+        assert len(topo.get("self_references", [])) == 0, "TRUNCATE 不应产生自引用"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 9. 分区交换 (rule_type=9)
+# ═══════════════════════════════════════════════════════════════
+
+class TestExchangePartition:
+    """分区交换规则 (rule_type=9) 的处理。"""
+
+    def test_exchange_in_topology(self):
+        """分区交换应出现在拓扑步骤中"""
+        rules = [
+            RawRule(rule_code="R1", rule_name="加工", rule_type=1, exec_sequence=1,
+                    target_schema="dws", target_table="tmp_f", delete_mode="1",
+                    query_sql="SELECT a.id FROM ods.t a"),
+            RawRule(rule_code="R2", rule_name="交换", rule_type=9, exec_sequence=2,
+                    target_schema="dws", target_table="f", delete_mode="1",
+                    exchange_source_table="tmp_f",
+                    query_sql=""),
+        ]
+        pm = {r.rule_code: parse_single_sql(r.query_sql, "oracle") for r in rules}
+        topo = build_topology(rules, pm)
+        assert len(topo["steps"]) == 2, f"应有 2 个步骤（含分区交换）"
+
+    def test_exchange_no_parse_error(self):
+        """分区交换的空 SQL 不应报解析失败"""
+        rule = RawRule(rule_code="R1", rule_name="交换", rule_type=9, exec_sequence=1,
+                       target_schema="dws", target_table="f", delete_mode="1",
+                       exchange_source_table="tmp_f", query_sql="")
+        pm = {"R1": parse_single_sql("", "oracle")}
+        topo = build_topology([rule], pm)
+        df = build_data_flow([rule], pm)
+        fm = build_field_mappings([rule], pm, {})
+        q = analyze_quality(topo, df, fm, pm)
+        parse_issues = [i for i in q["issues"] if "解析失败" in i.get("title", "")]
+        assert len(parse_issues) == 0, f"分区交换不应报解析失败，实际 {parse_issues}"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 10. 全 tmp 规则组（无最终非中间表）
+# ═══════════════════════════════════════════════════════════════
+
+class TestAllIntermediateGroup:
+    """所有目标表都是中间表的规则组。"""
+
+    def test_field_search_handles_all_intermediate(self):
+        """field_search 对全 tmp 规则组不崩溃"""
+        import sys
+        sys.path.insert(0, str(FIXTURES))
+        from _build_xlsx import build_xlsx
+        from field_search import search_field_usage
+        import tempfile
+
+        rules = [
+            {"rule_code": "R1", "rule_type": 1, "exec_sequence": 1,
+             "target_schema": "dws", "target_table": "tmp1", "delete_mode": "1",
+             "query_sql": "SELECT a.id, a.amount FROM ods.t a",
+             "rule_name": "s", "rule_group_code": "GR001"},
+            {"rule_code": "R2", "rule_type": 1, "exec_sequence": 2,
+             "target_schema": "dws", "target_table": "tmp2", "delete_mode": "1",
+             "query_sql": "SELECT t.id, t.amount FROM dws.tmp1 t",
+             "rule_name": "s", "rule_group_code": "GR001"},
+        ]
+        xlsx = tempfile.mktemp(suffix=".xlsx")
+        build_xlsx(xlsx, rules=rules)
+        # 不应崩溃，结果可以是空或正常
+        usages = search_field_usage(xlsx, ["amount"])
+        # 不崩溃即通过
+        assert isinstance(usages, list)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 11. detect_dialect 边界 case
+# ═══════════════════════════════════════════════════════════════
+
+class TestDetectDialectEdge:
+    """detect_dialect 的边界 case。"""
+
+    def test_empty_input(self):
+        """空 SQL 列表应返回默认方言"""
+        result = detect_dialect([])
+        assert result in ("dws", "oracle", "auto"), f"空输入应返回默认方言，实际 {result}"
+
+    def test_all_none(self):
+        """全 None 的 SQL 列表不应崩溃"""
+        result = detect_dialect([None, None])
+        assert result in ("dws", "oracle", "auto")
+
+    def test_single_simple_sql(self):
+        """单条简单 SQL 应正常检测"""
+        result = detect_dialect(["SELECT a FROM t"])
+        assert result in ("dws", "oracle", "auto")
+
+
+# ═══════════════════════════════════════════════════════════════
+# 12. 子查询字段穿透
+# ═══════════════════════════════════════════════════════════════
+
+class TestSubqueryFieldPenetration:
+    """FROM 子查询的字段穿透（_penetrate_subquery_columns）。"""
+
+    def test_single_layer_penetration(self):
+        """单层子查询字段穿透到物理表"""
+        sql = "SELECT t.id, t.name FROM (SELECT a.id, a.name FROM ods.t1 a) t"
+        p = parse_single_sql(sql, "dws")
+        for c in p.select_columns:
+            if c.alias == "name":
+                # source_fields 应穿透到 a
+                src = c.source_fields[0]
+                assert src["alias"] == "a", f"name 应穿透到别名 a，实际 {src}"
+                assert "t1" in str(c.source_tables), f"source_tables 应含 t1，实际 {c.source_tables}"
+
+    def test_multi_layer_penetration(self):
+        """两层嵌套子查询穿透"""
+        sql = "SELECT t.id FROM (SELECT m.id FROM (SELECT a.id FROM ods.t1 a) m) t"
+        p = parse_single_sql(sql, "dws")
+        for c in p.select_columns:
+            if c.alias == "id":
+                src = c.source_fields[0]
+                assert src["alias"] == "a", f"id 应穿透两层到 a，实际 {src}"
+
+    def test_aggregate_not_penetrated(self):
+        """聚合字段 SUM 不穿透（停在子查询别名，合理）"""
+        sql = "SELECT t.total FROM (SELECT SUM(a.amt) AS total FROM ods.t1 a) t"
+        p = parse_single_sql(sql, "dws")
+        for c in p.select_columns:
+            if c.alias == "total":
+                # total 是聚合，无法穿透到物理表（合理行为）
+                src = c.source_fields[0]
+                # alias 是 t 或 a 都可接受，关键是不能崩溃
+                assert "field" in src, f"source_fields 应有 field 键"

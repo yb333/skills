@@ -619,7 +619,9 @@ def read_excel(excel_path: str) -> dict:
 
 def detect_dialect(sql_texts: list[str]) -> str:
     """自动检测 SQL 方言"""
-    combined = " ".join(sql_texts).upper()
+    # 过滤 None/空字符串，避免 join 崩溃
+    safe_texts = [str(t) for t in (sql_texts or []) if t]
+    combined = " ".join(safe_texts).upper()
     oracle_score = sum(1 for sign in ORACLE_SIGNS if sign.upper() in combined)
     dws_score = sum(1 for sign in DWS_SIGNS if sign.upper() in combined)
 
