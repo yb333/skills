@@ -1285,6 +1285,7 @@ body {
       <span class="section-count" id="stepsCount"></span>
     </div>
     <div class="section-body">
+      <input type="text" class="field-search-box" id="tableSearch" placeholder="搜索表名（筛选包含该表的步骤）..." style="margin-bottom:12px;width:100%;box-sizing:border-box;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:13px;">
       <div id="stepsContainer"></div>
     </div>
   </div>
@@ -2881,6 +2882,36 @@ function drawChainLinks(treeId, layerCount, fieldName) {
 // ================================================================
 // Event Listeners
 // ================================================================
+// 表搜索（筛选步骤卡片）
+var _tableSearchTimer = null;
+function handleTableSearch() {
+  var query = document.getElementById('tableSearch').value.trim().toLowerCase();
+  var cards = document.querySelectorAll('#stepsContainer .step-card');
+  cards.forEach(function(card) {
+    if (!query) {
+      card.style.display = '';
+      card.style.border = '';
+      return;
+    }
+    // 检查 data_blocks 里的表名
+    var blocks = card.querySelectorAll('[style*="border-left"]');
+    var found = false;
+    // 也检查整个卡片的文本内容（含 SQL、字段等）
+    var text = card.textContent.toLowerCase();
+    if (text.indexOf(query) >= 0) found = true;
+    if (found) {
+      card.style.display = '';
+      card.style.border = '2px solid var(--accent)';
+    } else {
+      card.style.display = 'none';
+    }
+  });
+}
+document.getElementById('tableSearch').addEventListener('input', function() {
+  clearTimeout(_tableSearchTimer);
+  _tableSearchTimer = setTimeout(handleTableSearch, 200);
+});
+
 // 字段搜索防抖（避免大数据量时每次按键都重排）
 var _fieldSearchTimer = null;
 document.getElementById('fieldSearch').addEventListener('input', function() {
