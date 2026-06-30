@@ -2935,14 +2935,16 @@ def _build_blocks_from_ast(tree, df_step, fields, step_id):
                 blk["join_type"] = join_type
                 blocks.append(blk)
 
-    # 给主表加操作标签 + 过滤条件
-    if blocks and blocks[0].get("type") == "main":
-        ops = []
+    # 给第一个块加操作标签 + 过滤条件（主表/UNION块/子查询块都需要）
+    if blocks:
+        ops = blocks[0].get("ops", [])
         if where_clause:
-            ops.append("过滤")
+            if "过滤" not in ops:
+                ops.append("过滤")
             blocks[0]["where_clause"] = where_clause
         if group_by:
-            ops.append("收敛")
+            if "收敛" not in ops:
+                ops.append("收敛")
             blocks[0]["group_by"] = group_by
         blocks[0]["ops"] = ops
 
