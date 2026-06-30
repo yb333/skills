@@ -2882,7 +2882,8 @@ def _unit_to_blocks(unit, alias_fields):
 def _build_blocks_from_ast(tree, df_step, fields, step_id):
     """从 AST 递归构建嵌套逻辑块。"""
     from sqlglot import exp
-    select_node = tree.find(exp.Select)
+    # 用最外层 SELECT（tree 本身），不用 find（find 深度优先会找到内层子查询的 SELECT）
+    select_node = tree if isinstance(tree, exp.Select) else tree.find(exp.Select)
     if not select_node:
         return _build_blocks_flat(df_step, fields, step_id)
 
