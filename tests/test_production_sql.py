@@ -294,3 +294,91 @@ GROUP BY a.region, a.province, a.city, a.type, a.level"""
         # 逻辑块主表应有收敛
         mains = [b for b in _flatten(blocks) if "主表" in b.get("role", "")]
         assert mains and "收敛" in mains[0].get("ops", [])
+
+
+# ═══════════════════════════════════════════════════════════════
+# 6. 刁钻占位符位置（build_data_blocks 二次解析陷阱）
+# ═══════════════════════════════════════════════════════════════
+
+class TestDirtyPlaceholderPositions:
+    """占位符放在会导致 sqlglot 解析失败的刁钻位置。
+
+    build_data_blocks 第二次解析 SQL 时如果不做 _replace_placeholders，
+    这些位置的占位符会导致解析失败 → 回退 flat → 逻辑块丢数据。
+    """
+
+    def test_hash_in_to_number(self):
+        """占位符在 TO_NUMBER(#xxx#) 里"""
+        sql = """SELECT a.id, SUM(DECODE(TO_NUMBER(TO_CHAR(a.type_id)), TO_NUMBER('#p_period_id#'), a.amt, 0)) AS xamt
+FROM ods.fact_a a WHERE a.del = 'N' GROUP BY a.id"""
+        p, blocks = _test_sql_full(sql, "TO_NUMBER里的井号占位符")
+        assert len(p.select_columns) >= 1
+        # 逻辑块不回退 flat（有主表+操作）
+        mains = [b for b in _flatten(blocks) if "主表" in b.get("role", "")]
+        assert mains, "不应回退 flat"
+
+    def test_hash_in_cte_union_full_structure(self):
+        """完整生产结构：CTE + UNION + DECODE + 占位符在 TO_NUMBER 里"""
+        sql = """WITH tmp2 AS (
+    SELECT a.id, a.amt, a.type_id FROM ods.fact_a a
+    LEFT JOIN ods.dim_h h ON a.h_id = h.h_id WHERE a.del = 'N'
+)
+SELECT SUM(t.amt) AS total, t.cust_id FROM (
+    SELECT SUM(app.amt) AS amt,
+        SUM(DECODE(TO_NUMBER(TO_CHAR(app.type_id, 'YYYYMM')), TO_NUMBER('#p_period_id#'), app.xamt, 0)) AS xamt,
+        app.cust_id
+    FROM tmp2 app
+    INNER JOIN ods.dim_cre cre ON app.cre_id = cre.cre_id AND NOT(app.x1 IS NULL)
+    WHERE NOT(app.x2 IS NULL)
+    GROUP BY app.cust_id
+    UNION ALL
+    SELECT SUM(app.amt) AS amt,
+        SUM(DECODE(TO_NUMBER(TO_CHAR(app.type_id)), 2, app.xamt, 0)) AS xamt,
+        app.cust_id
+    FROM tmp2 app
+    INNER JOIN ods.dim_com com ON app.com_id = com.com_id
+    GROUP BY app.cust_id
+) t GROUP BY t.cust_id"""
+        p, blocks = _test_sql_full(sql, "完整生产结构+占位符")
+
+        # UNION 分支必须正确（不能因为占位符导致回退 flat）
+        all_flat = _flatten(blocks)
+        branches = [b for b in all_flat if "UNION 分支" in b.get("role", "")]
+        assert len(branches) == 2, f"占位符不应导致 UNION 分支丢失，实际 {len(branches)} 个分支"
+
+        # CTE 内部展开
+        tables = [b["table"].lower() for b in all_flat]
+        assert any("fact_a" in t for t in tables), "CTE 内部 fact_a 应出现"
+
+        # 分支1 有过滤
+        assert "过滤" in branches[0].get("ops", []), "分支1 应有过滤"
+
+    def test_dollar_in_where_and_select(self):
+        """${占位符} 同时出现在 WHERE 和 SELECT 里"""
+        sql = """SELECT a.id, '${P_CYCLE_ID}' AS cycle, a.amt
+FROM ods.fact_a a WHERE a.cycle = ${P_CYCLE_ID} AND a.del = 'N'"""
+        p, blocks = _test_sql_full(sql, "美元占位符多位置")
+        aliases = {c.alias for c in p.select_columns}
+        assert "cycle" in aliases
+
+    def test_nested_hash_in_decode_in_union_branch(self):
+        """占位符在 UNION 分支的 DECODE 嵌套里"""
+        sql = """SELECT t.id, t.xamt FROM (
+    SELECT a.id, SUM(DECODE(a.type, TO_NUMBER('#pid#'), a.amt, 0)) AS xamt
+    FROM ods.fact_a a WHERE a.del = 'N' GROUP BY a.id
+    UNION ALL
+    SELECT b.id, SUM(b.amt) AS xamt FROM ods.fact_b b GROUP BY b.id
+) t"""
+        p, blocks = _test_sql_full(sql, "UNION分支DECODE里的占位符")
+        all_flat = _flatten(blocks)
+        branches = [b for b in all_flat if "UNION 分支" in b.get("role", "")]
+        assert len(branches) == 2, "UNION 分支不应丢失"
+
+    def test_clean_sql_stored(self):
+        """parse_single_sql 应存 clean_sql（预处理后）"""
+        sql = "SELECT a.id FROM ods.t a WHERE a.cycle = ${P_CYCLE_ID}"
+        p = parse_single_sql(sql, "dws")
+        assert p.clean_sql, "clean_sql 应非空"
+        # _replace_placeholders 把 ${xxx} 包成字符串 '${xxx}'，不是删除
+        assert "'${P_CYCLE_ID}'" in p.clean_sql or "P_CYCLE_ID" in p.clean_sql, \
+            f"clean_sql 应含处理后的占位符，实际 {p.clean_sql}"

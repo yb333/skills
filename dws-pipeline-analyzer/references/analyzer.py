@@ -246,6 +246,7 @@ class ParsedSQL:
     having_clause: str = ""
     ctes: list = field(default_factory=list)  # list[ParsedCTE]
     raw_sql: str = ""
+    clean_sql: str = ""  # 预处理后的 SQL（strip + replace_placeholders），供 build_data_blocks 复用
     parse_error: str = ""
     has_star: bool = False  # SELECT * 或 t.* 检测
     # UNION/集合操作：每个分支独立记录（分支=步骤内场景）
@@ -1037,6 +1038,7 @@ def parse_single_sql(sql: str, dialect: str = "dws") -> ParsedSQL:
     # 一律降级为带 parse_error 的 ParsedSQL，让该规则标记失败后继续。
     try:
         tree = sqlglot.parse_one(clean, dialect=sqlglot_dialect)
+        result.clean_sql = clean  # 存预处理后的 SQL，供 build_data_blocks 复用（不重新 strip/replace）
         # SELECT * / t.* 检测
         if tree.find(exp.Star) is not None:
             result.has_star = True
@@ -1050,6 +1052,7 @@ def parse_single_sql(sql: str, dialect: str = "dws") -> ParsedSQL:
         if isinstance(tree, (exp.Union, exp.Intersect, exp.Except)):
             r = _parse_set_operation(tree, sqlglot_dialect, comment_alias_map, sql)
             r.has_star = result.has_star
+            r.clean_sql = clean  # 传递 clean_sql
             # 用 QueryUnit 递归补充 JOIN/WHERE（顶层 UNION 分支的遗漏）
             _enhance_with_query_unit(r, tree, sqlglot_dialect, comment_alias_map)
             return r
@@ -1062,6 +1065,7 @@ def parse_single_sql(sql: str, dialect: str = "dws") -> ParsedSQL:
 
         r = _parse_select(tree, select_node, sqlglot_dialect, comment_alias_map, sql)
         r.has_star = result.has_star
+        r.clean_sql = clean  # 传递 clean_sql
         # 用 QueryUnit 递归补充（CTE 内部结构、UNION 分支等遗漏）
         _enhance_with_query_unit(r, tree, sqlglot_dialect, comment_alias_map)
         return r
@@ -2650,13 +2654,11 @@ def build_data_blocks(step: dict, df_step: dict, parsed, fields: list) -> list:
     from sqlglot import exp as _exp
 
     # 从 AST 递归构建嵌套结构
-    # 注意：必须走和 parse_single_sql 一样的预处理（strip + replace_placeholders），
-    # 否则占位符/特殊语法会导致第二次解析失败，回退到 _build_blocks_flat 丢数据
+    # 复用 parse_single_sql 存的 clean_sql（已 strip + replace_placeholders），
+    # 不再重新预处理——消除两次解析不一致的风险
     if parsed and not parsed.parse_error:
         try:
-            clean = _strip_dws_clauses(parsed.raw_sql)
-            clean = _replace_placeholders(clean)
-            clean = clean.strip().rstrip(";").strip()
+            clean = parsed.clean_sql or _replace_placeholders(_strip_dws_clauses(parsed.raw_sql))
             tree = sqlglot.parse_one(clean, dialect="oracle")
         except Exception:
             tree = None
