@@ -28,7 +28,8 @@ class BatchResult:
 
 
 def run_batch(excel_path: str, output_dir: str, batch_size: int = 50,
-              no_ai: bool = False, ddl_dir: str = "") -> list:
+              no_ai: bool = False, ddl_dir: str = "",
+              verbose: bool = None) -> list:
     """批量分析多个规则组，生成交付件。
 
     Args:
@@ -37,6 +38,8 @@ def run_batch(excel_path: str, output_dir: str, batch_size: int = 50,
         batch_size: 每批处理的规则组数量（默认 50）
         no_ai: 是否跳过 AI 增强
         ddl_dir: DDL 文件目录（可选）
+        verbose: True=逐组详细输出到 stdout（终端调试用）；False=详细输出写日志文件，
+            stdout 只留批次级进度；None=按环境变量 DWS_BATCH_VERBOSE 决定（默认 False）
 
     Returns: [BatchResult, ...]
 
@@ -47,9 +50,26 @@ def run_batch(excel_path: str, output_dir: str, batch_size: int = 50,
         函数内 del/gc 无效（对象本就释放了，是内存页不还给 OS）。
         子进程隔离是治本方案，且 subprocess 在 Windows/macOS 行为一致。
         子进程失败时自动降级为进程内执行（兼容小批量/测试场景）。
+
+    输出策略（配合内存隔离）：
+        非 verbose 模式下，子进程 stdout/stderr 重定向到「每批日志文件」而非继承
+        主进程 stdout；逐组详细状态也写入日志文件，stdout 只保留批次级进度 + 最终
+        汇总（输出量与规则组数无关，为常数级）。这是为根治"逐组 print 累积超出
+        上游捕获管道上限（如 AI 工具捕获 stdout）导致整个进程树被 SIGKILL"——
+        典型表现为「前两批正常、第三批起步即被杀」。verbose=True 可恢复完整 stdout
+        供终端实时调试。
     """
+    if verbose is None:
+        verbose = os.environ.get("DWS_BATCH_VERBOSE") == "1"
+
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from analyzer import read_excel
+
+    # 非 verbose：详细输出去日志文件，stdout 只留常数级进度，避免捕获管道累积
+    log_dir = None
+    if not verbose:
+        log_dir = Path(output_dir) / "batch_logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
 
     # 读取并按规则组分组（主进程只读一次，大 workbook 常驻可接受，不是累积源）
     raw = read_excel(excel_path)
@@ -86,6 +106,8 @@ def run_batch(excel_path: str, output_dir: str, batch_size: int = 50,
     print(f"批量大小: {batch_size}")
     print(f"AI 增强: {'跳过' if no_ai else '启用'}")
     print(f"输出目录: {output_dir}")
+    if not verbose:
+        print(f"详细日志: {log_dir}/batch_*.log（stdout 只保留批次级进度，避免累积超限）")
     print()
 
     # 分批处理 —— 每批开子进程执行（子进程退出即归还 RSS）
@@ -93,32 +115,74 @@ def run_batch(excel_path: str, output_dir: str, batch_size: int = 50,
         batch_end = min(batch_start + batch_size, total)
         batch_num = batch_start // batch_size + 1
 
-        print(f"--- 批次 {batch_num}（{batch_start+1}-{batch_end}/{total}）---")
+        print(f"--- 批次 {batch_num}（{batch_start+1}-{batch_end}/{total}）开始 ---")
 
         batch_results = _run_batch_in_subprocess(
             excel_path, output_dir, no_ai, ddl_dir,
-            batch_start, batch_end)
+            batch_start, batch_end, log_dir, batch_num)
         results.extend(batch_results)
 
-        for r in batch_results:
-            status = "[OK]" if r.success else "[FAIL]"
-            print(f"  {status} {r.rule_group_en} ({r.target_table})")
+        # 逐组详细状态：verbose→stdout；否则写日志文件（与规则组数成正比的输出，
+        # 不进 stdout 即可避免捕获管道累积导致进程被杀）
+        _log_group_results(batch_results, batch_num, log_dir, verbose)
 
+        fail_count = sum(1 for r in batch_results if not r.success)
+        print(f"--- 批次 {batch_num} 完成：{len(batch_results)} 组"
+              f"（成功 {len(batch_results)-fail_count}，失败 {fail_count}）---")
         print()
 
     # 汇总
     success_count = sum(1 for r in results if r.success)
     print(f"=== 完成: {success_count}/{total} 成功 ===")
+    if not verbose and log_dir:
+        fails = [r for r in results if not r.success]
+        if fails:
+            print(f"失败 {len(fails)} 组，详见: {log_dir}/batch_*.log")
     return results
 
 
+def _log_group_results(batch_results, batch_num, log_dir, verbose):
+    """逐组详细状态落盘/出屏。
+
+    逐组行（与规则组数成正比）是 stdout 累积的主体：
+    - verbose：原样打到 stdout（终端调试）
+    - 非 verbose：追加到该批日志文件，不进 stdout
+    """
+    lines = []
+    for r in batch_results:
+        status = "[OK]" if r.success else "[FAIL]"
+        line = f"  {status} {r.rule_group_en} ({r.target_table})"
+        lines.append(line)
+        if not r.success and r.error:
+            lines.append(f"        ↳ {r.error}")
+
+    if verbose:
+        for line in lines:
+            print(line)
+        return
+
+    # 非 verbose：追加到批次日志（与子进程日志同文件，便于一次性排查）
+    if log_dir is not None:
+        log_path = log_dir / f"batch_{batch_num}.log"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write("=== 逐组结果 ===\n")
+            f.write("\n".join(lines) + "\n")
+
+
 def _run_batch_in_subprocess(excel_path, output_dir, no_ai, ddl_dir,
-                             batch_start, batch_end):
+                             batch_start, batch_end, log_dir=None, batch_num=None):
     """在子进程里执行一批规则组，返回 BatchResult 列表。
 
     子进程通过命令行参数接收批次范围，逐组调用 _process_group，
     把结果摘要写入临时 JSON，主进程读取后回收子进程（RSS 归还）。
     子进程异常时降级为进程内执行（保证小批量/测试可用）。
+
+    输出隔离（关键）：
+        子进程 stdout/stderr 重定向到「每批日志文件」，不再继承主进程 stdout。
+        否则子进程里 generate_*/_process_group 的逐组 print 会汇入主进程 stdout，
+        规则组数多时累积超出上游捕获管道上限（如 AI 工具捕获 stdout 的缓冲区），
+        整个进程树会被 SIGKILL —— 表现为「前两批正常、第三批起步即被杀」。
+        log_dir=None 时退回原行为（继承 stdout，兼容 verbose/测试）。
     """
     import json
     import subprocess
@@ -130,6 +194,17 @@ def _run_batch_in_subprocess(excel_path, output_dir, no_ai, ddl_dir,
         mode="w", suffix=".json", delete=False, prefix="batch_result_")
     result_path = result_file.name
     result_file.close()
+
+    # 非 verbose：子进程 stdout/stderr 重定向到每批日志文件，根治 stdout 累积
+    child_stdout = None
+    child_stderr = None
+    log_path = None
+    if log_dir is not None and batch_num is not None:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"batch_{batch_num}.log"
+        # 覆盖写：每批日志独立。子进程详细输出（[OK] 行、Step 进度、错误）都进来
+        child_stdout = open(log_path, "w", encoding="utf-8")
+        child_stderr = subprocess.STDOUT  # 合并 stderr 进同一日志
 
     env = dict(os.environ)
     env["DWS_BATCH_MODE"] = "child"
@@ -144,11 +219,14 @@ def _run_batch_in_subprocess(excel_path, output_dir, no_ai, ddl_dir,
     try:
         proc = subprocess.run(
             [sys.executable, script], env=env,
-            capture_output=False, text=True)
+            stdout=child_stdout, stderr=child_stderr, text=True)
         ok = (proc.returncode == 0)
     except Exception:
         # 子进程启动失败（极端环境）→ 降级进程内执行
         ok = False
+    finally:
+        if child_stdout is not None:
+            child_stdout.close()
 
     if ok and Path(result_path).exists():
         try:
@@ -336,6 +414,9 @@ def main():
     parser.add_argument("--batch-size", type=int, default=50, help="每批处理的规则组数量（默认 50）")
     parser.add_argument("--no-ai", action="store_true", help="跳过 AI 增强（只生成脚本产物）")
     parser.add_argument("--ddl-dir", default="", help="DDL 文件目录（可选）")
+    parser.add_argument("--verbose", action="store_true",
+                        help="逐组详细输出到 stdout（终端调试用）。默认详细输出写日志文件，"
+                             "stdout 只保留批次级进度，避免大批量时 stdout 累积超限被杀。")
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -343,7 +424,8 @@ def main():
         print(f"错误: 文件不存在: {input_path}", file=sys.stderr)
         sys.exit(1)
 
-    run_batch(str(input_path), args.output, args.batch_size, args.no_ai, args.ddl_dir)
+    run_batch(str(input_path), args.output, args.batch_size, args.no_ai,
+              args.ddl_dir, verbose=args.verbose)
 
 
 if __name__ == "__main__":

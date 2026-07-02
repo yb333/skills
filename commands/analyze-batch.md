@@ -25,12 +25,17 @@ python {skill_dir}/run.py batch \
     --input {input_xlsx} \
     --output {base_dir} \
     [--batch-size 50] \
-    [--no-ai]
+    [--no-ai] \
+    [--verbose]
 ```
 
 - `--output` 给基础目录，脚本在其下按规则组英文名建子目录
 - `--batch-size` 每批处理数量（默认 50），超出自动分批
 - `--no-ai` 跳过 AI 增强（只生成脚本产物，速度快）
+- `--verbose` 逐组详细输出到 stdout（终端调试用）。**默认不开启**：逐组详细状态
+  写入 `{base_dir}/batch_logs/batch_*.log`，stdout 只保留批次级进度，避免大批量
+  时 stdout 输出累积超出上游捕获管道上限导致整个进程被杀（典型表现：前两批正常、
+  第三批起步即被杀）。需要排查某批/某组细节时，读对应 `batch_*.log` 即可
 
 ### Step 2: AI 增强（如未跳过）
 

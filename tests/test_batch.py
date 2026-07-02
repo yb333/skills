@@ -108,6 +108,38 @@ class TestBatchAnalysis:
         results = run_batch(multi_group_xlsx, out, batch_size=2, no_ai=True)
         assert len(results) == 3, f"应处理 3 个规则组"
 
+    def test_batch_non_verbose_isolates_stdout(self, multi_group_xlsx, tmp_path, capsys):
+        """防回归：非 verbose 模式逐组详细状态不得进 stdout。
+
+        历史 bug：子进程 capture_output=False 继承主进程 stdout，generate_* 的逐组
+        [OK] 行 + 主进程逐组状态行全部汇入顶层 stdout。规则组数多时累积超出上游
+        捕获管道上限（如 AI 工具捕获 stdout 的缓冲区），整个进程树被 SIGKILL——
+        典型表现为「前两批正常、第三批起步即被杀」。此用例锁定：逐组详细输出去
+        日志文件，stdout 只保留常数级批次进度（输出量与规则组数无关）。
+        """
+        from batch import run_batch
+        out = str(tmp_path / "output")
+        run_batch(multi_group_xlsx, out, batch_size=50, no_ai=True, verbose=False)
+        captured = capsys.readouterr()
+        # 逐组 [OK]/[FAIL] 详细行绝不能出现在 stdout（那是捕获管道累积的主体）
+        assert "[OK]" not in captured.out, "逐组 [OK] 详细行不应进 stdout（应去日志文件）"
+        assert "DWB_TEST_" not in captured.out, "逐组规则组名不应进 stdout（应去日志文件）"
+        # 详细日志应写入 batch_logs/batch_*.log
+        log_dir = Path(out) / "batch_logs"
+        assert log_dir.exists(), f"非 verbose 应生成日志目录: {log_dir}"
+        logs = list(log_dir.glob("batch_*.log"))
+        assert logs, "应至少生成一个批次日志文件"
+        log_text = "\n".join(lf.read_text(encoding="utf-8") for lf in logs)
+        assert "[OK]" in log_text, "逐组 [OK] 详细行应写入日志文件"
+
+    def test_batch_verbose_outputs_to_stdout(self, multi_group_xlsx, tmp_path, capsys):
+        """verbose=True 时逐组状态恢复到 stdout（终端调试模式）。"""
+        from batch import run_batch
+        out = str(tmp_path / "output")
+        run_batch(multi_group_xlsx, out, batch_size=50, no_ai=True, verbose=True)
+        captured = capsys.readouterr()
+        assert "DWB_TEST_" in captured.out, "verbose 时逐组规则组名应进 stdout"
+
     def test_batch_no_ai_skips_summary(self, multi_group_xlsx, tmp_path):
         """--no-ai 时不生成 knowledge_summary.md"""
         from batch import run_batch
