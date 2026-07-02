@@ -182,6 +182,7 @@ class RawRule:
     data_source: str = ""
     business_owner: str = ""
     rule_group_code: str = ""
+    rule_group_en: str = ""  # 规则组英文名称（每行，供批量按组命名目录）
     exchange_source_table: str = ""
 
 
@@ -539,6 +540,7 @@ def read_excel(excel_path: str) -> dict:
             data_source=_get_val(row, ci.get("data_source")),
             business_owner=_get_val(row, ci.get("business_owner")),
             rule_group_code=_get_val(row, ci.get("rule_group_code")),
+            rule_group_en=str(_get_val(row, ci.get("rule_group_en")) or "").strip(),
             exchange_source_table=_get_val(row, ci.get("exchange_source_table")),
         )
 

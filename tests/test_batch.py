@@ -66,6 +66,26 @@ class TestBatchAnalysis:
             out_path = Path(r.output_dir)
             assert out_path.exists(), f"输出目录应存在: {out_path}"
 
+    def test_batch_dirs_named_per_group_not_global(self, multi_group_xlsx, tmp_path):
+        """防回归：不同规则组必须用各自英文名建目录，不能用全局英文名撞名覆盖。
+
+        历史 bug：RawRule 没存每行 rule_group_en，batch 用了 read_excel 返回的
+        全局 rule_group_en（取第一个非空），导致所有 code 不同的组撞同一个目录名
+        → 全写进同一目录互相覆盖。此用例锁定该回归。
+        """
+        from batch import run_batch
+        out = str(tmp_path / "output")
+        results = run_batch(multi_group_xlsx, out, batch_size=50, no_ai=True)
+
+        # 3 个组的 output_dir 必须两两不同（目录名各自独立）
+        dirs = {Path(r.output_dir).name for r in results}
+        assert len(dirs) == 3, f"3 个组应有 3 个独立目录，实际 {dirs}"
+        # 目录名应是各自英文名，且都落在 output 基础目录下
+        for r in results:
+            name = Path(r.output_dir).name
+            assert name == r.rule_group_en, f"目录名 {name} 应等于规则组英文名 {r.rule_group_en}"
+            assert str(Path(r.output_dir).parent) == out, f"应在基础目录下: {r.output_dir}"
+
     def test_batch_generates_deliverables(self, multi_group_xlsx, tmp_path):
         """每个规则组应生成三个交付件"""
         from batch import run_batch
