@@ -240,13 +240,19 @@ commands/（每个command = 一个完整任务工作流）
 
 目标：把理解引擎显式化，确立模块级边界，零回归。
 
-| 步骤 | 内容 | 风险控制 |
-|------|------|----------|
-| 1 | 抽离 engine.py（数据类 + analyze_pipeline + build_*/enrich_*） | 全量回归 |
-| 2 | analyzer.py 瘦身，保留 re-export 兼容层 | 现有 import 不破 |
-| 3 | 验证零回归（214 测试全过） | — |
+**实施策略**：facade 先行 + 渐进迁移。先建 engine.py 门面层确立模块边界（零风险、立即可用），后续按函数族（build_*、parse_*、数据类）渐进物理搬迁。
 
-**不做**：不动 build_table_catalog / build_asset_profile 的实现，只确立 engine.py 边界。后续讨论清楚输入输出再加能力。
+| 步骤 | 内容 | 状态 | 风险控制 |
+|------|------|------|----------|
+| 1 | 建 engine.py facade（从 analyzer re-export 引擎符号） | ✅ 已完成 | 217 测试全过 |
+| 2 | facade 回归测试（符号同源 + 无循环依赖） | ✅ 已完成 | — |
+| 3 | 渐进物理搬迁（按函数族分批） | 待定 | 每批跑回归 |
+
+**facade 阶段成果**：
+- `from engine import xxx` 已可用（新代码的推荐写法）
+- `from analyzer import xxx` 继续可用（现有代码零改动）
+- 单向依赖确立：analyzer → engine，无循环
+- 后续物理搬迁时，engine facade 测试会捕获任何漏搬的符号
 
 ### 阶段二：资产全貌 + 表定义（待讨论清楚后）
 

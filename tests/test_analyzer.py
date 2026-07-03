@@ -534,3 +534,63 @@ class TestSubqueryCount:
         q = analyze_quality(topo, df, fm, pm)
         assert q["complexity_metrics"]["max_subquery_count"] == 1, \
             f"1 个子查询应记为 1，实际 {q['complexity_metrics']['max_subquery_count']}"
+
+
+# ── engine.py facade 回归测试 ─────────────────────────────
+
+class TestEngineFacade:
+    """engine.py 门面层回归测试。
+
+    锁定 engine facade 的两个核心契约：
+    1. engine 暴露的符号与 analyzer 同源（facade 正确性）
+    2. engine 暴露了上层任务所需的全部引擎符号（防搬迁时漏符号）
+
+    详见 architecture.md「理解引擎层」。
+    """
+
+    # engine 应暴露的核心引擎符号（数据类 + 入口 + build/enrich + 解析）
+    EXPECTED_ENGINE_SYMBOLS = [
+        # 引擎入口
+        "analyze_pipeline",
+        # 数据类
+        "RawRule", "ParsedSQL", "ParsedColumn", "ParsedJoin", "ParsedCTE",
+        "RawTargetField", "RawGroupVariable", "TableRef", "ColumnRef", "QueryUnit",
+        # SQL 解析
+        "detect_dialect", "parse_single_sql", "classify_transform",
+        # 拓扑/数据流/映射/质量
+        "build_topology", "build_data_flow", "build_field_mappings", "analyze_quality",
+        # 血缘/穿透
+        "build_join_key_lineage", "enrich_join_key_lineage", "enrich_field_physical_sources",
+        # 步骤卡片/数据块/描述
+        "build_data_blocks", "build_structured_step_summary", "generate_step_description",
+        # 模式/源/DDL
+        "detect_patterns", "build_source", "parse_ddl_for_metadata",
+        # 跨层工具
+        "_is_intermediate_table", "_strip_dws_clauses", "_replace_placeholders",
+        # 常量
+        "SELECT_RULE_TYPES", "RULE_TYPE_MAP", "DELETE_MODE_MAP",
+    ]
+
+    def test_engine_symbols_match_analyzer(self):
+        """engine facade 暴露的符号必须与 analyzer 同源（同一对象）。"""
+        import engine
+        import analyzer
+        for name in self.EXPECTED_ENGINE_SYMBOLS:
+            assert hasattr(engine, name), f"engine 缺少符号: {name}"
+            assert hasattr(analyzer, name), f"analyzer 缺少符号: {name}"
+            assert getattr(engine, name) is getattr(analyzer, name), \
+                f"engine.{name} 与 analyzer.{name} 不是同一对象（facade 失效）"
+
+    def test_engine_exposes_all_expected_symbols(self):
+        """engine 必须暴露上层任务所需的全部引擎符号（防搬迁漏符号）。"""
+        import engine
+        missing = [s for s in self.EXPECTED_ENGINE_SYMBOLS if not hasattr(engine, s)]
+        assert not missing, f"engine facade 缺少符号: {missing}"
+
+    def test_no_circular_import(self):
+        """analyzer 不应 import engine（单向依赖：analyzer → engine）。"""
+        import inspect
+        import analyzer
+        src = inspect.getsource(analyzer)
+        assert "import engine" not in src, \
+            "analyzer 不应 import engine（会形成循环依赖）"
