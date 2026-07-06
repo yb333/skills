@@ -37,6 +37,11 @@ except ImportError:
     print("错误: 需要 openpyxl。pip install openpyxl", file=sys.stderr)
     sys.exit(1)
 
+try:
+    import yaml  # noqa: F401（read_yml 内部 import，这里只做启动检查）
+except ImportError:
+    print("提示: PyYAML 未安装，代码仓 yml 输入将不可用。pip install pyyaml", file=sys.stderr)
+
 # 引擎层（单向依赖：analyzer → engine）
 import re
 from engine import (
@@ -376,6 +381,264 @@ def read_excel(excel_path: str) -> dict:
     wb.close()
     return result
 
+
+# ═══════════════════════════════════════════════════════════════
+# Step 1b: read_yml() — 代码仓 yml 加载（和 read_excel 产出完全一致）
+# ═══════════════════════════════════════════════════════════════
+
+# yml key → RawRule 字段的映射（和 RULE_COLUMNS_MAP 对应，值是 yml 里的中文 key）
+# 注意查询语句的 key 容错：yml 用半角括号，Excel 用全角括号+后缀1
+_YML_RULE_KEY_ALIASES = {
+    "rule_code": ["规则编码"],
+    "rule_name": ["规则中文名称"],
+    "rule_type": ["规则类型"],
+    "exec_sequence": ["执行序列"],
+    "target_schema": ["目标Schema", "目标schema", "目标SCHEMA"],
+    "target_table": ["目标表"],
+    "delete_mode": ["删除模式"],
+    "delete_condition": ["删除条件"],
+    "query_sql": ["(生成的)查询语句", "(生成的）查询语句", "(生成的)查询语句1", "(生成的）查询语句1"],
+    "project_code": ["项目编码"],
+    "data_source": ["数据源"],
+    "business_owner": ["业务责任人"],
+    "rule_group_code": ["规则组编码"],
+    "rule_group_en": ["规则组英文名称"],
+    "exchange_source_table": ["交换分区来源表"],
+}
+
+_YML_TF_KEY_ALIASES = {
+    "rule_code": ["规则编码"],
+    "target_field": ["目标字段名称"],
+    "source_field": ["来源字段名称"],
+    "encryption": ["加密方式"],
+    "alias": ["别名"],
+    "field_type": ["字段类型"],
+    "remark": ["备注"],
+}
+
+_YML_GV_KEY_ALIASES = {
+    "rule_code": ["规则编码"],
+    "var_name": ["动态参数/变量名", "变量名"],
+    "default_value": ["变量默认值", "默认值"],
+}
+
+
+def _yml_get(d: dict, field: str, aliases: dict) -> str:
+    """从 yml dict 按 alias 列表取值（容错多种 key 写法），返回字符串。"""
+    for key in aliases.get(field, []):
+        if key in d:
+            val = d[key]
+            return "" if val is None else str(val)
+    return ""
+
+
+def _parse_int(val: str) -> int:
+    """字符串转 int（兼容 '1'/'1.0'/1 等格式，和 read_excel 的转换一致）。"""
+    try:
+        return int(float(val)) if val else 0
+    except (ValueError, TypeError):
+        return 0
+
+
+def read_yml(yml_dir: str) -> dict:
+    """读取代码仓规则组目录下的 yml 文件，返回和 read_excel 完全一致的结构。
+
+    一个规则组目录下有多个 *.yml 文件（一个 yml = 一条规则）。
+    本函数遍历目录下所有 yml，合并为一个规则组，产出结构同 read_excel：
+        {rules, target_fields, group_variables, variables, rule_group_code, rule_group_en}
+
+    yml 格式（详见 sample_rule.yml）：
+        顶层 = RULE sheet 字段（中文 key）
+        额外信息（其他sheet页信息）.TargetFields = TargetFields sheet
+        额外信息（其他sheet页信息）.GroupVariables = GroupVariables sheet
+    """
+    import yaml
+
+    yml_path = Path(yml_dir)
+    result = {
+        "rules": [],
+        "target_fields": {},
+        "group_variables": {},
+        "variables": [],
+        "rule_group_code": "",
+        "rule_group_en": "",
+    }
+
+    # 收集目录下所有 yml 文件（一个 yml = 一条规则）
+    yml_files = sorted(yml_path.glob("*.yml")) + sorted(yml_path.glob("*.yaml"))
+    if not yml_files:
+        print(f"错误: 目录下没有 yml 文件: {yml_dir}", file=sys.stderr)
+        return result
+
+    all_vars = set()
+
+    for yf in yml_files:
+        try:
+            data = yaml.safe_load(yf.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"  [yml解析错误] {yf.name}: {e}", file=sys.stderr)
+            continue
+        if not data or not isinstance(data, dict):
+            continue
+
+        # ── 解析 RULE 主信息 → RawRule ──
+        rt = _parse_int(_yml_get(data, "rule_type", _YML_RULE_KEY_ALIASES))
+
+        # 类型 12（参数变量）→ 记录到 variables，不作为规则
+        if rt in VARIABLE_RULE_TYPES:
+            var_name = _yml_get(data, "rule_name", _YML_RULE_KEY_ALIASES) or \
+                       _yml_get(data, "rule_code", _YML_RULE_KEY_ALIASES)
+            if var_name:
+                all_vars.add(var_name)
+            continue
+
+        # 类型 10/11/13/15（SP/API/维护/判断）→ 跳过（和 read_excel 一致）
+        if rt in {10, 11, 13, 15}:
+            continue
+
+        rule = RawRule(
+            rule_code=_yml_get(data, "rule_code", _YML_RULE_KEY_ALIASES),
+            rule_name=_yml_get(data, "rule_name", _YML_RULE_KEY_ALIASES),
+            rule_type=rt,
+            exec_sequence=_parse_int(_yml_get(data, "exec_sequence", _YML_RULE_KEY_ALIASES)),
+            target_schema=_yml_get(data, "target_schema", _YML_RULE_KEY_ALIASES),
+            target_table=_yml_get(data, "target_table", _YML_RULE_KEY_ALIASES),
+            delete_mode=_yml_get(data, "delete_mode", _YML_RULE_KEY_ALIASES),
+            delete_condition=_yml_get(data, "delete_condition", _YML_RULE_KEY_ALIASES),
+            query_sql=_yml_get(data, "query_sql", _YML_RULE_KEY_ALIASES).strip(),
+            project_code=_yml_get(data, "project_code", _YML_RULE_KEY_ALIASES),
+            data_source=_yml_get(data, "data_source", _YML_RULE_KEY_ALIASES),
+            business_owner=_yml_get(data, "business_owner", _YML_RULE_KEY_ALIASES),
+            rule_group_code=_yml_get(data, "rule_group_code", _YML_RULE_KEY_ALIASES),
+            rule_group_en=_yml_get(data, "rule_group_en", _YML_RULE_KEY_ALIASES).strip(),
+            exchange_source_table=_yml_get(data, "exchange_source_table", _YML_RULE_KEY_ALIASES),
+        )
+
+        # SELECT 类规则必须有 SQL
+        if rt in SELECT_RULE_TYPES and not rule.query_sql:
+            continue
+
+        result["rules"].append(rule)
+
+        if rule.rule_group_code and not result["rule_group_code"]:
+            result["rule_group_code"] = rule.rule_group_code
+        if rule.rule_group_en and not result["rule_group_en"]:
+            result["rule_group_en"] = rule.rule_group_en
+
+        # ── 解析额外信息（TargetFields / GroupVariables，有则读，无则跳过）──
+        extra = data.get("额外信息（其他sheet页信息）") or data.get("额外信息") or {}
+        if not isinstance(extra, dict):
+            extra = {}
+
+        rc = rule.rule_code
+
+        # TargetFields
+        tf_list = extra.get("TargetFields") or []
+        if isinstance(tf_list, list):
+            for tf_item in tf_list:
+                if not isinstance(tf_item, dict):
+                    continue
+                tf = RawTargetField(
+                    rule_code=_yml_get(tf_item, "rule_code", _YML_TF_KEY_ALIASES) or rc,
+                    target_field=_yml_get(tf_item, "target_field", _YML_TF_KEY_ALIASES),
+                    source_field=_yml_get(tf_item, "source_field", _YML_TF_KEY_ALIASES),
+                    encryption=_yml_get(tf_item, "encryption", _YML_TF_KEY_ALIASES),
+                    alias=_yml_get(tf_item, "alias", _YML_TF_KEY_ALIASES),
+                    field_type=_yml_get(tf_item, "field_type", _YML_TF_KEY_ALIASES),
+                    remark=_yml_get(tf_item, "remark", _YML_TF_KEY_ALIASES),
+                )
+                tf_rc = tf.rule_code or rc
+                if tf_rc:
+                    result["target_fields"].setdefault(tf_rc, []).append(tf)
+
+        # GroupVariables
+        gv_list = extra.get("GroupVariables") or []
+        if isinstance(gv_list, list):
+            for gv_item in gv_list:
+                if not isinstance(gv_item, dict):
+                    continue
+                gv = RawGroupVariable(
+                    rule_code=_yml_get(gv_item, "rule_code", _YML_GV_KEY_ALIASES) or rc,
+                    var_name=_yml_get(gv_item, "var_name", _YML_GV_KEY_ALIASES),
+                    default_value=_yml_get(gv_item, "default_value", _YML_GV_KEY_ALIASES),
+                )
+                gv_rc = gv.rule_code or rc
+                if gv_rc:
+                    result["group_variables"].setdefault(gv_rc, []).append(gv)
+                if gv.var_name:
+                    all_vars.add(gv.var_name)
+
+    result["variables"] = sorted(all_vars)
+    return result
+
+
+def _find_repo_root(start_dir: Path) -> Path | None:
+    """从 start_dir 逐级向上，找到代码仓根（含 BFT/ + DDL/ 的目录）。
+
+    代码仓根目录下有 BFT/DDL/DQ/LTS/ADMS/Release 等目录，且这些目录名在
+    根目录下一层唯一（无同名），向上探测可靠零误判。
+    """
+    current = start_dir.resolve()
+    for parent in [current] + list(current.parents):
+        if (parent / "BFT").is_dir() and (parent / "DDL").is_dir():
+            return parent
+    return None
+
+
+def _auto_discover_ddl_from_repo(yml_dir: Path, rules: list) -> str:
+    """从代码仓结构自动发现目标表的 DDL 文件路径。
+
+    代码仓 DDL 目录结构：DDL/{DWS_EDW|DWS_RT_EDW}/{schema}/table/{target_table}.sql
+    从 yml 目录向上找仓根，再按 target_schema + target_table 定位 DDL。
+    两层（DWS_EDW / DWS_RT_EDW）都试，找到第一个就返回其父目录（parse_ddl 接收目录）。
+
+    Returns: DDL 文件所在目录路径（供 parse_ddl_for_metadata 扫描）；找不到返回 ""。
+    """
+    repo_root = _find_repo_root(yml_dir)
+    if not repo_root:
+        return ""
+
+    # 取目标表信息（取最后一个非中间表，和 _process_group 逻辑一致）
+    target_schema = ""
+    target_table = ""
+    from engine import _is_intermediate_table
+    for rule in reversed(rules):
+        if not _is_intermediate_table(rule.target_table):
+            target_schema = rule.target_schema
+            target_table = rule.target_table
+            break
+    if not target_table and rules:
+        target_schema = rules[-1].target_schema
+        target_table = rules[-1].target_table
+    if not target_table:
+        return ""
+
+    table_lower = target_table.lower()
+    schema_lower = target_schema.lower() if target_schema else ""
+
+    # 两层都试：DWS_EDW（离线）/ DWS_RT_EDW（实时）
+    for layer in ("DWS_EDW", "DWS_RT_EDW"):
+        ddl_root = repo_root / "DDL" / layer
+        if not ddl_root.is_dir():
+            continue
+        # schema 目录可能是 dws / DWS 等，大小写容错
+        schema_dir = None
+        if schema_lower:
+            for sd in ddl_root.iterdir():
+                if sd.is_dir() and sd.name.lower() == schema_lower:
+                    schema_dir = sd
+                    break
+        if not schema_dir:
+            continue
+        # table 目录下找 {target_table}.sql（大小写容错）
+        table_dir = schema_dir / "table"
+        if table_dir.is_dir():
+            for sf in table_dir.glob("*.sql"):
+                if sf.stem.lower() == table_lower:
+                    return str(table_dir)
+    return ""
+
+
 def _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings, quality, data_flow) -> str:
     """生成 AI 增强用的精简摘要 markdown。
 
@@ -533,9 +796,15 @@ def main():
     print(f"输出基础目录: {base_output_dir}")
     print()
 
-    # ── Step 1: 读取 Excel ──
-    print("Step 1: 读取制品包 Excel...")
-    raw = read_excel(str(input_path))
+    # ── Step 1: 读取输入 ──
+    # 输入分流：.xlsx 文件 → read_excel；目录 → read_yml（代码仓 yml 场景）
+    is_yml_mode = input_path.is_dir()
+    if is_yml_mode:
+        print("Step 1: 读取代码仓 yml...")
+        raw = read_yml(str(input_path))
+    else:
+        print("Step 1: 读取制品包 Excel...")
+        raw = read_excel(str(input_path))
     rules = raw["rules"]
 
     # 确定输出目录：基础目录 / 规则组英文名称（兜底用规则组编码或 output）
@@ -549,7 +818,7 @@ def main():
     print(f"输出目录: {output_dir}")
     print()
 
-    if not rules:
+    if not rules and not is_yml_mode:
         # 详细诊断
         print("错误: 未找到有效的 RULE 行", file=sys.stderr)
         print("", file=sys.stderr)
@@ -634,11 +903,25 @@ def main():
     print(f"Step 2: 方言 = {dialect}")
     print()
 
+    # ── DDL 发现 ──
+    # xlsx 场景：自动检测同级 04_ddl/ 或用 --ddl-dir 指定
+    # yml 场景：从代码仓根定位 DDL/{DWS_EDW|DWS_RT_EDW}/{schema}/table/{target_table}.sql
+    ddl_dir = args.ddl_dir
+    if not ddl_dir:
+        if is_yml_mode:
+            # yml 场景：从规则组目录向上找代码仓根，再定位 DDL
+            ddl_dir = _auto_discover_ddl_from_repo(input_path, rules)
+        else:
+            # xlsx 场景：自动检测同级 04_ddl/
+            candidate = input_path.parent / "04_ddl"
+            if candidate.is_dir():
+                ddl_dir = str(candidate)
+
     # ── Step 3~7: 核心解析（与批量路径共用 analyze_pipeline，避免两套逻辑漂移）──
     print("Step 3-7: 解析 + 组装 knowledge...")
     knowledge, parsed_map = analyze_pipeline(
         rules, raw["target_fields"], raw["group_variables"], dialect,
-        ddl_dir=args.ddl_dir, source_file=input_path.name,
+        ddl_dir=ddl_dir, source_file=input_path.name,
         rule_group_code=raw["rule_group_code"],
     )
     # 从 knowledge 取回 AI summary 需要的中间结构
