@@ -83,9 +83,9 @@ install.bat
 
 ### 可选输入
 
-| 文件 | 位置 | 作用 |
-|------|------|------|
-| DDL 文件（`*.sql`） | `execution_tasks.xlsx` 同级的 `04_ddl/` 目录 | 补充字段类型+中文名 |
+| 文件 | 提供方式 | 作用 |
+|------|----------|------|
+| DDL 文件（`*.sql`） | xlsx 场景用 `--ddl-dir` 指定目录；yml/代码仓场景自动发现 | 补充字段类型+中文名 |
 
 > DDL 是可选的。没有 DDL 时字段类型和中文名留空，不影响分析。
 
@@ -140,7 +140,7 @@ python {skill_dir}/run.py analyzer \
     --input execution_tasks.xlsx \
     --output docs/ \
     [--dialect auto] \
-    [--ddl-dir 04_ddl/]
+    [--ddl-dir ddl/]
 ```
 
 | 参数 | 必填 | 说明 |
@@ -148,7 +148,7 @@ python {skill_dir}/run.py analyzer \
 | `--input` | 是 | execution_tasks.xlsx 路径 |
 | `--output` | 是 | 输出基础目录 |
 | `--dialect` | 否 | oracle/dws/auto，默认自动检测 |
-| `--ddl-dir` | 否 | DDL 目录（同级 `04_ddl/` 会自动检测） |
+| `--ddl-dir` | 否 | DDL 目录（yml 场景自动发现，xlsx 场景需指定） |
 
 **工作流程**：
 1. 脚本分析：读 Excel → 解析 SQL → 构建拓扑/数据流/字段血缘 → 产出 knowledge_draft.json
@@ -165,7 +165,7 @@ python {skill_dir}/run.py batch \
     --output docs/ \
     [--batch-size 20] \
     [--no-ai] \
-    [--ddl-dir 04_ddl/]
+    [--ddl-dir ddl/]
 ```
 
 | 参数 | 必填 | 说明 |

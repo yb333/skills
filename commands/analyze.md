@@ -74,11 +74,11 @@ python {skill_dir}/run.py analyzer \
 不要放代码仓内。产出文档放代码仓内会污染 git 状态（每次分析产生未跟踪文件），
 和源码混在一起也不清晰。
 
-**DDL 自动发现**：
-- xlsx 场景：自动检测 `--input` 同级的 `04_ddl/` 目录
-- yml 场景：从规则组目录向上定位代码仓根（含 `BFT/`+`DDL/`），再按
+**DDL 发现**：
+- yml 场景：自动发现。从规则组目录向上定位代码仓根（含 `BFT/`+`DDL/`），再按
   `DDL/{DWS_EDW|DWS_RT_EDW}/{schema}/table/{目标表}.sql` 查找
-- 都找不到时不阻塞分析（DDL 是可选增强），可用 `--ddl-dir` 手动指定
+- xlsx 场景：不自动发现（xlsx 是临时导出，DDL 位置不统一），需 `--ddl-dir` 指定
+- 找不到时不阻塞分析（DDL 是可选增强）
 
 `--output` 给基础目录即可，脚本会打印实际输出目录（`输出目录: ...`），后续步骤用它。
 
@@ -142,8 +142,8 @@ python {skill_dir}/run.py view_generator \
 3. **视图用 knowledge_draft.json 生成**，AI 增强结果通过 `--ai-input knowledge_ai.md` 注入
 4. **视图全部自动生成**，不询问用户选哪些
 5. **输入自动分流**：`--input` 是 `.xlsx` 文件走 read_excel，是目录走 read_yml，用户无需区分
-6. **DDL 自动发现**：xlsx 场景检测同级 `04_ddl/`；yml 场景从代码仓根定位 `DDL/` 子树；
-   找不到不阻塞（DDL 是可选增强）；可用 `--ddl-dir` 手动指定
+6. **DDL 发现**：yml 场景从代码仓根自动定位 `DDL/` 子树；xlsx 场景需 `--ddl-dir` 指定；
+   找不到不阻塞（DDL 是可选增强）
 7. **xlsx 与 yml 产出完全一致**：两种输入走同一引擎（analyze_pipeline），不会有内容差异
 8. **输出目录**：`--output` 给基础目录，脚本自动在其下按**规则组英文名称**建子目录，产物输出到那里（缺失则回退规则组编码）
 

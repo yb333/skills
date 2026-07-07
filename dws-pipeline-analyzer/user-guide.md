@@ -66,9 +66,9 @@
 
 | 文件 | 说明 | 作用 |
 |------|------|------|
-| `04_ddl/create_table_*.sql` | DDL 文件 | 补充字段类型和中文名（mapping 里会用到） |
+| DDL 文件（`*.sql`） | 用 `--ddl-dir` 指定目录 | 补充字段类型和中文名（mapping 里会用到） |
 
-DDL 文件放在 `execution_tasks.xlsx` 同级的 `04_ddl/` 目录下即可，工具会自动检测。
+DDL 文件用 `--ddl-dir` 指定一个目录（里面放 `*.sql`），工具会扫描匹配目标表。
 
 ---
 

@@ -13,7 +13,7 @@
 
 Usage:
     python analyzer.py --input execution_tasks.xlsx --output docs/output/
-    python analyzer.py --input execution_tasks.xlsx --output docs/ --ddl-dir 04_ddl/
+    python analyzer.py --input execution_tasks.xlsx --output docs/ --ddl-dir ddl/
 
 Author: 院博
 """
@@ -904,18 +904,12 @@ def main():
     print()
 
     # ── DDL 发现 ──
-    # xlsx 场景：自动检测同级 04_ddl/ 或用 --ddl-dir 指定
     # yml 场景：从代码仓根定位 DDL/{DWS_EDW|DWS_RT_EDW}/{schema}/table/{target_table}.sql
+    # xlsx 场景：不自动发现（xlsx 是临时导出，DDL 位置不统一），需 --ddl-dir 显式指定
     ddl_dir = args.ddl_dir
-    if not ddl_dir:
-        if is_yml_mode:
-            # yml 场景：从规则组目录向上找代码仓根，再定位 DDL
-            ddl_dir = _auto_discover_ddl_from_repo(input_path, rules)
-        else:
-            # xlsx 场景：自动检测同级 04_ddl/
-            candidate = input_path.parent / "04_ddl"
-            if candidate.is_dir():
-                ddl_dir = str(candidate)
+    if not ddl_dir and is_yml_mode:
+        # yml 场景：从规则组目录向上找代码仓根，再定位 DDL
+        ddl_dir = _auto_discover_ddl_from_repo(input_path, rules)
 
     # ── Step 3~7: 核心解析（与批量路径共用 analyze_pipeline，避免两套逻辑漂移）──
     print("Step 3-7: 解析 + 组装 knowledge...")

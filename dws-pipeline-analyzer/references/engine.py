@@ -4846,6 +4846,42 @@ def detect_patterns(
 # 辅助: parse_ddl_for_metadata() — 从 DDL 文件读取字段类型+中文名
 # ═══════════════════════════════════════════════════════════════
 
+def _extract_create_table_body(content: str) -> str:
+    r"""从 DDL 内容里提取 CREATE TABLE 字段定义块（括号内内容）。
+
+    用括号配平精确定位表定义的闭合括号，避免贪婪正则把 WITH(...)/DISTRIBUTE BY/
+    PARTITION BY 等表定义后的子句包进来。
+
+    支持多种写法：
+        CREATE TABLE t (...)
+        CREATE TABLE IF NOT EXISTS t (...)
+        CREATE TABLE schema.t (...)
+        CREATE TABLE t /* 注释 */ (...)
+    多空格/tab/换行都容错（靠 ``\s+`` 和 ``\S*``）。
+    """
+    # 定位 CREATE TABLE 后的第一个左括号（跳过表名/schema/IF NOT EXISTS/注释）
+    ct = re.search(
+        r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[^\(]*\(',
+        content, re.IGNORECASE | re.DOTALL
+    )
+    if not ct:
+        return ""
+    start = ct.end()  # 第一个 ( 之后
+    # 从 start 开始括号配平，找到配对的闭合 )
+    depth = 1
+    i = start
+    while i < len(content):
+        ch = content[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return content[start:i]
+        i += 1
+    return content[start:]  # 配平失败兜底（取到末尾）
+
+
 def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
     """从 DDL 文件读取目标表字段类型和中文名。
 
@@ -4874,17 +4910,13 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
         if "create table" not in content_lower:
             continue
 
-        # ── 1. 提取字段名+类型（正则，支持 NVARCHAR 等 DWS 方言）──
-        ct_match = re.search(
-            r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[^\(]*\((.*)\)',
-            content, re.DOTALL | re.IGNORECASE
-        )
-        if not ct_match:
+        # ── 1. 提取字段名+类型 ──
+        # 用括号配平提取 CREATE TABLE 的字段定义块，比贪婪正则健壮：
+        # GaussDB DDL 表定义后常有 WITH(...) / DISTRIBUTE BY / PARTITION BY 等子句，
+        # 贪婪正则 (.*) 会把这些包进来；括号配平精确停在表定义的闭合括号。
+        body = _extract_create_table_body(content)
+        if not body:
             continue
-        body = ct_match.group(1)
-        last_paren = body.rfind(")")
-        if last_paren > 0:
-            body = body[:last_paren]
 
         pattern = r'^\s*([a-z_][a-z0-9_]*)\s+([a-zA-Z][a-zA-Z0-9]*(?:\([^)]*\))?)'
         skip_words = ('create', 'table', 'view', 'as', 'select', 'from', 'where', 'and', 'or')

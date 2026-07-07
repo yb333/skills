@@ -52,7 +52,7 @@ python -c "import openpyxl, sqlglot; print('OK')"
 python {skill_dir}/run.py analyzer --input {input_xlsx} --output {base_dir} [--ddl-dir {ddl_dir}]
 ```
 
-DDL 目录自动检测：同级的 `04_ddl/` 有则传入，没有则跳过。
+DDL 目录：xlsx 场景用 `--ddl-dir` 指定（可选）；yml/代码仓场景自动发现。
 
 产出：`{output_dir}/knowledge_draft.json` + `{output_dir}/knowledge_summary.md`
 
