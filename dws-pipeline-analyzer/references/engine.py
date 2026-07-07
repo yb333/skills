@@ -5054,8 +5054,127 @@ def build_table_catalog(rules: list, ddl_dir: str) -> dict:
     return catalog
 
 
-# ═══════════════════════════════════════════════════════════════
-# 辅助: build_source()
+def check_type_consistency(field_mappings: dict, table_catalog: dict,
+                           rules: list, parsed_map: dict) -> list:
+    """跨表字段类型一致性检查（P3）。
+
+    同一个字段在过程表和目标表的类型/长度不一致 = 潜在数据质量问题
+    （如 DECIMAL(18,4) → DECIMAL(18,2) 精度丢失，VARCHAR(128) → VARCHAR(64) 截断）。
+
+    检查逻辑：
+        遍历 field_mappings.fields，每个字段有 lineage（追溯链）。
+        如果 lineage 的 source_table 能解析为一张在 catalog 里的表，
+        且该源表字段有 DDL 类型，则对比源表类型 vs 当前字段类型。
+        类型不一致（归一化后）→ 记入 issues。
+
+    Args:
+        field_mappings: build_field_mappings 的输出（字段已含 field_type）
+        table_catalog: build_table_catalog 的输出（多表 DDL 结构）
+        rules: RawRule 列表（用于解析 lineage 里的别名→真实表名）
+        parsed_map: 解析结果（含 source_tables 的 alias→table 映射）
+
+    Returns: [issue, ...] issue 结构同 analyze_quality 的 issue
+        catalog 为空 → 返回空列表（无 DDL 不检查，容错）
+    """
+    if not table_catalog:
+        return []
+
+    # 构建 step_id → {alias_upper: real_table_full} 的别名映射
+    # lineage 里的 source_table 是别名（如 t/a），需要解析为真实表名
+    step_alias_map = {}
+    for rule in rules:
+        parsed = parsed_map.get(rule.rule_code)
+        if not parsed:
+            continue
+        # 从 parsed.source_tables 取 alias → source_table
+        amap = {}
+        for j in parsed.source_tables:
+            if j.alias and j.source_table:
+                amap[j.alias.upper()] = j.source_table
+        # 找 step_id
+        for i, r in enumerate(rules):
+            if r.rule_code == rule.rule_code:
+                step_alias_map[f"step_{i+1}"] = amap
+                break
+
+    issues = []
+    fields = field_mappings.get("fields", [])
+
+    for f in fields:
+        ftype = f.get("field_type", "")
+        if not ftype:
+            continue  # 当前字段没类型，跳过
+
+        target_field = f.get("target_field", "")
+        producing_step = f.get("producing_step", "")
+
+        # 遍历 lineage，找指向 catalog 表的源字段
+        for lin in f.get("lineage", []):
+            src_alias = lin.get("source_table", "")
+            src_field = lin.get("source_field", "") or target_field
+            lin_step = lin.get("step", producing_step)
+
+            if not src_alias or not src_field:
+                continue
+
+            # 别名 → 真实表名
+            amap = step_alias_map.get(lin_step, {})
+            src_table = amap.get(src_alias.upper(), "")
+            if not src_table:
+                continue
+
+            # 查 catalog
+            src_table_key = _norm_table(src_table).lower()
+            src_meta = table_catalog.get(src_table_key, {})
+            src_type = src_meta.get(src_field.lower(), {}).get("type", "")
+            if not src_type:
+                continue
+
+            # 归一化对比（去空格、统一大小写）
+            ftype_norm = _normalize_type(ftype)
+            src_type_norm = _normalize_type(src_type)
+
+            if ftype_norm != src_type_norm:
+                # 精度变化（DECIMAL 精度不同）比纯类型不同更值得关注
+                severity = "medium"
+                if _is_precision_change(ftype_norm, src_type_norm):
+                    severity = "high"  # 精度丢失/截断风险
+                elif ftype_norm.split("(")[0] != src_type_norm.split("(")[0]:
+                    severity = "high"  # 类型族不同（VARCHAR→INT）
+
+                issues.append({
+                    "category": "type_consistency",
+                    "severity": severity,
+                    "title": f"字段类型不一致: {target_field}",
+                    "description": (
+                        f"字段 '{target_field}' 在 {producing_step} 类型为 {ftype}，"
+                        f"但来源表 {src_table}.{src_field} 类型为 {src_type}，"
+                        f"可能导致精度丢失或数据截断"
+                    ),
+                    "field": target_field,
+                    "current_type": ftype,
+                    "source_table": src_table,
+                    "source_field": src_field,
+                    "source_type": src_type,
+                })
+
+    return issues
+
+
+def _normalize_type(type_str: str) -> str:
+    """归一化类型字符串用于对比（去空格、统一大小写、去精度内部空格）。"""
+    if not type_str:
+        return ""
+    # 去空格、统一小写
+    t = type_str.replace(" ", "").lower()
+    return t
+
+
+def _is_precision_change(type1: str, type2: str) -> bool:
+    """判断两个类型是否仅精度/长度不同（类型族相同）。"""
+    base1 = type1.split("(")[0]
+    base2 = type2.split("(")[0]
+    return base1 == base2 and type1 != type2
 # ═══════════════════════════════════════════════════════════════
 
 def build_source(
@@ -5244,6 +5363,20 @@ def analyze_pipeline(
 
     # ── Step 6: 质量分析 ──
     quality = analyze_quality(topology, data_flow, field_mappings, parsed_map)
+
+    # ── Step 6b: 跨表字段类型一致性检查（P3，依赖 DDL catalog）──
+    # 同一字段在过程表和目标表类型不一致 → 精度丢失/截断风险
+    # DDL 找不到（catalog 为空）→ 不检查，不阻塞
+    type_issues = check_type_consistency(field_mappings, table_catalog, rules, parsed_map)
+    if type_issues:
+        quality["issues"].extend(type_issues)
+        # 重新统计 issue_statistics（high 归入 medium 档，因为 statistics 只有4档）
+        from collections import Counter as _Counter
+        sev_count = _Counter(iss["severity"] for iss in quality["issues"])
+        quality["issue_statistics"]["critical"] = sev_count.get("critical", 0)
+        quality["issue_statistics"]["medium"] = sev_count.get("medium", 0) + sev_count.get("high", 0)
+        quality["issue_statistics"]["low"] = sev_count.get("low", 0)
+        quality["issue_statistics"]["info"] = sev_count.get("info", 0)
 
     # ── Step 7: 组装输出 ──
     # 最终目标表（最大 exec_sequence 的步骤目标表，考虑交换分区）
