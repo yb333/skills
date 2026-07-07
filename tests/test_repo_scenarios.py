@@ -107,6 +107,84 @@ class TestDdlAutoDiscovery:
         assert ddl_dir == "", "view 目录的 DDL 不应被发现"
 
 
+class TestDdlFilenameMatching:
+    """DDL 文件名匹配鲁棒性（P0 修复：严格相等→包含匹配）。
+
+    历史 bug：_auto_discover_ddl_from_repo 用文件名严格相等匹配，
+    真实 DDL 文件名常有前缀(schema/create_table_)、后缀(_v2)、
+    不同扩展名(.DDL)，导致 DDL 找不到。
+    """
+
+    def test_exact_match(self, tmp_path):
+        """文件名和表名完全一致（最精确）。"""
+        from analyzer import _find_ddl_file
+        d = tmp_path / "table"
+        d.mkdir()
+        (d / "dwb_trade_order_d.sql").write_text("-- ddl", encoding="utf-8")
+        assert _find_ddl_file(d, "dwb_trade_order_d") is not None
+
+    def test_case_insensitive(self, tmp_path):
+        """大小写不敏感。"""
+        from analyzer import _find_ddl_file
+        d = tmp_path / "table"
+        d.mkdir()
+        (d / "DWB_TRADE_ORDER_D.SQL").write_text("-- ddl", encoding="utf-8")
+        assert _find_ddl_file(d, "dwb_trade_order_d") is not None
+
+    def test_schema_prefix(self, tmp_path):
+        """文件名带 schema 前缀（ods.dwb_trade.sql 匹配 dwb_trade）。"""
+        from analyzer import _find_ddl_file
+        d = tmp_path / "table"
+        d.mkdir()
+        (d / "ods.dwb_trade.sql").write_text("-- ddl", encoding="utf-8")
+        assert _find_ddl_file(d, "dwb_trade") is not None
+
+    def test_create_table_prefix(self, tmp_path):
+        """文件名带 create_table_ 前缀。"""
+        from analyzer import _find_ddl_file
+        d = tmp_path / "table"
+        d.mkdir()
+        (d / "create_table_dwb_trade.sql").write_text("-- ddl", encoding="utf-8")
+        assert _find_ddl_file(d, "dwb_trade") is not None
+
+    def test_version_suffix(self, tmp_path):
+        """文件名带版本后缀（dwb_trade_v2.sql 匹配 dwb_trade）。"""
+        from analyzer import _find_ddl_file
+        d = tmp_path / "table"
+        d.mkdir()
+        (d / "dwb_trade_v2.sql").write_text("-- ddl", encoding="utf-8")
+        assert _find_ddl_file(d, "dwb_trade") is not None
+
+    def test_ddl_extension(self, tmp_path):
+        """非 .sql 扩展名（.DDL）。"""
+        from analyzer import _find_ddl_file
+        d = tmp_path / "table"
+        d.mkdir()
+        (d / "dwb_trade.DDL").write_text("-- ddl", encoding="utf-8")
+        assert _find_ddl_file(d, "dwb_trade") is not None
+
+    def test_exact_match_preferred_over_contains(self, tmp_path):
+        """精确匹配优先于包含匹配（避免误匹配）。"""
+        from analyzer import _find_ddl_file
+        d = tmp_path / "table"
+        d.mkdir()
+        # 两个文件：dwb_trade.sql（精确）和 create_table_dwb_trade.sql（包含）
+        # 表名 dwb_trade 应优先匹配精确的
+        (d / "dwb_trade.sql").write_text("-- exact", encoding="utf-8")
+        (d / "create_table_dwb_trade.sql").write_text("-- contains", encoding="utf-8")
+        result = _find_ddl_file(d, "dwb_trade")
+        assert result.name == "dwb_trade.sql"
+
+    def test_short_table_name_not_loose_match(self, tmp_path):
+        """过短的表名（<4字符）不做包含匹配，避免误匹配。"""
+        from analyzer import _find_ddl_file
+        d = tmp_path / "table"
+        d.mkdir()
+        # 表名 "id" 太短，包含匹配会误匹配到 "provider.sql"，不应匹配
+        (d / "provider.sql").write_text("-- ddl", encoding="utf-8")
+        assert _find_ddl_file(d, "id") is None
+
+
 class TestYmlAnalysisNotDisturbed:
     """代码仓分析不被干扰项影响。"""
 

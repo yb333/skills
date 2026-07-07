@@ -630,13 +630,48 @@ def _auto_discover_ddl_from_repo(yml_dir: Path, rules: list) -> str:
                     break
         if not schema_dir:
             continue
-        # table 目录下找 {target_table}.sql（大小写容错）
+        # table 目录下找目标表 DDL（包含匹配 + 多扩展名，不靠严格相等）
+        # 匹配规则：文件名（去扩展名）等于表名，或文件名以"表名."开头（schema前缀），
+        # 或表名是文件名的一部分（容错 create_table_xxx / xxx_v2 等前缀后缀）。
         table_dir = schema_dir / "table"
         if table_dir.is_dir():
-            for sf in table_dir.glob("*.sql"):
-                if sf.stem.lower() == table_lower:
-                    return str(table_dir)
+            if _find_ddl_file(table_dir, table_lower):
+                return str(table_dir)
     return ""
+
+
+def _find_ddl_file(table_dir: Path, table_lower: str) -> Path | None:
+    """在 DDL 目录里找目标表的 DDL 文件（包含匹配 + 多扩展名）。
+
+    匹配优先级（从严到宽，避免误匹配）：
+    1. 文件名(去扩展名) == 表名（最精确，如 dwb_trade.sql 匹配 dwb_trade）
+    2. 文件名以"表名."开头（schema 前缀，如 ods.dwb_trade.sql 匹配 dwb_trade）
+    3. 文件名(去扩展名) 包含表名（容错 create_table_dwb_trade / dwb_trade_v2）
+
+    支持的扩展名：.sql / .ddl / .txt（不区分大小写）
+    """
+    candidates = []
+    for ext in ("*.sql", "*.ddl", "*.txt", "*.SQL", "*.DDL", "*.TXT"):
+        candidates.extend(table_dir.glob(ext))
+    # 去重（大小写不同的 glob 可能重复）
+    seen = set()
+    files = []
+    for f in candidates:
+        real = str(f.resolve())
+        if real not in seen:
+            seen.add(real)
+            files.append(f)
+
+    for f in files:  # 优先级1：精确匹配
+        if f.stem.lower() == table_lower:
+            return f
+    for f in files:  # 优先级2：schema 前缀（文件名以"表名."开头）
+        if f.name.lower().startswith(table_lower + "."):
+            return f
+    for f in files:  # 优先级3：包含（容错前缀后缀，但要求表名足够长避免误匹配）
+        if len(table_lower) >= 4 and table_lower in f.stem.lower():
+            return f
+    return None
 
 
 def _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings, quality, data_flow) -> str:
