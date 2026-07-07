@@ -3549,17 +3549,28 @@ def build_field_mappings(
     rules: list[RawRule],
     parsed_map: dict[str, ParsedSQL],
     target_fields_map: dict[str, list[RawTargetField]],
+    table_catalog: dict | None = None,
 ) -> dict:
-    """双源交叉：TargetFields + SQL AST。
+    """双源交叉：TargetFields + SQL AST + DDL 类型下注。
+
+    table_catalog（可选）：build_table_catalog 的输出，含过程表+目标表的 DDL 字段
+    结构。有则给每个字段注入 field_type/field_comment；无则字段无类型（容错，不阻塞）。
 
     Returns: field_mappings section of knowledge.json
     """
+    table_catalog = table_catalog or {}
     all_fields = []
     all_warnings = []
+    # step_id → 该步写入表的 DDL 字段结构（供返回前统一注入字段类型/注释）
+    step_ddl_map = {}
 
     for i, rule in enumerate(rules):
         step_id = f"step_{i + 1}"
         rc = rule.rule_code
+        # 本步骤写入的目标表 → 从 catalog 查 DDL 字段结构
+        table_key = _normalize_table_name(rule.target_schema, rule.target_table).lower()
+        table_ddl = table_catalog.get(table_key, {})
+        step_ddl_map[step_id] = table_ddl
         parsed = parsed_map.get(rc)
 
         # 分区交换步骤：从上游步骤（写入临时表的步骤）继承字段（全部直取）
@@ -3699,6 +3710,18 @@ def build_field_mappings(
     match_count = len([f for f in all_fields if f.get("validation", {}).get("excel_vs_sql_match") is True])
     only_in_sql = [f["target_field"] for f in all_fields if f.get("in_target_fields") is False]
     only_in_excel_list = [f["target_field"] for f in all_fields if f.get("note")]
+
+    # ── 字段级 DDL 类型/注释下注（P2）──
+    # 遍历所有字段，按 producing_step 找到对应表的 DDL，注入 field_type/field_comment。
+    # DDL 没有（catalog 为空或该字段不在 DDL）→ 留空，不影响（DDL 是可选增强）。
+    for f in all_fields:
+        ddl = step_ddl_map.get(f.get("producing_step", ""), {})
+        if ddl:
+            tf_name = (f.get("target_field") or "").lower()
+            meta = ddl.get(tf_name)
+            if meta:
+                f["field_type"] = meta.get("type", "")
+                f["field_comment"] = meta.get("comment", "")
 
     return {
         "fields": all_fields,
@@ -4910,7 +4933,7 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
         if "create table" not in content_lower:
             continue
 
-        # ── 1. 提取字段名+类型 ──
+        # ── 1. 提取字段名+类型+约束 ──
         # 用括号配平提取 CREATE TABLE 的字段定义块，比贪婪正则健壮：
         # GaussDB DDL 表定义后常有 WITH(...) / DISTRIBUTE BY / PARTITION BY 等子句，
         # 贪婪正则 (.*) 会把这些包进来；括号配平精确停在表定义的闭合括号。
@@ -4920,6 +4943,17 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
 
         pattern = r'^\s*([a-z_][a-z0-9_]*)\s+([a-zA-Z][a-zA-Z0-9]*(?:\([^)]*\))?)'
         skip_words = ('create', 'table', 'view', 'as', 'select', 'from', 'where', 'and', 'or')
+
+        # 先收集 PRIMARY KEY 字段（行级 PRIMARY KEY (a, b) 形式）
+        pk_fields = set()
+        for line in body.split("\n"):
+            line = line.strip()
+            if line.upper().startswith("PRIMARY"):
+                # PRIMARY KEY (field1, field2)
+                pk_match = re.search(r'PRIMARY\s+KEY\s*\(([^)]+)\)', line, re.IGNORECASE)
+                if pk_match:
+                    for f in pk_match.group(1).split(","):
+                        pk_fields.add(f.strip().lower())
 
         for line in body.split("\n"):
             line = line.strip().rstrip(",")
@@ -4938,7 +4972,21 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
                 if cm:
                     inline_comment = cm.group(1).strip()
 
-                result[fname] = {"type": ftype, "comment": inline_comment}
+                # 解析 NOT NULL（默认 nullable=True，有 NOT NULL 则 nullable=False）
+                nullable = "not null" not in line.lower()
+                # 解析 DEFAULT 值
+                default_value = ""
+                dm = re.search(r"DEFAULT\s+(\S+)", line, re.IGNORECASE)
+                if dm:
+                    default_value = dm.group(1).rstrip(",").strip("'\"")
+
+                result[fname] = {
+                    "type": ftype,
+                    "comment": inline_comment,
+                    "nullable": nullable,
+                    "default_value": default_value,
+                    "is_pk": fname in pk_fields,
+                }
 
         # ── 2. 提取 COMMENT ON COLUMN（覆盖行内注释）──
         for cm_match in re.finditer(
@@ -4950,7 +4998,8 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
             if fname in result:
                 result[fname]["comment"] = comment
             else:
-                result[fname] = {"type": "", "comment": comment}
+                result[fname] = {"type": "", "comment": comment,
+                                 "nullable": True, "default_value": "", "is_pk": False}
 
     return result
 
@@ -4960,6 +5009,49 @@ def parse_ddl_for_types(ddl_dir: str, target_table: str) -> dict[str, str]:
     """已废弃，使用 parse_ddl_for_metadata。保留向后兼容。"""
     metadata = parse_ddl_for_metadata(ddl_dir, target_table)
     return {k: v["type"] for k, v in metadata.items() if v.get("type")}
+
+
+def build_table_catalog(rules: list, ddl_dir: str) -> dict:
+    """构建多表结构目录（过程表 + 目标表的 DDL 结构）。
+
+    从 rules 遍历每一步的 target_table（含过程表/中间表），批量解析 DDL，
+    返回按表名索引的字段结构目录。这是字段级类型下注(P2)和跨表一致性
+    检查(P3)的数据基础。
+
+    Args:
+        rules: RawRule 列表（每步的 target_schema/target_table 是表名来源）
+        ddl_dir: DDL 文件目录（parse_ddl_for_metadata 扫描此目录）
+
+    Returns: {"schema.table(小写)": {field(小写): {type, comment, nullable, ...}}}
+        找不到 DDL 或 ddl_dir 为空 → 返回空 dict（容错，不阻塞分析）
+
+    容错设计（DDL 是可选增强，永远不阻塞分析）：
+        - ddl_dir 为空/不存在 → 返回 {}
+        - 某张表没 DDL → 该表不在 catalog 里，其他表照常
+        - DDL 解析失败 → 该表跳过，其他表照常
+    """
+    if not ddl_dir:
+        return {}
+
+    catalog = {}
+    for rule in rules:
+        if not rule.target_table:
+            continue
+        full_table = _normalize_table_name(rule.target_schema, rule.target_table)
+        table_key = full_table.lower()  # catalog key 用全限定小写
+
+        if table_key in catalog:
+            continue  # 同一张表（多步写同一表）不重复解析
+
+        try:
+            meta = parse_ddl_for_metadata(ddl_dir, rule.target_table)
+            if meta:
+                catalog[table_key] = meta
+        except Exception:
+            # 单表解析失败不影响其他表（DDL 是可选增强）
+            continue
+
+    return catalog
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -5124,8 +5216,13 @@ def analyze_pipeline(
     # ── Step 5: 数据流 ──
     data_flow = build_data_flow(rules, parsed_map)
 
-    # ── Step 5b: 字段映射（双源交叉：target_fields + SQL AST）──
-    field_mappings = build_field_mappings(rules, parsed_map, target_fields)
+    # ── Step 5a: 构建多表结构目录（DDL，可选增强，容错）──
+    # catalog 含过程表+目标表的 DDL 字段结构，供字段级类型下注(P2)和
+    # 跨表一致性检查(P3)使用。DDL 找不到 → catalog 为空 → 字段无类型，不阻塞。
+    table_catalog = build_table_catalog(rules, ddl_dir) if ddl_dir else {}
+
+    # ── Step 5b: 字段映射（双源交叉：target_fields + SQL AST + DDL类型下注）──
+    field_mappings = build_field_mappings(rules, parsed_map, target_fields, table_catalog)
 
     # ── Step 5c: 关联键跨步骤追溯 ──
     enrich_join_key_lineage(data_flow, rules, parsed_map, topology, field_mappings)
@@ -5161,10 +5258,16 @@ def analyze_pipeline(
     # 加工模式标签自动检测
     patterns = detect_patterns(parsed_map, topology)
 
-    # DDL 字段元数据（类型+中文名，可选）
+    # DDL 字段元数据（从多表 catalog 取目标表的结构，可选增强）
+    # catalog 在 Step 5a 已构建（含过程表+目标表），这里只取目标表部分
+    target_schema = ""
     target_metadata = {}
-    if ddl_dir:
-        target_metadata = parse_ddl_for_metadata(ddl_dir, target_name)
+    if rules:
+        max_seq_r = max(rules, key=lambda r: r.exec_sequence)
+        target_schema = max_seq_r.target_schema
+    if table_catalog:
+        target_full = _normalize_table_name(target_schema, target_name).lower()
+        target_metadata = table_catalog.get(target_full, {})
 
     # 生成兜底 step_descriptions（脚本自动，不依赖 AI）
     scenarios = topology.get("scenarios", [])
