@@ -153,6 +153,51 @@ COMMENT ON COLUMN t.amount IS '新注释';"""
         meta = parse_ddl_for_metadata(ddl_dir, "t")
         assert meta["amount"]["comment"] == "新注释"
 
+    def test_comment_double_quotes(self, tmp_path):
+        """防回归：COMMENT ON COLUMN 支持双引号（真实 DDL 导出工具常用）。
+
+        历史 bug：正则只支持单引号 '([^']*)'，双引号 COMMENT 解析不到注释，
+        导致 HTML 报告/mapping 里字段业务含义为空。
+        """
+        ddl = """CREATE TABLE t (
+  amount DECIMAL(18,2)
+);
+COMMENT ON COLUMN t.amount IS "金额";"""
+        ddl_dir = _write_ddl(tmp_path, "t", ddl)
+        meta = parse_ddl_for_metadata(ddl_dir, "t")
+        assert meta["amount"]["comment"] == "金额", \
+            f"双引号 COMMENT 应解析，实际 {meta['amount']['comment']!r}"
+
+    def test_inline_dash_comment(self, tmp_path):
+        """防回归：行内 -- 注释能解析。"""
+        ddl = """CREATE TABLE t (
+  amount DECIMAL(18,2) -- 金额
+);"""
+        ddl_dir = _write_ddl(tmp_path, "t", ddl)
+        meta = parse_ddl_for_metadata(ddl_dir, "t")
+        assert meta["amount"]["comment"] == "金额", \
+            f"行内 -- 注释应解析，实际 {meta['amount']['comment']!r}"
+
+    def test_default_with_dash_not_misinterpreted(self, tmp_path):
+        """防回归：DEFAULT 值里的 -- 不被误匹配为注释。
+
+        历史 bug：行内 -- 注释正则太宽泛，DEFAULT 'http://--test' 里的 --
+        被当成注释，导致 default_value 丢失 + comment 污染。
+        """
+        ddl = """CREATE TABLE t (
+  url VARCHAR(256) DEFAULT 'http://--test',
+  amount DECIMAL(18,2) -- 金额
+);"""
+        ddl_dir = _write_ddl(tmp_path, "t", ddl)
+        meta = parse_ddl_for_metadata(ddl_dir, "t")
+        # url 不应有注释（DEFAULT 里的 -- 不应匹配）
+        assert not meta["url"].get("comment"), \
+            f"url 不应有注释，实际 {meta['url'].get('comment')!r}"
+        # url 的 DEFAULT 值应保留
+        assert meta["url"]["default_value"], "url 的 DEFAULT 值不应丢失"
+        # amount 有注释
+        assert meta["amount"]["comment"] == "金额"
+
     def test_constraint_skipped(self, tmp_path):
         """CONSTRAINT/UNIQUE/CHECK 行不被当成字段。"""
         ddl = """CREATE TABLE t (

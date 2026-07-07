@@ -4966,11 +4966,24 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
                     continue
                 ftype = m_re.group(2)
 
-                # 尝试提取行内注释 /* 中文名 */
+                # 尝试提取行内注释：/* 中文名 */ 或 -- 中文名
+                # 注意：-- 注释要排除引号内的 --（如 DEFAULT 'http://--test'），
+                # 只在行尾、且 -- 前面是空格时才匹配（避免误匹配 DEFAULT 值）
                 inline_comment = ""
                 cm = re.search(r'/\*\s*(.+?)\s*\*/', line)
                 if cm:
                     inline_comment = cm.group(1).strip()
+                else:
+                    # 行尾 -- 注释：要求 -- 前是空格（字段类型定义后的注释）
+                    # 先去掉引号内的内容（避免引号里的 -- 干扰）
+                    line_no_quotes = re.sub(r"'[^']*'", "''", line)
+                    line_no_quotes = re.sub(r'"[^"]*"', '""', line_no_quotes)
+                    dm = re.search(r'\s--\s*(.+?)\s*$', line_no_quotes)
+                    if dm:
+                        # 从原始 line 取注释内容（保持中文不丢）
+                        orig_dm = re.search(r'\s--\s*(.+?)\s*$', line)
+                        if orig_dm:
+                            inline_comment = orig_dm.group(1).strip()
 
                 # 解析 NOT NULL（默认 nullable=True，有 NOT NULL 则 nullable=False）
                 nullable = "not null" not in line.lower()
@@ -4989,8 +5002,9 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
                 }
 
         # ── 2. 提取 COMMENT ON COLUMN（覆盖行内注释）──
+        # 支持单引号和双引号两种写法（真实 DDL 导出工具可能用双引号）
         for cm_match in re.finditer(
-            r"COMMENT\s+ON\s+COLUMN\s+\S+\.(\w+)\s+IS\s*'([^']*)'",
+            r"COMMENT\s+ON\s+COLUMN\s+\S+\.(\w+)\s+IS\s*['\"]([^'\"]*)['\"]",
             content, re.IGNORECASE
         ):
             fname = cm_match.group(1).lower()
