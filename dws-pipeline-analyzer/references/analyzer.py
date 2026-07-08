@@ -1096,14 +1096,26 @@ def main():
     i_view_info = None  # 记录 I 视图信息，供后续写入 knowledge.meta.asset_info
     if is_yml_mode and rules:
         # 取最终目标表（max exec_sequence 的 F 表）
+        # 注意：交换分区（rule_type=9）的 target_table 是临时表，
+        # exchange_source_table 才是真正的目标表（F 表），不能拿临时表去找 I 视图
         from engine import _is_intermediate_table, RawRule
+        f_schema = ""
+        f_table = ""
         f_rule = None
         for rule in reversed(rules):
-            if not _is_intermediate_table(rule.target_table):
+            if rule.rule_type == 9 and rule.exchange_source_table:
+                # 交换分区：真正目标表是 exchange_source_table
+                f_schema = rule.target_schema
+                f_table = rule.exchange_source_table
                 f_rule = rule
                 break
-        if f_rule and f_rule.target_table:
-            i_view = discover_i_view(input_path, f_rule.target_schema, f_rule.target_table)
+            if not _is_intermediate_table(rule.target_table):
+                f_schema = rule.target_schema
+                f_table = rule.target_table
+                f_rule = rule
+                break
+        if f_rule and f_table:
+            i_view = discover_i_view(input_path, f_schema, f_table)
             if i_view:
                 # 追加 I 视图作为最后一步
                 max_seq = max((r.exec_sequence for r in rules), default=0)
@@ -1126,12 +1138,12 @@ def main():
                     "is_view": True,
                     "view_table": i_view["view_name"],
                     "view_schema": i_view["view_schema"],
-                    "base_table": f_rule.target_table,
-                    "base_schema": f_rule.target_schema,
+                    "base_table": f_table,
+                    "base_schema": f_schema,
                     "view_step": f"step_{max_seq + 1}",
                 }
                 print(f"Step 2b: 发现 I 视图 {i_view['view_schema']}.{i_view['view_name']}")
-                print(f"  链路扩展: F表 {f_rule.target_table} → I视图 {i_view['view_name']}")
+                print(f"  链路扩展: F表 {f_table} → I视图 {i_view['view_name']}")
                 print()
             else:
                 print(f"Step 2b: 未找到 I 视图（以 F 表 {f_rule.target_table} 为终点）")

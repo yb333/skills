@@ -99,6 +99,46 @@ class TestDiscoverIView:
         assert discover_i_view(d, "dws", "dwb_xxx_f") is None
 
 
+class TestExchangePartitionIView:
+    """交换分区（rule_type=9）的 I 视图发现。
+
+    交换分区的 target_table 是临时表，exchange_source_table 才是真正的 F 表。
+    历史 bug：用 target_table（临时表）去找 I 视图，结果找不到。
+    """
+
+    def test_exchange_partition_uses_source_table(self, tmp_path):
+        """交换分区时用 exchange_source_table 找 I 视图，不用 target_table。"""
+        from _build_yml import build_yml_group
+        from analyzer import discover_i_view
+
+        repo = tmp_path / "repo"
+        (repo / "BFT").mkdir(parents=True)
+        view_dir = repo / "DDL" / "DWS_EDW" / "dws" / "view"
+        view_dir.mkdir(parents=True)
+        # I 视图引用的是真正的 F 表（dwb_exchange_f），不是临时表
+        (view_dir / "dwb_exchange_i.sql").write_text(
+            "CREATE VIEW dws.dwb_exchange_i AS SELECT * FROM dws.dwb_exchange_f;",
+            encoding="utf-8")
+
+        group = repo / "BFT" / "grp"
+        build_yml_group(group, rules=[{
+            "rule_code": "X1", "rule_type": 9, "exec_sequence": 1,
+            "target_schema": "dws", "target_table": "tmp_exchange",
+            "query_sql": "ALTER TABLE dwb_exchange_f EXCHANGE PARTITION p1",
+            "rule_name": "交换", "rule_group_code": "GR", "rule_group_en": "DWB_EXCHANGE_F",
+            "exchange_source_table": "dwb_exchange_f",
+        }])
+
+        # 用真正的 F 表名找，应找到
+        result = discover_i_view(group, "dws", "dwb_exchange_f")
+        assert result is not None, "用 exchange_source_table 应找到 I 视图"
+        assert result["view_name"] == "dwb_exchange_i"
+
+        # 用临时表名找，应找不到（临时表没有视图）
+        result_wrong = discover_i_view(group, "dws", "tmp_exchange")
+        assert result_wrong is None, "临时表不应有 I 视图"
+
+
 class TestIViewInAnalysisPipeline:
     """端到端：I 视图加入分析链路。"""
 
