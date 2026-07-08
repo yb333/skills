@@ -645,11 +645,13 @@ def _auto_discover_ddl_from_repo(yml_dir: Path, rules: list) -> str:
     if not repo_root:
         return ""
 
-    # 取目标表信息（取最后一个非中间表，和 _process_group 逻辑一致）
+    # 取目标表信息（取最后一个非中间表，跳过 I 视图步骤——视图在 view/ 目录不在 table/）
     target_schema = ""
     target_table = ""
     from engine import _is_intermediate_table
     for rule in reversed(rules):
+        if getattr(rule, "is_view_step", False):
+            continue  # 跳过 I 视图步骤（它的 DDL 在 view/ 不是 table/）
         if not _is_intermediate_table(rule.target_table):
             target_schema = rule.target_schema
             target_table = rule.target_table

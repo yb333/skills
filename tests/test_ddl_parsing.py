@@ -153,6 +153,19 @@ COMMENT ON COLUMN t.amount IS '新注释';"""
         meta = parse_ddl_for_metadata(ddl_dir, "t")
         assert meta["amount"]["comment"] == "新注释"
 
+    def test_single_line_multi_fields(self, tmp_path):
+        """防回归：单行 DDL 多字段能全部解析（不能只取第一个）。
+
+        历史 bug：字段解析按换行 split，单行 DDL（a INT, b VARCHAR）只有一行，
+        正则只匹配第一个字段，后面的全丢。
+        """
+        ddl = "CREATE TABLE t (id VARCHAR(64), amount DECIMAL(18,2), name VARCHAR(128));"
+        ddl_dir = _write_ddl(tmp_path, "t", ddl)
+        meta = parse_ddl_for_metadata(ddl_dir, "t")
+        assert "id" in meta, "id 应解析"
+        assert "amount" in meta, "amount 应解析（不能丢）"
+        assert "name" in meta, "name 应解析（不能丢）"
+
     def test_comment_double_quotes(self, tmp_path):
         """防回归：COMMENT ON COLUMN 支持双引号（真实 DDL 导出工具常用）。
 

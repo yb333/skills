@@ -3704,21 +3704,22 @@ def build_field_mappings(
                     "note": "TargetFields 有记录但 SQL SELECT 中未找到对应别名",
                 })
 
-        # 差异预警
-        only_in_sql = [
-            col.alias for col in parsed.select_columns
-            if col.alias and col.alias not in tf_index
-        ]
-        if only_in_sql or only_in_excel:
-            all_warnings.append({
-                "rule_code": rc,
-                "type": "field_name_mismatch",
-                "severity": "info",
-                "title": f"规则 {rc} 存在 {len(only_in_excel)} 个 TargetFields 字段和 "
-                         f"{len(only_in_sql)} 个 SQL 列无法通过别名精确匹配",
-                "only_in_excel": only_in_excel,
-                "only_in_sql": only_in_sql,
-            })
+        # 差异预警（跳过 I 视图步骤——视图没有 TargetFields，对比无意义）
+        if not getattr(rule, "is_view_step", False):
+            only_in_sql = [
+                col.alias for col in parsed.select_columns
+                if col.alias and col.alias not in tf_index
+            ]
+            if only_in_sql or only_in_excel:
+                all_warnings.append({
+                    "rule_code": rc,
+                    "type": "field_name_mismatch",
+                    "severity": "info",
+                    "title": f"规则 {rc} 存在 {len(only_in_excel)} 个 TargetFields 字段和 "
+                             f"{len(only_in_sql)} 个 SQL 列无法通过别名精确匹配",
+                    "only_in_excel": only_in_excel,
+                    "only_in_sql": only_in_sql,
+                })
 
     # ── 统计 ──
     total_in_sql = len([f for f in all_fields if f.get("transform_type") != "unknown"])
@@ -4971,9 +4972,29 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
         pattern = r'^\s*([a-z_][a-z0-9_]*)\s+([a-zA-Z][a-zA-Z0-9]*(?:\([^)]*\))?)'
         skip_words = ('create', 'table', 'view', 'as', 'select', 'from', 'where', 'and', 'or')
 
+        # 按顶层逗号拆分字段定义（不拆类型里的逗号如 DECIMAL(18,2)）
+        # 用括号深度判断：只在 depth==0 的逗号处拆分
+        field_lines = []
+        current = ""
+        depth = 0
+        for ch in body:
+            if ch == "(":
+                depth += 1
+                current += ch
+            elif ch == ")":
+                depth -= 1
+                current += ch
+            elif ch == "," and depth == 0:
+                field_lines.append(current.strip())
+                current = ""
+            else:
+                current += ch
+        if current.strip():
+            field_lines.append(current.strip())
+
         # 先收集 PRIMARY KEY 字段（行级 PRIMARY KEY (a, b) 形式）
         pk_fields = set()
-        for line in body.split("\n"):
+        for line in field_lines:
             line = line.strip()
             if line.upper().startswith("PRIMARY"):
                 # PRIMARY KEY (field1, field2)
@@ -4982,7 +5003,7 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
                     for f in pk_match.group(1).split(","):
                         pk_fields.add(f.strip().lower())
 
-        for line in body.split("\n"):
+        for line in field_lines:
             line = line.strip().rstrip(",")
             if line.upper().startswith(("CONSTRAINT", "PRIMARY", "UNIQUE", "FOREIGN", "KEY", "CHECK", ")", "(", "/")):
                 continue
