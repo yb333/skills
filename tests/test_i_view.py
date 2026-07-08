@@ -24,6 +24,8 @@ FIXTURES = PROJECT_ROOT / "tests" / "fixtures" / "analyzer"
 sys.path.insert(0, str(ANALYZER_REF))
 sys.path.insert(0, str(FIXTURES))
 
+from _build_yml import build_yml_group
+
 from _build_repo import build_mock_repo
 
 
@@ -227,6 +229,94 @@ class TestIViewInAnalysisPipeline:
         field_names = {f.get("target_field") for f in step2_fields}
         assert "cust_id" in field_names or "total" in field_names, \
             f"I 视图字段应含 cust_id/total，实际 {field_names}"
+
+
+class TestExchangePartitionWithIView:
+    """交换分区 + I 视图组合场景（暴露过两个 bug 的关键回归用例）。
+
+    Bug1：加工方式显示"未知"——detect_load_strategy 把 I 视图步骤当 target_rule，
+          I 视图没 delete_mode → 未知。
+    Bug2：view_step 错位——用 exec_sequence 算 step_id，但 step_id 是按列表位置
+          生成的，两者不一定一致，导致 view_step 指向错误的步骤。
+    """
+
+    def _build_exchange_i_view_repo(self, tmp_path):
+        """构造：3步加工 + 交换分区 + I 视图。"""
+        repo = tmp_path / "repo"
+        (repo / "BFT").mkdir(parents=True)
+        view_dir = repo / "DDL" / "DWS_EDW" / "dws" / "view"
+        view_dir.mkdir(parents=True)
+        table_dir = repo / "DDL" / "DWS_EDW" / "dws" / "table"
+        table_dir.mkdir(parents=True)
+        group = repo / "BFT" / "grp"
+        build_yml_group(group, rules=[
+            {"rule_code": "R1", "rule_type": 1, "exec_sequence": 1,
+             "target_schema": "dws", "target_table": "tmp1", "delete_mode": "1",
+             "query_sql": "SELECT a.id, a.val FROM ods.src a",
+             "rule_name": "s1", "rule_group_code": "GR", "rule_group_en": "DWB_TEST_F"},
+            {"rule_code": "R3", "rule_type": 1, "exec_sequence": 3,
+             "target_schema": "dws", "target_table": "tmp_f", "delete_mode": "1",
+             "query_sql": "SELECT t.id, SUM(t.val) AS total FROM dws.tmp2 t GROUP BY t.id",
+             "rule_name": "s3", "rule_group_code": "GR", "rule_group_en": "DWB_TEST_F"},
+            {"rule_code": "R4", "rule_type": 9, "exec_sequence": 4,
+             "target_schema": "dws", "target_table": "tmp_f", "delete_mode": "",
+             "query_sql": "", "exchange_source_table": "dwb_test_f",
+             "rule_name": "交换", "rule_group_code": "GR", "rule_group_en": "DWB_TEST_F"},
+        ])
+        (view_dir / "dwb_test_i.sql").write_text(
+            "CREATE VIEW dws.dwb_test_i AS SELECT id, total FROM dws.dwb_test_f;",
+            encoding="utf-8")
+        (table_dir / "dwb_test_f.sql").write_text(
+            "CREATE TABLE dwb_test_f (id VARCHAR(64), total DECIMAL(18,2));",
+            encoding="utf-8")
+        return group
+
+    def test_load_strategy_not_unknown(self, tmp_path):
+        """Bug1 防回归：交换分区+I视图场景，加工方式不是'未知'。"""
+        from analyzer import main
+        import sys as _sys
+
+        group = self._build_exchange_i_view_repo(tmp_path)
+        old_argv = _sys.argv
+        _sys.argv = ["analyzer.py", "--input", str(group), "--output", str(tmp_path / "out")]
+        try:
+            main()
+        finally:
+            _sys.argv = old_argv
+
+        kj = json.loads((tmp_path / "out" / "DWB_TEST_F" /
+                         "knowledge_draft.json").read_text(encoding="utf-8"))
+        ls = kj["meta"]["load_strategy"]
+        assert ls["strategy"] != "unknown", \
+            f"加工方式不应是未知（I视图步骤不该干扰判断），实际 {ls}"
+
+    def test_view_step_matches_topology(self, tmp_path):
+        """Bug2 防回归：view_step 与 topology 里 I 视图的 step_id 一致。"""
+        from analyzer import main
+        import sys as _sys
+
+        group = self._build_exchange_i_view_repo(tmp_path)
+        old_argv = _sys.argv
+        _sys.argv = ["analyzer.py", "--input", str(group), "--output", str(tmp_path / "out")]
+        try:
+            main()
+        finally:
+            _sys.argv = old_argv
+
+        kj = json.loads((tmp_path / "out" / "DWB_TEST_F" /
+                         "knowledge_draft.json").read_text(encoding="utf-8"))
+        ai = kj["meta"].get("asset_info", {})
+        assert ai.get("view_step"), "应有 view_step"
+
+        # view_step 必须和 topology 里 I 视图步骤的 step_id 一致
+        view_step_in_topo = None
+        for s in kj["topology"]["steps"]:
+            if "_VIEW" in s.get("rule_code", ""):
+                view_step_in_topo = s["step_id"]
+                break
+        assert view_step_in_topo, "topology 里应有 I 视图步骤"
+        assert ai["view_step"] == view_step_in_topo, \
+            f"view_step({ai['view_step']}) 应与 topology({view_step_in_topo}) 一致"
 
 
 class TestIViewFieldPenetration:

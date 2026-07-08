@@ -1229,13 +1229,14 @@ def main():
                 raw["rules"].append(i_rule)
                 rules = raw["rules"]
                 # 记录 I 视图信息，供 knowledge.meta.asset_info
+                # 注意：view_step 不在这里算（exec_sequence≠step_id），等 topology 生成后取
                 i_view_info = {
                     "is_view": True,
                     "view_table": i_view["view_name"],
                     "view_schema": i_view["view_schema"],
                     "base_table": f_table,
                     "base_schema": f_schema,
-                    "view_step": f"step_{max_seq + 1}",
+                    "view_rule_code": f"{f_rule.rule_code}_VIEW",  # 用于从 topology 查 step_id
                 }
                 print(f"Step 2b: 发现 I 视图 {i_view['view_schema']}.{i_view['view_name']}")
                 print(f"  链路扩展: F表 {f_table} → I视图 {i_view['view_name']}")
@@ -1268,6 +1269,14 @@ def main():
     # 写入资产信息（I 视图标注，供 view_generator 渲染特殊样式）
     # excel 模式无 I 视图 → i_view_info 为 None → asset_info 不写入
     if i_view_info:
+        # 从 topology 取 I 视图步骤的正确 step_id（不自己算，避免 exec_sequence≠step_id 的错位）
+        view_rule_code = i_view_info.pop("view_rule_code", "")
+        view_step = ""
+        for s in topology["steps"]:
+            if s.get("rule_code") == view_rule_code:
+                view_step = s["step_id"]
+                break
+        i_view_info["view_step"] = view_step
         knowledge["meta"]["asset_info"] = i_view_info
     stats = field_mappings["statistics"]
     print(f"  步骤数: {len(rules)}, 字段数: {stats['total_in_sql']}, "

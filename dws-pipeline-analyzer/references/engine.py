@@ -5255,10 +5255,14 @@ def detect_load_strategy(rules: list) -> dict:
     INCREMENTAL_MODES = {"2", "4", "6"}  # 2追加/4DELETE/6MERGE 都归入增量
 
     # 找最终目标表步骤（max exec_sequence 的非中间表）
+    # 跳过 I 视图步骤（rule_code 含 _VIEW，它是视图封装不是加工步骤，无 delete_mode）
     # 如果最后一步是交换分区，往前找写入临时表的步骤
     target_rule = None
     exchange_rule = None
     for rule in reversed(rules):
+        # 跳过 I 视图步骤（视图封装，不是真正的加工步骤）
+        if "_VIEW" in (rule.rule_code or ""):
+            continue
         is_exchange = rule.rule_type == 9 and rule.exchange_source_table
         if is_exchange and not exchange_rule:
             exchange_rule = rule
@@ -5271,8 +5275,8 @@ def detect_load_strategy(rules: list) -> dict:
     if exchange_rule and not target_rule:
         temp_table = exchange_rule.target_table.lower()
         for rule in reversed(rules):
-            if rule.rule_type == 9:
-                continue
+            if rule.rule_type == 9 or "_VIEW" in (rule.rule_code or ""):
+                continue  # 跳过交换分区和视图步骤
             if rule.target_table and rule.target_table.lower() == temp_table:
                 target_rule = rule
                 break
