@@ -1225,6 +1225,7 @@ def main():
                     query_sql=i_view["view_sql"],
                     rule_group_code=f_rule.rule_group_code,
                     rule_group_en=f_rule.rule_group_en,
+                    is_view_step=True,  # 标记为视图步骤，下游统一读这个字段
                 )
                 raw["rules"].append(i_rule)
                 rules = raw["rules"]

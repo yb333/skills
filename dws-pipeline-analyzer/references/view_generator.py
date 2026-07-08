@@ -560,8 +560,8 @@ def build_report_data(knowledge):
             "purpose": ai_step.get("purpose", ""),
             "logic": ai_step.get("logic", ""),
             "raw_sql": df_step.get("raw_sql", ""),
-            # I 视图步骤标注（asset_info 里的 view_step 匹配则为视图封装步骤）
-            "is_view_step": asset_info.get("view_step") == step_id if asset_info else False,
+            # I 视图步骤标注：从 topology steps 的 is_view_step 取（统一真相源）
+            "is_view_step": s.get("is_view_step", False),
             "join_usage": df_step.get("join_usage", []),
             "where_usage": df_step.get("where_usage", []),
             "groupby_usage": df_step.get("groupby_usage", []),
@@ -691,6 +691,7 @@ def build_report_data(knowledge):
             "rule_name": s.get("rule_name", ""),
             "rule_code": s.get("rule_code", ""),
             "exec_sequence": s.get("exec_sequence", 0),
+            "is_view_step": s.get("is_view_step", False),  # 从 topology 传播（统一真相源）
             "join_paths": merged_jp,
             "join_key_lineage": df_step.get("join_key_lineage", {}),
         }
@@ -734,27 +735,25 @@ def build_report_data(knowledge):
     #   F 有 I 没有的字段追加并标注"未暴露"。不做场景区分，线性穿透。
     # 无 I 视图：以最终步骤字段为准（现有行为）。
     _base_table_norm = _norm(asset_info.get("base_table", "")) if asset_info else ""
-    _view_step = asset_info.get("view_step", "") if asset_info else ""
 
     # 收集 I 视图步骤和 F 表步骤的字段（用于穿透合并）
+    # 用 step_info_map 的 is_view_step 判断（统一真相源，不依赖 asset_info.view_step）
     view_fields = []   # I 视图步骤的字段
     base_fields = {}   # F 表步骤的字段（按字段名小写索引，用于穿透合并）
     other_fields = []  # 其他步骤的字段（中间过程）
+    has_view_step = any(si.get("is_view_step") for si in step_info_map.values())
     for f in fields_list:
         ps = f.get("producing_step", "")
-        if _view_step and ps == _view_step:
+        si_f = step_info_map.get(ps, {})
+        if has_view_step and si_f.get("is_view_step"):
             view_fields.append(f)
-        elif _base_table_norm:
-            si_f = step_info_map.get(ps, {})
-            if _norm(si_f.get("target_table", "")) == _base_table_norm:
-                base_fields[(f.get("target_field", "") or "").lower()] = f
-            else:
-                other_fields.append(f)
+        elif _base_table_norm and _norm(si_f.get("target_table", "")) == _base_table_norm:
+            base_fields[(f.get("target_field", "") or "").lower()] = f
         else:
             other_fields.append(f)
 
     # 合并后的字段列表：以 I 视图为基准，穿透 F 表链路
-    if _view_step and view_fields:
+    if has_view_step and view_fields:
         # I 视图字段为基准，穿透合并 F 表的同名字段信息
         merged_fields = []
         view_field_names = set()

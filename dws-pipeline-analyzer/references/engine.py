@@ -174,6 +174,7 @@ class RawRule:
     rule_group_code: str = ""
     rule_group_en: str = ""  # 规则组英文名称（每行，供批量按组命名目录）
     exchange_source_table: str = ""
+    is_view_step: bool = False  # I视图封装步骤标记（追加的视图步骤=True，正常规则=False）
 
 
 @dataclass
@@ -3300,6 +3301,7 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
             "all_tables_from_sql": all_sql_tables,
             "is_exchange": is_exchange,
             "exchange_temp_table": rule.target_table if is_exchange else "",  # 临时表名
+            "is_view_step": getattr(rule, "is_view_step", False),  # I视图封装步骤
         })
 
     # ── 调度图（执行序列直接读取）──
@@ -5260,8 +5262,8 @@ def detect_load_strategy(rules: list) -> dict:
     target_rule = None
     exchange_rule = None
     for rule in reversed(rules):
-        # 跳过 I 视图步骤（视图封装，不是真正的加工步骤）
-        if "_VIEW" in (rule.rule_code or ""):
+        # 跳过 I 视图步骤（视图封装，不是真正的加工步骤，不参与加工方式判断）
+        if getattr(rule, "is_view_step", False):
             continue
         is_exchange = rule.rule_type == 9 and rule.exchange_source_table
         if is_exchange and not exchange_rule:
@@ -5275,7 +5277,7 @@ def detect_load_strategy(rules: list) -> dict:
     if exchange_rule and not target_rule:
         temp_table = exchange_rule.target_table.lower()
         for rule in reversed(rules):
-            if rule.rule_type == 9 or "_VIEW" in (rule.rule_code or ""):
+            if rule.rule_type == 9 or getattr(rule, "is_view_step", False):
                 continue  # 跳过交换分区和视图步骤
             if rule.target_table and rule.target_table.lower() == temp_table:
                 target_rule = rule
