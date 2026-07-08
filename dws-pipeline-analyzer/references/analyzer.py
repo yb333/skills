@@ -685,17 +685,26 @@ def _extract_view_sql(view_content: str) -> str:
 
     CREATE VIEW xxx AS SELECT ... → 返回 SELECT ...
     CREATE OR REPLACE VIEW xxx AS SELECT ... → 同上
+
+    只提取 AS 后的 SELECT 语句，截断后续的 COMMENT/CREATE 等语句
+    （视图 DDL 文件常含 COMMENT ON COLUMN，不能混入 query_sql）。
     """
     import re
-    # 匹配 CREATE [OR REPLACE] VIEW xxx AS 后面的 SELECT 部分
+    # 匹配 CREATE [OR REPLACE] VIEW xxx AS 后面的内容
     m = re.search(
         r'CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+\S+\s+AS\s+(.*)',
         view_content, re.IGNORECASE | re.DOTALL
     )
-    if m:
-        sql = m.group(1).strip().rstrip(";").strip()
-        return sql
-    return ""
+    if not m:
+        return ""
+    sql = m.group(1).strip()
+    # 截断到第一个独立语句结束（SELECT 的分号），去掉后续的 COMMENT/CREATE 等。
+    # SELECT 语句里可能有子查询含分号？不会——SQL 里分号只出现在语句末尾。
+    # 但 CTE/WHERE 里不会有分号，所以按分号截断是安全的。
+    first_semicolon = sql.find(";")
+    if first_semicolon >= 0:
+        sql = sql[:first_semicolon]
+    return sql.strip()
 
 
 def _find_view_by_name(view_dir: Path, view_name_lower: str) -> Path | None:

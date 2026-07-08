@@ -845,6 +845,20 @@ def parse_single_sql(sql: str, dialect: str = "dws") -> ParsedSQL:
     clean = _replace_placeholders(clean)
     clean = clean.strip().rstrip(";").strip()
 
+    # 防御：如果 SQL 含多条语句（DDL 文件被误传，含 COMMENT/CREATE 等），
+    # 只保留 SELECT/WITH 语句。COMMENT ON COLUMN 的双引号会导致 sqlglot
+    # ParseError，必须在解析前去掉。
+    if ";" in clean:
+        stmts = [s.strip() for s in clean.split(";") if s.strip()]
+        select_stmts = [s for s in stmts
+                        if s.upper().startswith(("SELECT", "WITH"))]
+        if select_stmts:
+            clean = "; ".join(select_stmts)
+        elif stmts and not stmts[0].upper().startswith(("SELECT", "WITH")):
+            # 整个 SQL 不是 SELECT（如纯 DDL），标记错误
+            result.parse_error = "非 SELECT/WITH 语句（DDL？）"
+            return result
+
     # 在清理注释之前，先提取 SQL 注释中的字段名映射
     # 用于给无别名的列（审计字段等）赋予正确名称
     comment_alias_map = _extract_comment_aliases(sql)
