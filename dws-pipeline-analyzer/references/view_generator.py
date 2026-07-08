@@ -726,19 +726,67 @@ def build_report_data(knowledge):
     fields_out = []
     seen_fields_lower = {}  # {field_lower: idx}
 
-    # 先按 exec_sequence 排序，最终步骤优先。
-    # I 视图场景特殊处理：F 表字段优先于 I 视图字段（F 表有加工逻辑/类型，
-    # I 视图只是继承），所以有 asset_info 时 base_table 步骤的字段排前面。
+    # ── 字段排序 + 去重 + I 视图穿透合并 ──
+    # 统一原则：以最终目标为终点展示字段。
+    # I 视图场景：以 I 视图字段为基准（对外终点），F 表字段穿透合并进来，
+    #   F 有 I 没有的字段追加并标注"未暴露"。不做场景区分，线性穿透。
+    # 无 I 视图：以最终步骤字段为准（现有行为）。
     _base_table_norm = _norm(asset_info.get("base_table", "")) if asset_info else ""
-    def _field_sort_key(f):
-        si = step_info_map.get(f.get("producing_step", ""), {})
-        seq = si.get("exec_sequence", 0)
-        table = _norm(si.get("target_table", ""))
-        # I 视图场景：F 表字段优先（排前面），其他按 exec_sequence 倒序
-        if _base_table_norm and table == _base_table_norm:
-            return (1, -seq)  # F 表字段排最前
-        return (0, -seq)
-    sorted_fields = sorted(fields_list, key=_field_sort_key, reverse=True)
+    _view_step = asset_info.get("view_step", "") if asset_info else ""
+
+    # 收集 I 视图步骤和 F 表步骤的字段（用于穿透合并）
+    view_fields = []   # I 视图步骤的字段
+    base_fields = {}   # F 表步骤的字段（按字段名小写索引，用于穿透合并）
+    other_fields = []  # 其他步骤的字段（中间过程）
+    for f in fields_list:
+        ps = f.get("producing_step", "")
+        if _view_step and ps == _view_step:
+            view_fields.append(f)
+        elif _base_table_norm:
+            si_f = step_info_map.get(ps, {})
+            if _norm(si_f.get("target_table", "")) == _base_table_norm:
+                base_fields[(f.get("target_field", "") or "").lower()] = f
+            else:
+                other_fields.append(f)
+        else:
+            other_fields.append(f)
+
+    # 合并后的字段列表：以 I 视图为基准，穿透 F 表链路
+    if _view_step and view_fields:
+        # I 视图字段为基准，穿透合并 F 表的同名字段信息
+        merged_fields = []
+        view_field_names = set()
+        for vf in view_fields:
+            fname_lower = (vf.get("target_field", "") or "").lower()
+            view_field_names.add(fname_lower)
+            bf = base_fields.get(fname_lower)  # F 表同名字段
+            if bf:
+                # 穿透合并：用 F 表的 transform_type/field_type/field_comment/lineage
+                # （F 表是加工终点，有完整血缘和类型），但 producing_step 标记为 I 视图
+                merged = dict(vf)  # 以 I 视图字段为基准
+                merged["transform_type"] = bf.get("transform_type", vf.get("transform_type", "expression"))
+                merged["field_type"] = bf.get("field_type", "") or vf.get("field_type", "")
+                merged["field_comment"] = bf.get("field_comment", "") or vf.get("field_comment", "")
+                merged["lineage"] = bf.get("lineage", vf.get("lineage", []))  # F 表的链路
+                merged["physical_source"] = bf.get("physical_source", vf.get("physical_source", []))
+                merged["is_view_inherited"] = True  # 标注：穿透自 F 表
+                merged_fields.append(merged)
+            else:
+                # I 有 F 没有：I 视图有额外逻辑
+                vf["is_view_extra"] = True  # 标注：I 视图独有
+                merged_fields.append(vf)
+
+        # F 有 I 没有：追加并标注"F 表有但 I 视图未暴露"
+        for bfname, bf in base_fields.items():
+            if bfname not in view_field_names:
+                bf["is_base_only"] = True  # 标注：F 有 I 没有
+                merged_fields.append(bf)
+
+        sorted_fields = merged_fields + other_fields
+    else:
+        # 无 I 视图：现有行为（按 exec_sequence 倒序去重）
+        sorted_fields = sorted(fields_list,
+            key=lambda f: -step_info_map.get(f.get("producing_step", ""), {}).get("exec_sequence", 0))
 
     for f in sorted_fields:
         fname = f.get("target_field", "")
@@ -799,6 +847,10 @@ def build_report_data(knowledge):
             "in_target_fields": f.get("in_target_fields", False),
             "excel_source_field": f.get("excel_source_field", ""),
             "sources": sources,
+            # I 视图穿透标注（无 asset_info 时这些都不存在，兼容 excel 模式）
+            "is_view_inherited": f.get("is_view_inherited", False),  # 穿透自F表
+            "is_view_extra": f.get("is_view_extra", False),          # I视图独有
+            "is_base_only": f.get("is_base_only", False),            # F有I没有
         })
 
     # ── field_chain_map (字段 → 完整链路树，供详情面板用) ──

@@ -227,3 +227,92 @@ class TestIViewInAnalysisPipeline:
         field_names = {f.get("target_field") for f in step2_fields}
         assert "cust_id" in field_names or "total" in field_names, \
             f"I 视图字段应含 cust_id/total，实际 {field_names}"
+
+
+class TestIViewFieldPenetration:
+    """I 视图字段穿透合并（以 I 为终点，F 表字段穿透上来）。
+
+    核心原则：资产终点 = I 视图，加工终点 = F 表。
+    字段以 I 为基准，F 表的 transform_type/类型/链路穿透合并进来，
+    不做场景区分，线性穿透。
+    """
+
+    def test_view_inherited_fields_merged(self, mock_repo, tmp_path):
+        """I 和 F 都有的字段：穿透合并，transform_type 取 F 表的。"""
+        from analyzer import main
+        from view_generator import build_report_data
+        import sys as _sys
+
+        f_group = mock_repo["f_group_dir"]
+        old_argv = _sys.argv
+        _sys.argv = ["analyzer.py", "--input", str(f_group), "--output", str(tmp_path / "out")]
+        try:
+            main()
+        finally:
+            _sys.argv = old_argv
+
+        kj = json.loads((tmp_path / "out" / "DWB_TRADE_SUM_F" /
+                         "knowledge_draft.json").read_text(encoding="utf-8"))
+        report = build_report_data(kj)
+
+        # total 字段：F 表是 aggregate（SUM），I 视图是 direct，穿透后应为 aggregate
+        total_field = next((f for f in report["fields"]
+                            if f["target_field"] == "total"), None)
+        assert total_field, "应有 total 字段"
+        assert total_field["transform_type"] == "aggregate", \
+            f"穿透后 transform_type 应为 aggregate（F表的），实际 {total_field['transform_type']}"
+        assert total_field.get("is_view_inherited"), "应标注穿透自F表"
+
+        # 不应有两个 total 字段（去重合并）
+        total_count = sum(1 for f in report["fields"] if f["target_field"] == "total")
+        assert total_count == 1, f"total 应只有1个（合并），实际 {total_count}"
+
+    def test_view_inherited_fields_final(self, mock_repo, tmp_path):
+        """穿透后的字段 is_final_field=True（以 I 视图为终点）。"""
+        from analyzer import main
+        from view_generator import build_report_data
+        import sys as _sys
+
+        f_group = mock_repo["f_group_dir"]
+        old_argv = _sys.argv
+        _sys.argv = ["analyzer.py", "--input", str(f_group), "--output", str(tmp_path / "out")]
+        try:
+            main()
+        finally:
+            _sys.argv = old_argv
+
+        kj = json.loads((tmp_path / "out" / "DWB_TRADE_SUM_F" /
+                         "knowledge_draft.json").read_text(encoding="utf-8"))
+        report = build_report_data(kj)
+
+        for f in report["fields"]:
+            if f.get("is_view_inherited"):
+                assert f["is_final_field"], \
+                    f"穿透字段 {f['target_field']} 应 is_final_field=True"
+
+    def test_no_view_no_penetration(self, mock_repo, tmp_path):
+        """无 I 视图时（excel 模式或 F 表无视图），不做穿透合并。"""
+        from analyzer import main
+        from view_generator import build_report_data
+        import sys as _sys
+
+        # DWB_TRADE_ORDER_D 不以 _f 结尾，无 I 视图发现
+        group = mock_repo["group_dir"]
+        old_argv = _sys.argv
+        _sys.argv = ["analyzer.py", "--input", str(group), "--output", str(tmp_path / "out")]
+        try:
+            main()
+        finally:
+            _sys.argv = old_argv
+
+        kj = json.loads((tmp_path / "out" / "DWB_TRADE_ORDER_D" /
+                         "knowledge_draft.json").read_text(encoding="utf-8"))
+        report = build_report_data(kj)
+
+        # 无 I 视图 → 无穿透标注
+        for f in report["fields"]:
+            assert not f.get("is_view_inherited"), \
+                f"无 I 视图时不应有穿透标注: {f['target_field']}"
+            assert not f.get("is_view_extra")
+            assert not f.get("is_base_only")
+
