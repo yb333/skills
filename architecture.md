@@ -298,19 +298,20 @@ commands/（每个command = 一个完整任务工作流）
 
 ## 11. 待实施：I 视图 + LTS 调度
 
-### I 视图（资产是对外 I 视图，不是 F 表）
+### I 视图（资产是对外 I 视图，不是 F 表）✅ 已实现
 
 **背景**：资产是 I 视图（dwb_xxx_i），F 表只是底表。现有分析只到 F 表，缺 F→I 这一段。
 - 绝大多数 I 视图：直封（SELECT * FROM dwb_xxx_f），命名规则 _f→_i
 - 少量 I 视图：有逻辑，命名可能不规律
 
-**方案**：I 视图作为规则组最后一步加入分析链路（F→I）
+**已实现**（discover_i_view + analyzer main Step 2b）：
 - 发现策略：两步走
   - Step1 按名字找（_f→_i，覆盖95%直封，快路径）
-  - Step2 名字没找到→全局搜索 view/ 目录里 FROM 引用 F 表的（兜底，覆盖命名不规律的）
-- I 视图定义在 DDL/{层}/{schema}/view/ 下（现有 DDL 发现只找 table/，需扩展到 view/）
+  - Step2 名字没找到→全局搜索 view/ 目录里 FROM 引用 F 表的（兜底）
+- 只有 _f 结尾的表才触发 I 视图发现（非 _f 表如 _d 不触发）
+- I 视图作为最后一步追加到 rules（F→I），target_table 变成 I 视图
+- DDL 发现返回 schema 目录（rglob 递归扫 table/ + view/）
 - 找不到 I 视图→以 F 表为终点（容错，不阻塞）
-- view/ 目录规模：每 schema 几百个，全局搜索可接受（只匹配 FROM 子句）
 
 **完整链路**：ODS → F表（加工） → I视图（封装） → 对外资产
 

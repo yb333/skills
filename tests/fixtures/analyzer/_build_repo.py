@@ -181,6 +181,45 @@ def build_mock_repo(base_dir):
                   allow_unicode=True, sort_keys=False),
         encoding="utf-8")
 
+    # ════════════════════════════════════════════════════════════
+    # 6. I 视图测试数据（F 表 → I 视图链路）
+    #    规则组写 _f 表，对应 _i 视图在 DDL/.../view/ 下
+    # ════════════════════════════════════════════════════════════
+    # F 表规则组
+    f_group_dir = (repo / "BFT" / "BftWideTable" / "P_TRADE" / "SUB_TRADE"
+                   / "DWB_TRADE_SUM_F")
+    build_yml_group(f_group_dir, rules=[
+        {"rule_code": "F001", "rule_type": 1, "exec_sequence": 1,
+         "target_schema": "dws", "target_table": "dwb_trade_sum_f", "delete_mode": "1",
+         "query_sql": "SELECT a.cust_id, SUM(a.amount) AS total FROM ods.ods_trade a GROUP BY a.cust_id",
+         "rule_name": "交易汇总", "rule_group_code": "GR_TRADE_SUM",
+         "rule_group_en": "DWB_TRADE_SUM_F"},
+    ])
+
+    # F 表 DDL
+    (ddl_table_dir / "dwb_trade_sum_f.sql").write_text(
+        "CREATE TABLE dws.dwb_trade_sum_f (\n"
+        "  cust_id VARCHAR(64),\n"
+        "  total DECIMAL(18,2)\n"
+        ");\n"
+        "COMMENT ON COLUMN dws.dwb_trade_sum_f.cust_id IS '客户ID';\n"
+        "COMMENT ON COLUMN dws.dwb_trade_sum_f.total IS '交易总额';\n",
+        encoding="utf-8")
+
+    # I 视图（直封：SELECT * FROM F 表）—— 命名规则 _f → _i
+    ddl_view_dir = repo / "DDL" / "DWS_EDW" / "dws" / "view"
+    ddl_view_dir.mkdir(parents=True, exist_ok=True)
+    (ddl_view_dir / "dwb_trade_sum_i.sql").write_text(
+        "CREATE OR REPLACE VIEW dws.dwb_trade_sum_i AS\n"
+        "SELECT cust_id, total FROM dws.dwb_trade_sum_f;\n",
+        encoding="utf-8")
+
+    # I 视图（有逻辑的，命名不规律）—— 用于测试全局搜索来源表
+    (ddl_view_dir / "v_trade_summary.sql").write_text(
+        "CREATE VIEW dws.v_trade_summary AS\n"
+        "SELECT cust_id, total, 'Y' AS is_active FROM dws.dwb_risk_alert_f;\n",
+        encoding="utf-8")
+
     return {
         "repo_root": repo,
         "group_dir": group1_dir,
@@ -188,4 +227,9 @@ def build_mock_repo(base_dir):
         "ddl_file": ddl_table_dir / "dwb_trade_order_d.sql",
         "other_group_dir": group2_dir,
         "metric_group_dir": metric_dir,
+        # I 视图测试数据
+        "f_group_dir": f_group_dir,
+        "f_table": "dwb_trade_sum_f",
+        "i_view_name": "dwb_trade_sum_i",
+        "ddl_view_dir": ddl_view_dir,
     }

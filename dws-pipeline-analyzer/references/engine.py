@@ -4924,7 +4924,18 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
     result: dict[str, dict] = {}
     target_lower = target_table.lower()
 
-    for sql_file in ddl_path.glob("*.sql"):
+    # 递归扫描（rglob）：支持 ddl_dir 是 table/ 或 schema/（含 table/+view/ 子目录）
+    # 多扩展名：.sql/.ddl/.txt（大小写不敏感）
+    sql_files = []
+    for ext in ("*.sql", "*.ddl", "*.txt", "*.SQL", "*.DDL", "*.TXT"):
+        sql_files.extend(ddl_path.rglob(ext))
+    # 去重
+    seen = set()
+    for sql_file in sql_files:
+        real = str(sql_file.resolve())
+        if real in seen:
+            continue
+        seen.add(real)
         content = sql_file.read_text(encoding="utf-8", errors="ignore")
         content_lower = content.lower()
 

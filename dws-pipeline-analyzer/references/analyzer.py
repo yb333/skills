@@ -636,7 +636,9 @@ def _auto_discover_ddl_from_repo(yml_dir: Path, rules: list) -> str:
         table_dir = schema_dir / "table"
         if table_dir.is_dir():
             if _find_ddl_file(table_dir, table_lower):
-                return str(table_dir)
+                # 返回 schema 目录（而非 table 目录），parse_ddl 用 rglob 递归扫描，
+                # 能同时覆盖 table/（F表DDL）和 view/（I视图DDL）
+                return str(schema_dir)
     return ""
 
 
@@ -671,6 +673,156 @@ def _find_ddl_file(table_dir: Path, table_lower: str) -> Path | None:
     for f in files:  # 优先级3：包含（容错前缀后缀，但要求表名足够长避免误匹配）
         if len(table_lower) >= 4 and table_lower in f.stem.lower():
             return f
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════
+# I 视图发现（资产是 I 视图，F 表是底表，分析链路需补 F→I 这一段）
+# ═══════════════════════════════════════════════════════════════
+
+def _extract_view_sql(view_content: str) -> str:
+    """从 CREATE VIEW 文件内容里提取 SELECT 语句。
+
+    CREATE VIEW xxx AS SELECT ... → 返回 SELECT ...
+    CREATE OR REPLACE VIEW xxx AS SELECT ... → 同上
+    """
+    import re
+    # 匹配 CREATE [OR REPLACE] VIEW xxx AS 后面的 SELECT 部分
+    m = re.search(
+        r'CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+\S+\s+AS\s+(.*)',
+        view_content, re.IGNORECASE | re.DOTALL
+    )
+    if m:
+        sql = m.group(1).strip().rstrip(";").strip()
+        return sql
+    return ""
+
+
+def _find_view_by_name(view_dir: Path, view_name_lower: str) -> Path | None:
+    """在 view/ 目录里按视图名找 DDL 文件（复用 _find_ddl_file 的匹配逻辑）。"""
+    return _find_ddl_file(view_dir, view_name_lower)
+
+
+def _search_view_by_source(view_dirs: list, f_table_full: str) -> tuple | None:
+    """全局搜索 view/ 目录，找 CREATE VIEW ... FROM ... f_table 的视图。
+
+    遍历所有 view_dir 下的 .sql/.ddl 文件，匹配 FROM 子句引用了 f_table 的。
+    用于命名不规律的 I 视图（Step 2 兜底）。
+
+    Returns: (view_file_path, view_name) 或 None
+    """
+    import re
+    f_table_lower = f_table_full.lower()
+    # 也匹配不带 schema 的表名（FROM dwb_xxx_f / FROM dws.dwb_xxx_f）
+    f_table_short = f_table_lower.split(".")[-1]
+
+    for view_dir in view_dirs:
+        if not view_dir.is_dir():
+            continue
+        for ext in ("*.sql", "*.ddl", "*.SQL", "*.DDL"):
+            for vf in view_dir.glob(ext):
+                try:
+                    content = vf.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+                content_lower = content.lower()
+                if "create view" not in content_lower and "create or replace view" not in content_lower:
+                    continue
+                # 检查 FROM 子句是否引用了 F 表
+                if f_table_lower in content_lower or f_table_short in content_lower:
+                    # 提取视图名（CREATE VIEW 视图名 AS）
+                    nm = re.search(
+                        r'CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+(\S+)',
+                        content, re.IGNORECASE
+                    )
+                    view_name = nm.group(1) if nm else vf.stem
+                    return (vf, view_name)
+    return None
+
+
+def discover_i_view(yml_dir: Path, f_schema: str, f_table: str) -> dict | None:
+    """发现 F 表对应的 I 视图（两步走策略）。
+
+    资产是 I 视图（dwb_xxx_i），F 表是底表。此函数找到 I 视图的 CREATE VIEW
+    定义，返回视图信息供分析链路追加 F→I 步骤。
+
+    两步走发现：
+      Step 1: 按名字快速找（_f → _i，覆盖95%直封，快路径）
+      Step 2: 名字没找到 → 全局搜索 view/ 里 FROM 引用 F 表的（兜底）
+
+    Args:
+        yml_dir: 规则组目录（用于向上找代码仓根）
+        f_schema: F 表的 schema（如 dws）
+        f_table: F 表名（如 dwb_trade_order_f）
+
+    Returns: {
+        "view_name": 视图名（如 dwb_trade_order_i）,
+        "view_sql": SELECT 语句（从 CREATE VIEW 提取）,
+        "view_schema": schema,
+        "ddl_path": DDL 文件路径,
+    } 或 None（找不到 I 视图，以 F 表为终点）
+    """
+    repo_root = _find_repo_root(yml_dir)
+    if not repo_root:
+        return None
+
+    # 推导 I 视图名：_f → _i（_F → _I 大小写容错）
+    # 只有 _f 结尾的表才找 I 视图（资产 = I 视图，F 表是底表）
+    # 非 _f 表（如 dwb_xxx_d）不做 I 视图发现
+    f_table_lower = f_table.lower()
+    if f_table_lower.endswith("_f"):
+        i_table = f_table[:-2] + "_i"
+    else:
+        return None  # 非 _f 表不找 I 视图
+
+    i_table_lower = (i_table or "").lower()
+    schema_lower = f_schema.lower() if f_schema else ""
+
+    # 收集所有层的 view 目录
+    view_dirs = []
+    for layer in ("DWS_EDW", "DWS_RT_EDW"):
+        ddl_root = repo_root / "DDL" / layer
+        if not ddl_root.is_dir():
+            continue
+        # schema 目录大小写容错
+        if schema_lower:
+            for sd in ddl_root.iterdir():
+                if sd.is_dir() and sd.name.lower() == schema_lower:
+                    vd = sd / "view"
+                    if vd.is_dir():
+                        view_dirs.append(vd)
+                    break
+
+    # Step 1: 按名字快速找
+    if i_table_lower:
+        for vd in view_dirs:
+            vf = _find_view_by_name(vd, i_table_lower)
+            if vf:
+                content = vf.read_text(encoding="utf-8", errors="ignore")
+                view_sql = _extract_view_sql(content)
+                if view_sql:
+                    return {
+                        "view_name": i_table,
+                        "view_sql": view_sql,
+                        "view_schema": f_schema,
+                        "ddl_path": str(vf),
+                    }
+
+    # Step 2: 全局搜索来源表（兜底）
+    f_full = f"{f_schema}.{f_table}" if f_schema else f_table
+    result = _search_view_by_source(view_dirs, f_full)
+    if result:
+        vf, view_name = result
+        content = vf.read_text(encoding="utf-8", errors="ignore")
+        view_sql = _extract_view_sql(content)
+        if view_sql:
+            return {
+                "view_name": view_name,
+                "view_sql": view_sql,
+                "view_schema": f_schema,
+                "ddl_path": str(vf),
+            }
+
     return None
 
 
@@ -937,6 +1089,43 @@ def main():
         dialect = detect_dialect(sql_texts)
     print(f"Step 2: 方言 = {dialect}")
     print()
+
+    # ── Step 2b: I 视图发现（yml 场景，资产是 I 视图不是 F 表）──
+    # F 表是加工底表，I 视图是对外资产。发现 I 视图后追加为链路最后一步（F→I），
+    # 使完整链路为 ODS→F表→I视图。找不到 I 视图→以 F 表为终点（容错，不阻塞）。
+    if is_yml_mode and rules:
+        # 取最终目标表（max exec_sequence 的 F 表）
+        from engine import _is_intermediate_table, RawRule
+        f_rule = None
+        for rule in reversed(rules):
+            if not _is_intermediate_table(rule.target_table):
+                f_rule = rule
+                break
+        if f_rule and f_rule.target_table:
+            i_view = discover_i_view(input_path, f_rule.target_schema, f_rule.target_table)
+            if i_view:
+                # 追加 I 视图作为最后一步
+                max_seq = max((r.exec_sequence for r in rules), default=0)
+                i_rule = RawRule(
+                    rule_code=f"{f_rule.rule_code}_VIEW",
+                    rule_name=f"{f_rule.rule_name}（I视图）",
+                    rule_type=1,
+                    exec_sequence=max_seq + 1,
+                    target_schema=i_view["view_schema"],
+                    target_table=i_view["view_name"],
+                    delete_mode="",
+                    query_sql=i_view["view_sql"],
+                    rule_group_code=f_rule.rule_group_code,
+                    rule_group_en=f_rule.rule_group_en,
+                )
+                raw["rules"].append(i_rule)
+                rules = raw["rules"]
+                print(f"Step 2b: 发现 I 视图 {i_view['view_schema']}.{i_view['view_name']}")
+                print(f"  链路扩展: F表 {f_rule.target_table} → I视图 {i_view['view_name']}")
+                print()
+            else:
+                print(f"Step 2b: 未找到 I 视图（以 F 表 {f_rule.target_table} 为终点）")
+                print()
 
     # ── DDL 发现 ──
     # yml 场景：从代码仓根定位 DDL/{DWS_EDW|DWS_RT_EDW}/{schema}/table/{target_table}.sql

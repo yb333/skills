@@ -74,8 +74,8 @@ class TestDdlAutoDiscovery:
         assert ddl_dir != "", "应找到 DDL 目录"
         # 找到的 DDL 目录应在 DWS_EDW 下（离线层优先）
         assert "DWS_EDW" in ddl_dir, f"应优先找 DWS_EDW，实际 {ddl_dir}"
-        # DDL 文件存在
-        ddl_file = Path(ddl_dir) / "dwb_trade_order_d.sql"
+        # DDL 文件存在（现在返回 schema 目录，DDL 在 table/ 子目录下，rglob 递归扫描）
+        ddl_file = Path(ddl_dir) / "table" / "dwb_trade_order_d.sql"
         assert ddl_file.exists()
 
     def test_ddl_finds_offline_not_realtime(self, mock_repo):
