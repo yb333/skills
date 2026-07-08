@@ -5224,17 +5224,23 @@ def _is_precision_change(type1: str, type2: str) -> bool:
 
 
 def detect_load_strategy(rules: list) -> dict:
-    """判断资产的加工方式（增量/全量/分区/追加）。
+    """判断资产的加工方式（增量/全量/分区全量）。
 
-    判断依据：最终目标表（F表）相关步骤的 delete_mode。
-    交换分区（rule_type=9）的特殊处理：F表本身的 delete_mode 可能为空，
-    需要看交换分区步骤的操作。
+    三种分类：
+      full        全量（TRUNCATE 整表后重写）
+      incremental 增量（DELETE/MERGE/追加，按条件写入或只增不改）
+      partition   分区全量（TRUNCATE PARTITION，按分区粒度的全量覆写）
+
+    判断依据：最终目标表相关步骤的 delete_mode。
+    交换分区（rule_type=9）的特殊处理：交换分区只是一种写入技术手段
+    （为了业务无感/减少不可用时间），不是加工方式的判断依据。
+    需要往前推导——看写入临时表（交换源）那一步的 delete_mode。
 
     Returns: {
-        "strategy": "full" | "incremental" | "partition" | "append" | "unknown",
-        "label": "全量" | "增量" | "分区级" | "追加" | "未知",
+        "strategy": "full" | "incremental" | "partition" | "unknown",
+        "label": "全量" | "增量" | "分区全量" | "未知",
         "detail": str,              # 判断依据说明
-        "delete_mode": str,         # 最终步骤的 delete_mode
+        "delete_mode": str,         # 判断所依据的 delete_mode
         "delete_mode_label": str,   # delete_mode 的中文标签
     }
     """
@@ -5242,55 +5248,63 @@ def detect_load_strategy(rules: list) -> dict:
         return {"strategy": "unknown", "label": "未知", "detail": "无规则",
                 "delete_mode": "", "delete_mode_label": ""}
 
-    # 找最终目标表（max exec_sequence 的非中间表，考虑交换分区）
+    # delete_mode → 加工方式映射（三类）
+    # 1=TRUNCATE 全量, 2=追加(归入增量), 3/5=分区全量, 4=DELETE增量, 6=MERGE增量
+    FULL_MODES = {"1"}
+    PARTITION_MODES = {"3", "5"}
+    INCREMENTAL_MODES = {"2", "4", "6"}  # 2追加/4DELETE/6MERGE 都归入增量
+
+    # 找最终目标表步骤（max exec_sequence 的非中间表）
+    # 如果最后一步是交换分区，往前找写入临时表的步骤
     target_rule = None
+    exchange_rule = None
     for rule in reversed(rules):
         is_exchange = rule.rule_type == 9 and rule.exchange_source_table
-        if is_exchange:
-            # 交换分区：真正目标表是 exchange_source_table，操作本身是这一步
-            target_rule = rule
-            break
+        if is_exchange and not exchange_rule:
+            exchange_rule = rule
+            continue  # 交换分区不是判断依据，往前找
         if not _is_intermediate_table(rule.target_table):
             target_rule = rule
             break
 
+    # 交换分区场景：往前找写入临时表（exchange 的 target_table）的步骤
+    if exchange_rule and not target_rule:
+        temp_table = exchange_rule.target_table.lower()
+        for rule in reversed(rules):
+            if rule.rule_type == 9:
+                continue
+            if rule.target_table and rule.target_table.lower() == temp_table:
+                target_rule = rule
+                break
+
     if not target_rule:
-        target_rule = rules[-1]
+        target_rule = exchange_rule or rules[-1]
 
     dm = (target_rule.delete_mode or "").strip()
     dm_label = DELETE_MODE_MAP.get(dm, f"delete_mode={dm}" if dm else "未配置")
-
-    # delete_mode → 加工方式映射
-    # 1=TRUNCATE 全量, 2=追加, 3/5=分区级, 4=DELETE增量, 6=MERGE增量, 7=特殊
-    FULL_MODES = {"1"}
-    APPEND_MODES = {"2"}
-    PARTITION_MODES = {"3", "5"}
-    INCREMENTAL_MODES = {"4", "6"}
+    dc = (target_rule.delete_condition or "").strip()
 
     if dm in FULL_MODES:
         strategy, label = "full", "全量"
-        detail = f"TRUNCATE TABLE（先清空整表再写入），{dm_label}"
-    elif dm in APPEND_MODES:
-        strategy, label = "append", "追加"
-        detail = f"NO DELETE（不删只追加），{dm_label}"
+        detail = f"TRUNCATE TABLE（先清空整表再写入）"
     elif dm in PARTITION_MODES:
-        strategy, label = "partition", "分区级"
-        dc = (target_rule.delete_condition or "").strip()
-        detail = f"分区级写入（{dm_label}）" + (f"，分区条件：{dc}" if dc else "")
+        strategy, label = "partition", "分区全量"
+        detail = f"分区级覆写（{dm_label}）" + (f"，分区条件：{dc}" if dc else "")
     elif dm in INCREMENTAL_MODES:
         strategy, label = "incremental", "增量"
-        dc = (target_rule.delete_condition or "").strip()
-        if dm == "6":
-            detail = f"MERGE INTO（增量合并/upsert），{dm_label}"
+        if dm == "2":
+            detail = f"追加写入（不删只加）"
+        elif dm == "6":
+            detail = f"MERGE INTO（增量合并/upsert）"
         else:
             detail = f"按条件删除后写入（{dm_label}）" + (f"，删除条件：{dc}" if dc else "")
-    elif target_rule.rule_type == 9:
-        # 交换分区无 delete_mode，但本质是分区级全量（把临时表数据交换到分区表）
-        strategy, label = "partition", "分区级"
-        detail = f"交换分区（{target_rule.exchange_source_table}），分区级全量"
     else:
         strategy, label = "unknown", "未知"
         detail = f"无法确定加工方式，{dm_label}"
+
+    # 交换分区补充说明（不影响 strategy，只补充 detail）
+    if exchange_rule:
+        detail += f"，通过交换分区写入（{exchange_rule.exchange_source_table}）"
 
     return {
         "strategy": strategy,

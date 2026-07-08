@@ -43,26 +43,46 @@ class TestDetectLoadStrategy:
         assert "MERGE" in result["detail"]
 
     def test_truncate_partition(self):
-        """delete_mode=5 TRUNCATE PARTITION → 分区级。"""
+        """delete_mode=5 TRUNCATE PARTITION → 分区全量。"""
         rule = RawRule(rule_type=1, target_table="dwb_f", delete_mode="5",
                        delete_condition="p202401")
         result = detect_load_strategy([rule])
         assert result["strategy"] == "partition"
-        assert "p202401" in result["detail"]
+        assert result["label"] == "分区全量"
 
-    def test_no_delete_append(self):
-        """delete_mode=2 NO DELETE → 追加。"""
+    def test_no_delete_append_is_incremental(self):
+        """delete_mode=2 NO DELETE → 追加，归入增量。"""
         rule = RawRule(rule_type=1, target_table="dwb_f", delete_mode="2")
         result = detect_load_strategy([rule])
-        assert result["strategy"] == "append"
+        assert result["strategy"] == "incremental", "追加应归入增量"
 
-    def test_exchange_partition(self):
-        """交换分区（rule_type=9）无 delete_mode → 分区级。"""
-        rule = RawRule(rule_type=9, target_table="tmp_f",
-                       exchange_source_table="dwb_f", delete_mode="")
-        result = detect_load_strategy([rule])
-        assert result["strategy"] == "partition"
-        assert "交换分区" in result["detail"]
+    def test_exchange_partition_traces_back_incremental(self):
+        """交换分区往前推导：前步增量 → 增量（不看交换分区本身）。"""
+        rules = [
+            RawRule(rule_code="R1", rule_type=1, exec_sequence=1,
+                    target_table="tmp_f", delete_mode="4",
+                    delete_condition="etl_date='20240101'"),
+            RawRule(rule_code="R2", rule_type=9, exec_sequence=2,
+                    target_table="tmp_f", exchange_source_table="dwb_f",
+                    delete_mode=""),
+        ]
+        result = detect_load_strategy(rules)
+        assert result["strategy"] == "incremental", \
+            "交换分区应往前推导，前步增量→增量"
+        assert "交换分区" in result["detail"], "detail 应提及交换分区"
+
+    def test_exchange_partition_traces_back_full(self):
+        """交换分区往前推导：前步全量 → 全量。"""
+        rules = [
+            RawRule(rule_code="R1", rule_type=1, exec_sequence=1,
+                    target_table="tmp_f", delete_mode="1"),
+            RawRule(rule_code="R2", rule_type=9, exec_sequence=2,
+                    target_table="tmp_f", exchange_source_table="dwb_f",
+                    delete_mode=""),
+        ]
+        result = detect_load_strategy(rules)
+        assert result["strategy"] == "full", \
+            "交换分区应往前推导，前步全量→全量"
 
     def test_no_delete_mode_unknown(self):
         """无 delete_mode → 未知。"""
