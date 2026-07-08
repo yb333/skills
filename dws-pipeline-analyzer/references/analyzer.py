@@ -1093,6 +1093,7 @@ def main():
     # ── Step 2b: I 视图发现（yml 场景，资产是 I 视图不是 F 表）──
     # F 表是加工底表，I 视图是对外资产。发现 I 视图后追加为链路最后一步（F→I），
     # 使完整链路为 ODS→F表→I视图。找不到 I 视图→以 F 表为终点（容错，不阻塞）。
+    i_view_info = None  # 记录 I 视图信息，供后续写入 knowledge.meta.asset_info
     if is_yml_mode and rules:
         # 取最终目标表（max exec_sequence 的 F 表）
         from engine import _is_intermediate_table, RawRule
@@ -1120,6 +1121,15 @@ def main():
                 )
                 raw["rules"].append(i_rule)
                 rules = raw["rules"]
+                # 记录 I 视图信息，供 knowledge.meta.asset_info
+                i_view_info = {
+                    "is_view": True,
+                    "view_table": i_view["view_name"],
+                    "view_schema": i_view["view_schema"],
+                    "base_table": f_rule.target_table,
+                    "base_schema": f_rule.target_schema,
+                    "view_step": f"step_{max_seq + 1}",
+                }
                 print(f"Step 2b: 发现 I 视图 {i_view['view_schema']}.{i_view['view_name']}")
                 print(f"  链路扩展: F表 {f_rule.target_table} → I视图 {i_view['view_name']}")
                 print()
@@ -1148,6 +1158,10 @@ def main():
     field_mappings = knowledge["field_mappings"]
     quality = knowledge["quality"]
     target_name = knowledge["meta"]["target_table"]
+    # 写入资产信息（I 视图标注，供 view_generator 渲染特殊样式）
+    # excel 模式无 I 视图 → i_view_info 为 None → asset_info 不写入
+    if i_view_info:
+        knowledge["meta"]["asset_info"] = i_view_info
     stats = field_mappings["statistics"]
     print(f"  步骤数: {len(rules)}, 字段数: {stats['total_in_sql']}, "
           f"问题数: {len(quality['issues'])}")

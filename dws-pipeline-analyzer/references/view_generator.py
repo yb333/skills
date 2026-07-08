@@ -477,6 +477,8 @@ def build_report_data(knowledge):
 
     cm = quality.get("complexity_metrics", {})
     scenarios = topo.get("scenarios", [])
+    # 资产信息（I 视图标注，excel 模式无此信息则不标注）
+    asset_info = meta.get("asset_info", {})
     summary = {
         "target_table": target_table,
         "table_cn_name": bl.get("summary", "").split("，")[0] if bl.get("summary") else "",
@@ -496,6 +498,8 @@ def build_report_data(knowledge):
             "total_source_tables": cm.get("total_source_tables", 0),
             "total_case_when_branches": cm.get("total_case_when_branches", 0),
         },
+        # I 视图资产信息（is_view=True 时前端渲染视图标注，否则不渲染）
+        "asset_info": asset_info,
     }
 
     # ── lineage (分层布局) ──
@@ -554,6 +558,8 @@ def build_report_data(knowledge):
             "purpose": ai_step.get("purpose", ""),
             "logic": ai_step.get("logic", ""),
             "raw_sql": df_step.get("raw_sql", ""),
+            # I 视图步骤标注（asset_info 里的 view_step 匹配则为视图封装步骤）
+            "is_view_step": asset_info.get("view_step") == step_id if asset_info else False,
             "join_usage": df_step.get("join_usage", []),
             "where_usage": df_step.get("where_usage", []),
             "groupby_usage": df_step.get("groupby_usage", []),

@@ -346,6 +346,7 @@ body {
 .lineage-svg .node-rect.cte         { fill: var(--node-cte-fill); stroke: var(--node-cte-stroke); }
 .lineage-svg .node-rect.step        { fill: var(--node-step-fill); stroke: var(--node-step-stroke); }
 .lineage-svg .node-rect.step-delete { fill: #fee2e2; stroke: #ef4444; stroke-width: 2; }
+.lineage-svg .node-rect.step-view   { fill: #e0e7ff; stroke: #4338ca; stroke-dasharray: 5,3; }
 .lineage-svg .node-rect.target      { fill: var(--node-target-fill); stroke: var(--node-target-stroke); }
 .lineage-svg .node-rect.downstream  { fill: var(--node-downstream-fill); stroke: var(--node-downstream-stroke); }
 
@@ -1508,6 +1509,17 @@ function renderHeader() {
   if (s.target_table) {
     html += '<div class="header-table-name">' + escapeHtml(s.target_table) + '</div>';
   }
+  // I 视图标注：资产是视图时显示视图类型 + 底表（excel 模式无 asset_info 不显示）
+  var ai = s.asset_info || {};
+  if (ai.is_view) {
+    html += '<div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">';
+    html += '<span style="display:inline-block;padding:2px 10px;border-radius:4px;font-size:12px;font-weight:600;color:#4338ca;background:#e0e7ff;border:1px dashed #818cf8;">视图资产</span>';
+    if (ai.base_table) {
+      var baseFull = (ai.base_schema ? ai.base_schema + '.' : '') + ai.base_table;
+      html += '<span style="font-size:12px;color:var(--text-muted);">底表：' + escapeHtml(baseFull) + '</span>';
+    }
+    html += '</div>';
+  }
 
   html += '<div class="header-meta">';
   html += '<div class="meta-item"><span>生成时间</span> <span class="meta-value">' + formatDateTime(s.generated_at) + '</span></div>';
@@ -1696,9 +1708,15 @@ function renderLineage() {
     var isDelete = (nodeType === 'step' && n.step_data && n.step_data.rule_type === 2);
     var deleteClass = isDelete ? ' step-delete' : '';
     var deleteBadge = isDelete ? ' <text x="' + (n.x + n.width - 45) + '" y="' + (n.y + 12) + '" font-size="9" fill="#ef4444" font-weight="bold">DELETE</text>' : '';
-    svg += '<rect class="node-rect ' + nodeType + primaryClass + deleteClass + '" x="' + n.x + '" y="' + n.y + '" width="' + n.width + '" height="' + n.height + '"/>';
+    // I 视图步骤节点用虚线框样式
+    var viewStepIds = (REPORT_DATA.steps || []).filter(function(s) { return s.is_view_step; }).map(function(s) { return s.step_id; });
+    var isView = (nodeType === 'step' && n.step_data && viewStepIds.indexOf(n.step_data.step_id) >= 0);
+    var viewClass = isView ? ' step-view' : '';
+    var viewBadge = isView ? ' <text x="' + (n.x + n.width - 30) + '" y="' + (n.y + 12) + '" font-size="9" fill="#4338ca" font-weight="bold">VIEW</text>' : '';
+    svg += '<rect class="node-rect ' + nodeType + primaryClass + deleteClass + viewClass + '" x="' + n.x + '" y="' + n.y + '" width="' + n.width + '" height="' + n.height + '"/>';
     if (primaryBadge) svg += primaryBadge;
     if (deleteBadge) svg += deleteBadge;
+    if (viewBadge) svg += viewBadge;
 
     var pad = 6;
     svg += '<foreignObject x="' + (n.x + pad) + '" y="' + (n.y + 2) + '" width="' + Math.max(10, n.width - pad * 2) + '" height="' + Math.max(10, n.height - 4) + '">';
@@ -1993,6 +2011,10 @@ function renderSteps() {
     }
     html += '<span class="step-title">' + escapeHtml(step.rule_name || step.step_id || '?');
     if (step.rule_code) html += ' <span style="color:var(--text-muted);font-weight:400;font-size:12px;">(' + escapeHtml(step.rule_code) + ')</span>';
+    // I 视图步骤标注
+    if (step.is_view_step) {
+      html += ' <span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600;color:#4338ca;background:#e0e7ff;border:1px dashed #818cf8;vertical-align:middle;margin-left:4px;">视图封装</span>';
+    }
     html += '</span>';
     html += '</div>';
     // Right side: delete_mode_label + exec_sequence
@@ -2170,6 +2192,10 @@ function renderFieldMapping() {
     html += '<tr data-field="' + escapeHtml(f.target_field) + '" onmouseup="if(!window.getSelection().toString())openDetail(\'' + escapeHtml(f.target_field) + '\')" style="cursor:pointer;' + (f.is_final_field === false ? 'opacity:0.6;' : '') + '">';
     html += '<td style="font-size:12px;color:var(--text-muted);">' + (fi + 1) + '</td>';
     var fieldBadge = f.is_final_field === false ? ' <span style="font-size:9px;padding:1px 5px;border-radius:4px;background:#fef9c3;color:#854d0e;vertical-align:middle;">中间过程</span>' : '';
+    // I 视图步骤的字段标注"继承"（直封字段来自底表）
+    if (st && st.is_view_step) {
+      fieldBadge += ' <span style="font-size:9px;padding:1px 5px;border-radius:4px;background:#e0e7ff;color:#4338ca;vertical-align:middle;">继承</span>';
+    }
     html += '<td><span class="field-name">' + escapeHtml(f.target_field) + '</span>' + fieldBadge + '</td>';
     html += '<td><span class="field-type">' + escapeHtml(f.field_type || sf.type || '-') + '</span></td>';
     html += '<td><span style="font-size:12px;color:var(--text-secondary);">' + escapeHtml(f.field_comment || sf.meaning || '-') + '</span></td>';
