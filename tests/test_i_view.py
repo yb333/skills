@@ -318,6 +318,34 @@ class TestExchangePartitionWithIView:
         assert ai["view_step"] == view_step_in_topo, \
             f"view_step({ai['view_step']}) 应与 topology({view_step_in_topo}) 一致"
 
+    def test_field_type_with_exchange_partition(self, tmp_path):
+        """防回归：交换分区+I视图场景，交换分区步骤的字段有类型（从F表DDL注入）。
+
+        历史 bug：_auto_discover_ddl_from_repo 和 build_table_catalog 都不看
+        exchange_source_table，交换分区场景下 F表DDL找不到 → catalog为空 →
+        字段类型全空。
+        """
+        from analyzer import main
+        import sys as _sys
+
+        group = self._build_exchange_i_view_repo(tmp_path)
+        old_argv = _sys.argv
+        _sys.argv = ["analyzer.py", "--input", str(group), "--output", str(tmp_path / "out")]
+        try:
+            main()
+        finally:
+            _sys.argv = old_argv
+
+        kj = json.loads((tmp_path / "out" / "DWB_TEST_F" /
+                         "knowledge_draft.json").read_text(encoding="utf-8"))
+        # 交换分区步骤的字段应有类型（从 F 表 DDL 注入）
+        fields = kj["field_mappings"]["fields"]
+        exchange_fields = [f for f in fields
+                           if f.get("producing_step") == "step_3"]  # step_3 是交换分区
+        # 至少有字段带类型（id/total）
+        typed = [f for f in exchange_fields if f.get("field_type")]
+        assert typed, "交换分区步骤的字段应有类型（从F表DDL注入），不能全空"
+
 
 class TestIViewFieldPenetration:
     """I 视图字段穿透合并（以 I 为终点，F 表字段穿透上来）。

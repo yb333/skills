@@ -3586,6 +3586,11 @@ def build_field_mappings(
         # 本步骤写入的目标表 → 从 catalog 查 DDL 字段结构
         table_key = _normalize_table_name(rule.target_schema, rule.target_table).lower()
         table_ddl = table_catalog.get(table_key, {})
+        # 交换分区：target_table 是临时表，exchange_source_table 才是真正的 F 表
+        # F 表的字段结构用于字段类型下注
+        if not table_ddl and rule.rule_type == 9 and rule.exchange_source_table:
+            ex_key = _normalize_table_name(rule.target_schema, rule.exchange_source_table).lower()
+            table_ddl = table_catalog.get(ex_key, {})
         step_ddl_map[step_id] = table_ddl
         parsed = parsed_map.get(rc)
 
@@ -5097,21 +5102,29 @@ def build_table_catalog(rules: list, ddl_dir: str) -> dict:
 
     catalog = {}
     for rule in rules:
-        if not rule.target_table:
-            continue
-        full_table = _normalize_table_name(rule.target_schema, rule.target_table)
-        table_key = full_table.lower()  # catalog key 用全限定小写
+        # 收集这一步涉及的所有表名（target_table + 交换分区的 exchange_source_table）
+        tables_to_parse = []
+        if rule.target_table:
+            tables_to_parse.append((rule.target_schema, rule.target_table))
+        # 交换分区：exchange_source_table 是真正的目标表（F表），必须纳入 catalog
+        if rule.rule_type == 9 and rule.exchange_source_table:
+            tables_to_parse.append((rule.target_schema, rule.exchange_source_table))
 
-        if table_key in catalog:
-            continue  # 同一张表（多步写同一表）不重复解析
+        for schema, table in tables_to_parse:
+            if not table:
+                continue
+            full_table = _normalize_table_name(schema, table)
+            table_key = full_table.lower()
 
-        try:
-            meta = parse_ddl_for_metadata(ddl_dir, rule.target_table)
-            if meta:
-                catalog[table_key] = meta
-        except Exception:
-            # 单表解析失败不影响其他表（DDL 是可选增强）
-            continue
+            if table_key in catalog:
+                continue  # 同一张表不重复解析
+
+            try:
+                meta = parse_ddl_for_metadata(ddl_dir, table)
+                if meta:
+                    catalog[table_key] = meta
+            except Exception:
+                continue
 
     return catalog
 

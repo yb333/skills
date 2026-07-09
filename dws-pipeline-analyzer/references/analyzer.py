@@ -645,17 +645,29 @@ def _auto_discover_ddl_from_repo(yml_dir: Path, rules: list) -> str:
     if not repo_root:
         return ""
 
-    # 取目标表信息（取最后一个非中间表，跳过 I 视图步骤——视图在 view/ 目录不在 table/）
+    # 取目标表信息，优先级：
+    # 1. 交换分区的 exchange_source_table（交换分区时真正目标表）
+    # 2. 最后一个非中间表、非视图步骤的 target_table
+    # 3. 兜底：最后一个规则的 target_table
     target_schema = ""
     target_table = ""
     from engine import _is_intermediate_table
+    # 先找交换分区的 exchange_source_table
     for rule in reversed(rules):
-        if getattr(rule, "is_view_step", False):
-            continue  # 跳过 I 视图步骤（它的 DDL 在 view/ 不是 table/）
-        if not _is_intermediate_table(rule.target_table):
+        if rule.rule_type == 9 and rule.exchange_source_table:
             target_schema = rule.target_schema
-            target_table = rule.target_table
+            target_table = rule.exchange_source_table
             break
+    # 没有交换分区，找最后一个非中间表
+    if not target_table:
+        for rule in reversed(rules):
+            if getattr(rule, "is_view_step", False):
+                continue
+            if not _is_intermediate_table(rule.target_table):
+                target_schema = rule.target_schema
+                target_table = rule.target_table
+                break
+    # 兜底
     if not target_table and rules:
         target_schema = rules[-1].target_schema
         target_table = rules[-1].target_table
