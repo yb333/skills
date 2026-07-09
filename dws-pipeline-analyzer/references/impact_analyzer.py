@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from openpyxl.styles import Alignment
+
 # ═══════════════════════════════════════════════════════════════
 # 数据类
 # ═══════════════════════════════════════════════════════════════
@@ -1130,18 +1132,57 @@ def render_excel(result: AnalysisResult, output_path: str, asset_name: str = "")
 
 
 def _auto_width(ws):
-    """简单自动列宽"""
+    """自适应列宽：按列头语义 + 内容长度，设合理宽度，长文本列自动换行。
+
+    策略：
+      - 短内容列（状态/严重度/类型等）：取内容最大长度 + padding
+      - 长文本列（说明/原因/路径/还原方案）：限宽 40-45，开自动换行
+      - 中等内容列（表名/字段名/变化类型）：取内容长度，上限 25
+    """
+    # 长文本列名（内容可能很长，限宽+换行）
+    LONG_TEXT_COLS = {"说明", "影响说明", "原因", "传播路径", "还原方案", "还原方案详细说明", "说明"}
+    # 中等内容列名（表名/字段名等，上限 25）
+    MEDIUM_COLS = {"目标表", "源表", "切换后表", "变化类型", "目标字段", "源字段",
+                   "切换前表名", "切换后表名", "涉及步骤", "规则编码", "去哪看"}
+    # 短内容列名（固定窄列）
+    SHORT_COLS = {"状态", "严重度", "类型", "是否平切", "受影响字段数", "序号",
+                  "是否可还原(Y/N)", "命中源数"}
+
+    from openpyxl.utils import get_column_letter
+
     for col_cells in ws.columns:
-        max_len = 0
+        if not col_cells:
+            continue
         col_letter = col_cells[0].column_letter
-        for cell in col_cells:
+        header = str(col_cells[0].value or "")
+
+        # 计算内容最大长度（考虑换行取最长行）
+        max_len = len(header)
+        for cell in col_cells[1:]:
             try:
                 val = str(cell.value or "")
-                # 考虑换行：取最长行
-                max_len = max(max_len, max((len(line) for line in val.split("\n")), default=0))
+                longest_line = max((len(line) for line in val.split("\n")), default=0)
+                # 中文按2算宽度
+                cn_count = sum(1 for c in val if '\u4e00' <= c <= '\u9fff')
+                adjusted = longest_line + cn_count
+                max_len = max(max_len, adjusted)
             except Exception:
                 pass
-        ws.column_dimensions[col_letter].width = min(max_len + 4, 60)
+
+        if header in LONG_TEXT_COLS:
+            width = min(max(max_len + 2, 20), 45)
+            # 长文本列开自动换行
+            for cell in col_cells[1:]:
+                cell.alignment = Alignment(wrap_text=True, vertical="center")
+        elif header in MEDIUM_COLS:
+            width = min(max(max_len + 2, 12), 25)
+        elif header in SHORT_COLS:
+            width = max(min(max_len + 4, 18), 8)
+        else:
+            # 兜底：内容长度 + padding，上限 30
+            width = min(max(max_len + 2, 10), 30)
+
+        ws.column_dimensions[col_letter].width = width
 
 
 # ═══════════════════════════════════════════════════════════════
