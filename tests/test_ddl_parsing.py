@@ -261,3 +261,91 @@ COMMENT ON COLUMN t.amount IS "金额";"""
         meta = parse_ddl_for_metadata(str(ddl_dir), "dwb_cust_f")
         assert "cust_id" in meta
         assert "order_id" not in meta
+
+
+# ═══════════════════════════════════════════════════════════════
+# 类型长度保留（回归测试：字符类型不能丢长度）
+# ═══════════════════════════════════════════════════════════════
+
+class TestTypeLengthPreservation:
+    """字符类型必须保留类型名+长度，不能被截断。
+
+    背景：character varying(20) / nvarchar(10) 等类型如果丢失长度，
+    会直接影响字段类型变化的影响判定和质量评估。
+    """
+
+    def test_nvarchar_keeps_length(self, tmp_path):
+        """nvarchar(50) 不能变成 nvarchar 或 character。"""
+        ddl_dir = _write_ddl(tmp_path, "test_f",
+            "CREATE TABLE test_f (user_name nvarchar(50) NOT NULL);")
+        meta = parse_ddl_for_metadata(ddl_dir, "test_f")
+        assert meta["user_name"]["type"] == "nvarchar(50)", \
+            f"nvarchar(50) 长度丢失: {meta['user_name']['type']}"
+
+    def test_varchar_keeps_length(self, tmp_path):
+        """varchar(20) 保留长度。"""
+        ddl_dir = _write_ddl(tmp_path, "test_f",
+            "CREATE TABLE test_f (phone varchar(20));")
+        meta = parse_ddl_for_metadata(ddl_dir, "test_f")
+        assert meta["phone"]["type"] == "varchar(20)"
+
+    def test_character_varying_keeps_length(self, tmp_path):
+        """character varying(100) 两段式类型名+长度都要保留。"""
+        ddl_dir = _write_ddl(tmp_path, "test_f",
+            "CREATE TABLE test_f (email character varying(100));")
+        meta = parse_ddl_for_metadata(ddl_dir, "test_f")
+        t = meta["email"]["type"].lower()
+        assert "varying" in t, f"character varying 丢了 varying: {t}"
+        assert "100" in t, f"character varying 丢了长度: {t}"
+
+    def test_character_varying_uppercase(self, tmp_path):
+        """CHARACTER VARYING(30) 大写也能解析。"""
+        ddl_dir = _write_ddl(tmp_path, "test_f",
+            "CREATE TABLE test_f (name CHARACTER VARYING(30));")
+        meta = parse_ddl_for_metadata(ddl_dir, "test_f")
+        t = meta["name"]["type"].lower()
+        assert "varying" in t and "30" in t
+
+    def test_nvarchar2_keeps_length(self, tmp_path):
+        """NVARCHAR2(10) 含数字的类型名也要保留。"""
+        ddl_dir = _write_ddl(tmp_path, "test_f",
+            "CREATE TABLE test_f (code NVARCHAR2(10));")
+        meta = parse_ddl_for_metadata(ddl_dir, "test_f")
+        assert "10" in meta["code"]["type"], \
+            f"NVARCHAR2(10) 长度丢失: {meta['code']['type']}"
+
+    def test_numeric_keeps_precision(self, tmp_path):
+        """numeric(18,2) 精度参数保留（原有能力，防回归）。"""
+        ddl_dir = _write_ddl(tmp_path, "test_f",
+            "CREATE TABLE test_f (amount numeric(18,2));")
+        meta = parse_ddl_for_metadata(ddl_dir, "test_f")
+        assert meta["amount"]["type"] == "numeric(18,2)"
+
+    def test_type_not_eaten_by_default(self, tmp_path):
+        """类型后跟 DEFAULT，类型不能把 DEFAULT 吃进去。"""
+        ddl_dir = _write_ddl(tmp_path, "test_f",
+            "CREATE TABLE test_f (status integer DEFAULT 0);")
+        meta = parse_ddl_for_metadata(ddl_dir, "test_f")
+        assert meta["status"]["type"] == "integer", \
+            f"类型被 DEFAULT 污染: {meta['status']['type']}"
+
+    def test_type_not_eaten_by_not_null(self, tmp_path):
+        """类型后跟 NOT NULL，类型不能把 NOT NULL 吃进去。"""
+        ddl_dir = _write_ddl(tmp_path, "test_f",
+            "CREATE TABLE test_f (user_name nvarchar(50) NOT NULL);")
+        meta = parse_ddl_for_metadata(ddl_dir, "test_f")
+        assert meta["user_name"]["type"] == "nvarchar(50)", \
+            f"类型被 NOT NULL 污染: {meta['user_name']['type']}"
+
+    def test_all_char_types_mixed(self, tmp_path):
+        """三种字符类型混在一个 DDL 里都正确。"""
+        ddl_dir = _write_ddl(tmp_path, "test_f",
+            "CREATE TABLE test_f (\n"
+            "  a nvarchar(10),\n"
+            "  b character varying(20),\n"
+            "  c varchar(30)\n"
+            ");")
+        meta = parse_ddl_for_metadata(ddl_dir, "test_f")
+        assert meta["a"]["type"] == "nvarchar(10)"
+        assert "varying" in meta["b"]["type"].lower() and "20" in meta["b"]["type"]
+        assert meta["c"]["type"] == "varchar(30)"

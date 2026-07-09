@@ -5000,8 +5000,19 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
         if not body:
             continue
 
-        pattern = r'^\s*([a-z_][a-z0-9_]*)\s+([a-zA-Z][a-zA-Z0-9]*(?:\([^)]*\))?)'
+        # 字段名 + 类型：类型可含空格（如 "character varying"）和括号参数（如 (10) 或 (18,2)）
+        # 字段名允许大写（DDL 导出可能全大写）
+        pattern = r'^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s+(.+)'
         skip_words = ('create', 'table', 'view', 'as', 'select', 'from', 'where', 'and', 'or')
+        # 类型后面可能跟的约束关键字（NOT NULL / DEFAULT / PRIMARY / COMMENT 等）
+        # 类型匹配到这里为止，避免把约束也吃进类型里
+        _TYPE_STOP_RE = re.compile(
+            r'\s+(?:NOT\s+NULL|NULL|DEFAULT|PRIMARY\s+KEY|REFERENCES|COMMENT|CHECK|UNIQUE)'
+            r'\b', re.IGNORECASE
+        )
+        # 纯类型名 + 括号参数的提取：从类型字符串里取"类型名 + 可选(参数)"
+        # 贪婪匹配类型名（含空格如 "character varying"，含数字如 "nvarchar2"）
+        _TYPE_RE = re.compile(r'^([a-zA-Z][a-zA-Z0-9\s]*[a-zA-Z0-9])(\s*\([^)]*\))?')
 
         # 按顶层逗号拆分字段定义（不拆类型里的逗号如 DECIMAL(18,2)）
         # 用括号深度判断：只在 depth==0 的逗号处拆分
@@ -5043,7 +5054,20 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
                 fname = m_re.group(1).lower()
                 if fname in skip_words:
                     continue
-                ftype = m_re.group(2)
+                raw_type = m_re.group(2)
+
+                # 从 raw_type 里提取干净的类型名 + 参数：
+                # 1. 先在约束关键字处截断（去掉 NOT NULL / DEFAULT 等）
+                stop_m = _TYPE_STOP_RE.search(raw_type)
+                type_str = raw_type[:stop_m.start()].strip() if stop_m else raw_type.strip()
+                # 2. 再用正则提取"类型名 + 可选(参数)"，去掉行内注释/多余空格
+                type_m = _TYPE_RE.match(type_str)
+                if type_m:
+                    type_name = type_m.group(1).strip()
+                    type_params = (type_m.group(2) or "").strip()
+                    ftype = (type_name + type_params).strip()
+                else:
+                    ftype = type_str.split()[0] if type_str.split() else ""
 
                 # 尝试提取行内注释：/* 中文名 */ 或 -- 中文名
                 # 注意：-- 注释要排除引号内的 --（如 DEFAULT 'http://--test'），
