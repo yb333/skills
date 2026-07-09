@@ -490,3 +490,71 @@ SELECT a.id FROM cte_a a"""
             f"cte_b 是 CTE 名不应出现在 tables，实际 {table_names}"
         # 真正的物理源表 t2 应在
         assert "t2" in table_names
+
+
+# ═══════════════════════════════════════════════════════════════
+# 注释含分号（回归测试：注释里的分号不能截断 SQL）
+# ═══════════════════════════════════════════════════════════════
+
+class TestCommentSemicolon:
+    """注释（-- 行注释 / /* */ 块注释）里包含分号时，不能导致 SQL 被错误分割。
+
+    背景：parse_single_sql 在 split(";") 前会先剔注释。
+    如果忘了剔注释，注释里的分号会把 SQL 截断，JOIN 表名全部丢失，
+    最终导致影响分析静默失效（全部未命中）。
+    """
+
+    def test_line_comment_with_semicolon(self):
+        """行注释含分号：JOIN 表不能丢失。"""
+        sql = """SELECT a.user_id, a.amount, b.product_name
+FROM ods.user_src a
+-- 这个表;很关键;来自DWD层
+LEFT JOIN ods.product_src b ON a.product_id = b.product_id
+WHERE a.del_flag = 'N'"""
+        parsed = parse(sql)
+        tables = source_tables(parsed)
+        assert "ods.user_src" in " ".join(tables), f"user_src 应在 {tables}"
+        assert any("product_src" in t for t in tables), \
+            f"product_src 不应因注释分号丢失，实际 {tables}"
+
+    def test_block_comment_with_semicolon(self):
+        """块注释含分号：JOIN 表不能丢失。"""
+        sql = """SELECT a.user_id, b.product_name
+FROM ods.user_src a
+/* 这个块注释;包含分号 */
+LEFT JOIN ods.product_src b ON a.product_id = b.product_id"""
+        parsed = parse(sql)
+        tables = source_tables(parsed)
+        assert len(tables) >= 2, f"块注释分号导致表丢失，实际 {tables}"
+        assert any("product_src" in t for t in tables)
+
+    def test_mixed_comments_with_semicolon(self):
+        """混合注释都含分号：所有表都应在。"""
+        sql = """SELECT a.id, b.name
+FROM ods.src_a a
+-- 注释;有分号
+JOIN ods.src_b b ON a.id = b.id
+/* 块注释;也有分号 */
+WHERE a.flag = 1"""
+        parsed = parse(sql)
+        tables = source_tables(parsed)
+        assert any("src_a" in t for t in tables), f"src_a 应在 {tables}"
+        assert any("src_b" in t for t in tables), f"src_b 不应丢失 {tables}"
+
+    def test_comment_with_semicolon_no_parse_error(self):
+        """注释含分号不应导致解析报错。"""
+        sql = """SELECT a.id FROM ods.tbl_a a
+-- 备注;分号
+WHERE a.flag = 1"""
+        parsed = parse(sql)
+        assert not parsed.parse_error, f"不应有解析错误: {parsed.parse_error}"
+
+    def test_normal_comment_without_semicolon_still_works(self):
+        """正常注释（无分号）不受影响。"""
+        sql = """SELECT a.id, b.name
+FROM ods.src_a a
+-- 正常注释无分号
+JOIN ods.src_b b ON a.id = b.id"""
+        parsed = parse(sql)
+        tables = source_tables(parsed)
+        assert len(tables) == 2

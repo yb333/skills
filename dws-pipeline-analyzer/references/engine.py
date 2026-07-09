@@ -151,6 +151,10 @@ _PARAM_PLACEHOLDER = re.compile(r"\$\{[^}]+\}")
 # 平台变量替换语法: #var_name = value# （成对的 # 包裹）
 _PLATFORM_VAR_PATTERN = re.compile(r"#[^#]*?#", re.DOTALL)
 _INLINE_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+# 行注释：-- 到行尾（-- 后至少一个空格或直接到行尾，兼容 --xxx 和 -- xxx）
+_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
+# 块注释：/* */（非贪婪，跨行）
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 
 # ═══════════════════════════════════════════════════════════════
 # 数据类
@@ -341,6 +345,21 @@ def _read_query_sql(row: tuple, col_idx: dict) -> str:
 
 _SYSDATE_PATTERN = re.compile(r"\bSYSDATE\s*\(\s*\)", re.IGNORECASE)
 _SYSDATE_NOPAREN_PATTERN = re.compile(r"\bSYSDATE\b(?!\s*\()", re.IGNORECASE)
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """剔除 SQL 注释（行注释 -- 和块注释 /* */）。
+
+    必须在按分号分割语句之前调用——注释里的分号会导致 split(";")
+    错误截断 SQL，使截断点之后的 FROM/JOIN 表名全部丢失。
+
+    注意：字符串字面量内的 -- 或 /* 不应被误删，但 SQL 查询里
+    字符串包含注释语法的场景极少，MVP 不做字符串感知的剔除。
+    """
+    # 先剔块注释（可能跨行），再剔行注释
+    sql = _BLOCK_COMMENT_RE.sub(" ", sql)
+    sql = _LINE_COMMENT_RE.sub("", sql)
+    return sql
 
 
 def _strip_dws_clauses(sql: str) -> str:
@@ -841,8 +860,10 @@ def parse_single_sql(sql: str, dialect: str = "dws") -> ParsedSQL:
     """
     result = ParsedSQL(raw_sql=sql)
 
-    # 预处理：清理 DWS 语法 + 替换占位符
-    clean = _strip_dws_clauses(sql)
+    # 预处理：先剔注释（必须在分号分割之前，否则注释里的分号会截断 SQL）
+    # 再清理 DWS 语法 + 替换占位符
+    clean = _strip_sql_comments(sql)
+    clean = _strip_dws_clauses(clean)
     clean = _replace_placeholders(clean)
     clean = clean.strip().rstrip(";").strip()
 

@@ -759,9 +759,11 @@ def _extract_view_sql(view_content: str) -> str:
     if not m:
         return ""
     sql = m.group(1).strip()
-    # 截断到第一个独立语句结束（SELECT 的分号），去掉后续的 COMMENT/CREATE 等。
-    # SELECT 语句里可能有子查询含分号？不会——SQL 里分号只出现在语句末尾。
-    # 但 CTE/WHERE 里不会有分号，所以按分号截断是安全的。
+    # 先剔除注释（行注释 -- 和块注释 /* */），避免注释里的分号
+    # 导致 find(";") 提前截断，丢失后续 JOIN 的表名
+    sql = re.sub(r"--[^\n]*", "", sql)            # 行注释
+    sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)  # 块注释
+    # 截断到第一个独立语句结束（SELECT 的分号），去掉后续的 COMMENT/CREATE 等
     first_semicolon = sql.find(";")
     if first_semicolon >= 0:
         sql = sql[:first_semicolon]

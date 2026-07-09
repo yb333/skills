@@ -60,6 +60,28 @@ class TestExtractViewSql:
         sql = _extract_view_sql("CREATE TABLE t (a INT)")
         assert sql == ""
 
+    def test_comment_semicolon_not_truncate(self):
+        """注释含分号不应截断视图 SQL（回归测试）。"""
+        from analyzer import _extract_view_sql
+        sql = _extract_view_sql(
+            "CREATE VIEW v AS SELECT a.id, b.name "
+            "FROM ods.src_a a\n"
+            "-- 备注;含分号\n"
+            "LEFT JOIN ods.src_b b ON a.id = b.id"
+        )
+        assert "src_b" in sql, f"注释分号导致 JOIN 表丢失: {sql}"
+
+    def test_block_comment_semicolon_not_truncate(self):
+        """块注释含分号不应截断视图 SQL。"""
+        from analyzer import _extract_view_sql
+        sql = _extract_view_sql(
+            "CREATE VIEW v AS SELECT a.id "
+            "FROM ods.src_a a\n"
+            "/* 块注释;含分号 */\n"
+            "LEFT JOIN ods.src_b b ON a.id = b.id"
+        )
+        assert "src_b" in sql, f"块注释分号导致 JOIN 表丢失: {sql}"
+
 
 class TestDiscoverIView:
     """I 视图发现（两步走）。"""
