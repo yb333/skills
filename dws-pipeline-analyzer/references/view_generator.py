@@ -1372,34 +1372,22 @@ def _build_lineage_layout(topo, df, bl=None):
     node_meta = {}
     node_id_counter = 0
 
-    # 找出"多步骤串行写同一目标表"的场景：这些步骤需要错行避免连线交叉
-    # key: norm(target_table), value: 写它的步骤列表（按 exec_sequence 排序）
-    target_writers = {}
-    for s in steps_list:
-        tf = _norm(_schema_table(s.get("target_schema", ""), s.get("target_table", "")))
-        target_writers.setdefault(tf, []).append(s["step_id"])
-    # 只有写同一 target 的步骤 > 1 个时，第 2 个开始需要错行
-    stagger_steps = set()  # 需要下移的 step_id
-    for tf, writer_ids in target_writers.items():
-        if len(writer_ids) > 1:
-            # 按 exec_sequence 排序，奇数位（第2、4...个）下移
-            sorted_writers = sorted(writer_ids, key=lambda sid: step_seq_map.get(sid, 0))
-            for i, sid in enumerate(sorted_writers):
-                if i % 2 == 1:  # 第2、4...个错行
-                    stagger_steps.add(sid)
-
+    # 同列节点按自然顺序垂直排列即可避免重叠。
+    # 不再用 stagger_steps 固定偏移（多场景同 exec_sequence 时会导致位置撞车）。
     for col in sorted(col_nodes.keys()):
         x = col_to_x.get(col, MARGIN_LEFT)
-        col_nids = sorted(col_nodes[col], key=lambda n: (nodes[n]["type"] != "step", n))
+        # 排序：步骤在前（按 exec_sequence + step_id），表在后
+        col_nids = sorted(col_nodes[col], key=lambda n: (
+            nodes[n]["type"] != "step",  # step 排前面
+            step_seq_map.get(n, 0) if nodes[n]["type"] == "step" else 0,
+            n,  # step_id 兜底（同 exec_sequence 时按 step_id 排序，保证唯一顺序）
+        ))
         col_count = len(col_nids)
         total_h = col_count * (NODE_HEIGHT + NODE_GAP) - NODE_GAP
         start_y = max(MARGIN_TOP, (total_height - total_h) / 2)
 
         for ni, name in enumerate(col_nids):
             y = start_y + ni * (NODE_HEIGHT + NODE_GAP)
-            # 只有"多步骤串行写同一表"的第2+步才错行，其他步骤保持同一行
-            if name in stagger_steps:
-                y += NODE_HEIGHT + NODE_GAP
             node_id = f"n_{node_id_counter}"
             node_id_counter += 1
             positions[name] = node_id
