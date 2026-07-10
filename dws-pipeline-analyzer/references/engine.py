@@ -1736,6 +1736,62 @@ def _extract_subquery_usage(tree, join_usage: list, where_usage: list, depth=0):
         _extract_subquery_usage(inner_select, join_usage, where_usage, depth + 1)
 
 
+def _extract_cte_usage(tree, join_usage: list, where_usage: list):
+    """提取 CTE 内部的 JOIN ON 和 WHERE 条件。
+
+    CTE body 里的 JOIN/WHERE 不在顶层 select_node 上，也不在 Subquery 节点里
+    （CTE 在 AST 里是 exp.CTE，挂在 with_ 子句上）。
+    这里遍历所有 CTE 定义，把内部的 JOIN ON 和 WHERE 条件提取出来合并到外层。
+    """
+    with_clause = tree.args.get("with_")
+    if not with_clause:
+        return
+
+    for cte_node in with_clause.expressions:
+        cte_body = cte_node.this
+        # CTE body 可能是 Union/Intersect/Except，遍历所有分支的 SELECT
+        if isinstance(cte_body, (exp.Union, exp.Intersect, exp.Except)):
+            branches = []
+            _collect_set_branches(cte_body, branches)
+            cte_selects = branches
+        elif isinstance(cte_body, exp.Select):
+            cte_selects = [cte_body]
+        else:
+            inner = cte_body.find(exp.Select) if hasattr(cte_body, 'find') else None
+            cte_selects = [inner] if inner else []
+
+        for cte_select in cte_selects:
+            if not cte_select:
+                continue
+
+            # 提取 CTE 内 JOIN ON 字段
+            for join_node in cte_select.args.get("joins", []):
+                on_expr = join_node.args.get("on")
+                if not on_expr:
+                    continue
+                on_sql = on_expr.sql(dialect="oracle")
+                for col in on_expr.find_all(exp.Column):
+                    col_name = _clean_name(col.name).lower()
+                    col_alias = _clean_name(col.table).lower() if col.table else ""
+                    if col_name:
+                        if not any(ju["field"] == col_name and ju.get("on_condition", "") == on_sql for ju in join_usage):
+                            join_usage.append({
+                                "field": col_name, "alias": col_alias,
+                                "join_type": "INNER JOIN", "on_condition": on_sql, "tables": [],
+                            })
+
+            # 提取 CTE 内 WHERE 字段
+            where_node = cte_select.args.get("where")
+            if where_node:
+                where_sql = where_node.sql(dialect="oracle")
+                for col in where_node.find_all(exp.Column):
+                    col_name = _clean_name(col.name).lower()
+                    col_alias = _clean_name(col.table).lower() if col.table else ""
+                    if col_name:
+                        if not any(wu["field"] == col_name and wu.get("condition", "") == where_sql for wu in where_usage):
+                            where_usage.append({"field": col_name, "alias": col_alias, "condition": where_sql})
+
+
 def _split_where_conditions(node) -> list:
     """把 WHERE 条件按 AND 拆分成独立条件列表。
 
@@ -1765,6 +1821,9 @@ def _extract_field_usage(tree, select_node, joins: list, sqlglot_dialect: str) -
 
     # 提取嵌套子查询内部的 JOIN/WHERE 条件（内层子查询的关联键和过滤条件）
     _extract_subquery_usage(tree, join_usage, where_usage)
+
+    # 提取 CTE 内部的 JOIN/WHERE 条件（CTE body 里的关联键和过滤条件）
+    _extract_cte_usage(tree, join_usage, where_usage)
 
     # ── 构建 alias → 物理表名 映射（含子查询）──
     alias_map = {}  # {alias_lower: table_name}
@@ -3279,15 +3338,31 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
 
         target_full = _normalize_table_name(rule.target_schema, rule.target_table)
 
-        # SQL 中解析出的源表（主查询 FROM/JOIN + 子查询内部物理表；只过滤子查询假名）
+        # SQL 中解析出的源表（主查询 FROM/JOIN + 子查询内部物理表 + CTE 内部物理表）
         parsed = parsed_map.get(rule.rule_code)
+        # 收集 CTE 名（CTE 名不是物理表，要过滤）
+        cte_name_set = {_norm_table(c.name) for c in parsed.ctes if c.name}
         sql_source_tables = []
         for j in parsed.source_tables:
             # 过滤子查询假名（不是物理表）；子查询内部的物理表是真实源表，保留
             if j.source_table.startswith("(subquery:"):
                 continue
+            # 过滤 CTE 名（CTE 不是物理表，其内部表在下面合并）
+            if _norm_table(j.source_table) in cte_name_set:
+                continue
             if _norm_table(j.source_table) not in [_norm_table(t) for t in sql_source_tables]:
                 sql_source_tables.append(j.source_table)
+        # 合并 CTE 内部的物理表（CTE 内部 UNION 的所有分支表也在这里）
+        for cte in parsed.ctes:
+            for ct in cte.source_tables:
+                tname = ct.get("name", "")
+                if not tname:
+                    continue
+                # 过滤 CTE 间互相引用（CTE 名不是物理表）
+                if _norm_table(tname) in cte_name_set:
+                    continue
+                if _norm_table(tname) not in [_norm_table(t) for t in sql_source_tables]:
+                    sql_source_tables.append(tname)
 
         # 全树扫描所有表（含子查询内部），用于自引用检测
         # parse 只做一次（在 source_tables 循环之外），用 _norm_table 归一化去重
