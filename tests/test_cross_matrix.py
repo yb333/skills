@@ -17,7 +17,7 @@ SQL结构变体（行）:
   S8  FROM 子查询内部 UNION
   S9  JOIN 子查询
   S10 SELECT * 通配
-  S11 子查询内部嵌套CTE（已知限制，xfail）
+  S11 子查询内部嵌套CTE（业务不存在，语法不支持，不测）
   S12 CTE内部UNION分支含JOIN/子查询
 
 解析路径（列）:
@@ -41,17 +41,16 @@ SQL结构变体（行）:
   S5 CTE内UNION   -         ✓        ✓          -         -       ✓      ✓      -     -
   S6 嵌套CTE      ✓(既有)   ✓        ✓          -         ✓      ✓(既有) ✓     ✓(既有) -
   S7 FROM子查询   ✓(既有)    -        -         ✓(既有)   ✓(既有)  ✓      ✓(既有)  -     -
-  S8 子查询UNION  ✓          -        -          ⚠         -       ✓     ✓(既有)  -    ✓(既有)
+  S8 子查询UNION  ✓          -        -          ✓         -       ✓     ✓(既有)  -    ✓(既有)
   S9 JOIN子查询   ✓          -        -          -         ✓      ✓(既有) ✓(既有)  -     -
   S10 SELECT *   ✓(既有)     -        -          -         -       ?       ?      -     -
-  S11 子查询内CTE  ⚠         ⚠        ⚠          ⚠        ⚠       ⚠       ⚠     ⚠     ⚠
+  S11 子查询内CTE  N/A（业务不存在，语法不支持）
   S12 CTE内UNION+JOIN ✓     ✓         -          -         -       -       ✓      -     -
 
   本文件覆盖的交叉点：S3(topo/df) S5(ctes/pen/topo/df) S6(pen/usage)
                       S8(source/topo) S9(usage_where/usage_join) S12(ctes/df)
   既有测试覆盖的：其余标 ✓(既有) 的交叉点
-  已知限制：S11 子查询内嵌CTE（xfail标记，_extract_ctes 只看顶层WITH）
-  已知限制：S8 P_subquery_pen 子查询内UNION字段穿透（_penetrate_subquery_columns 用 find(Select)）
+  S11 子查询内嵌CTE：业务不存在此写法（语法不支持），不测
 
 运行:
     pytest tests/test_cross_matrix.py -v
@@ -280,6 +279,16 @@ class TestS8FromSubqueryUnion:
         p = parse(self.SQL)
         assert not p.parse_error
 
+    def test_P_subquery_penetration(self):
+        """FROM子查询UNION: 字段穿透到内层物理字段（不再停在子查询别名层）。"""
+        p = parse(self.SQL)
+        col = p.select_columns[0]
+        assert col.alias == "uid"
+        sf = col.source_fields[0]
+        # 应穿透到 user_id（cast 内部的列），不再停在 t.uid
+        assert sf.get("field") == "user_id", \
+            f"子查询UNION字段未穿透到 user_id: {sf}"
+
     def test_P_topology(self):
         """FROM子查询UNION: topology 含两分支表。"""
         p = parse(self.SQL)
@@ -348,28 +357,3 @@ SELECT c.id, c.name FROM cte c"""
         names = df_table_names(df)
         for expected in ("src_a", "dim_a", "src_b", "dim_b"):
             assert expected in names, f"{expected} 丢失: {names}"
-
-
-# ═══════════════════════════════════════════════════════════════
-# S11: 子查询内部嵌套CTE（已知限制，xfail 记录）
-# ═══════════════════════════════════════════════════════════════
-
-class TestS11SubqueryWithCte:
-    """子查询内部嵌套 CTE: FROM (WITH inner_cte AS (...) SELECT ...) t。
-
-    已知限制：_extract_ctes 只看顶层 WITH，不递归进子查询内的 CTE。
-    用 xfail 标记记录此已知缺口，修复后移除标记。
-    """
-
-    SQL = """SELECT t.id, t.name FROM (
-    WITH inner_cte AS (SELECT id, name FROM ods.deep_src)
-    SELECT c.id, c.name FROM inner_cte c
-) t"""
-
-    @pytest.mark.xfail(reason="已知限制: 子查询内嵌CTE未递归提取，_extract_ctes只看顶层WITH")
-    def test_deep_src_extracted(self):
-        """子查询内嵌CTE: deep_src 应被提取。"""
-        p = parse(self.SQL)
-        tables = all_source_tables(p)
-        assert any("deep_src" in t for t in tables), \
-            f"deep_src 丢失（子查询内CTE未提取）: {tables}"

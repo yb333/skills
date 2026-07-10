@@ -1605,28 +1605,52 @@ def _penetrate_subquery_columns(tree, columns: list, depth=0):
     if not sub_alias:
         return
 
-    # 内层子查询
-    inner_select = main_expr.find(exp.Select)
-    if not inner_select:
+    # 内层子查询：可能是普通 SELECT，也可能是 UNION（集合操作）
+    # UNION 时不能用 find(exp.Select)——只拿第一分支，其余分支的表全丢
+    inner_node = main_expr.this  # Subquery 内部的节点
+    if isinstance(inner_node, (exp.Union, exp.Intersect, exp.Except)):
+        # 子查询内部是 UNION：收集所有分支
+        inner_branches = []
+        _collect_set_branches(inner_node, inner_branches)
+    else:
+        inner_branches = [inner_node] if isinstance(inner_node, exp.Select) else []
+    if not inner_branches:
+        # fallback
+        fallback = main_expr.find(exp.Select)
+        inner_branches = [fallback] if fallback else []
+    if not inner_branches:
         return
+    # 字段映射从第一分支取（UNION 按位置对齐，各分支列结构一致）
+    inner_select = inner_branches[0]
 
-    # 内层别名 → 物理表映射
+    # 内层别名 → 物理表映射（合并所有分支的表，UNION 各分支可能有不同源表）
     inner_alias_map = {}
-    inner_from = inner_select.args.get("from_")
-    if inner_from:
-        if isinstance(inner_from.this, exp.Table):
-            t = inner_from.this
-            inner_alias_map[t.alias.lower() if t.alias else ""] = ".".join(_clean_name(p.name) for p in t.parts)
-        elif isinstance(inner_from.this, exp.Subquery):
-            # 内层 FROM 也是子查询，记下别名
-            inner_sub = inner_from.this
-            inner_alias_map[inner_sub.alias.lower() if inner_sub.alias else ""] = inner_sub.alias.lower() if inner_sub.alias else ""
-    for jn in inner_select.args.get("joins", []):
-        jt = jn.this
-        if isinstance(jt, exp.Table):
-            inner_alias_map[jt.alias.lower() if jt.alias else ""] = ".".join(_clean_name(p.name) for p in jt.parts)
+    for branch in inner_branches:
+        if not isinstance(branch, exp.Select):
+            continue
+        inner_from = branch.args.get("from_")
+        if inner_from:
+            if isinstance(inner_from.this, exp.Table):
+                t = inner_from.this
+                talias = t.alias.lower() if t.alias else ""
+                if talias and talias not in inner_alias_map:
+                    inner_alias_map[talias] = ".".join(_clean_name(p.name) for p in t.parts)
+            elif isinstance(inner_from.this, exp.Subquery):
+                inner_sub = inner_from.this
+                salias = inner_sub.alias.lower() if inner_sub.alias else ""
+                if salias and salias not in inner_alias_map:
+                    inner_alias_map[salias] = salias
+        for jn in branch.args.get("joins", []):
+            jt = jn.this
+            if isinstance(jt, exp.Table):
+                jalias = jt.alias.lower() if jt.alias else ""
+                if jalias and jalias not in inner_alias_map:
+                    inner_alias_map[jalias] = ".".join(_clean_name(p.name) for p in jt.parts)
 
     # 内层 SELECT 列 → {列名(LOWER): (别名, 字段名)}
+    # 从第一分支取（UNION 按位置对齐）
+    # 注意：单 Column 的表达式（如 cast(user_id as bigint)）可以穿透，
+    # 但多 Column 的表达式（如 a.x||a.y）不能穿透为 direct——会丢失"表达式加工"语义
     inner_cols = {}
     for proj in inner_select.expressions:
         if isinstance(proj, exp.Alias):
@@ -1637,9 +1661,18 @@ def _penetrate_subquery_columns(tree, columns: list, depth=0):
             col_node = proj
         else:
             continue
-        if isinstance(col_node, exp.Column):
+        # 统计表达式内引用的 Column 数量
+        all_cols = list(col_node.find_all(exp.Column)) if not isinstance(col_node, exp.Column) else [col_node]
+        if len(all_cols) == 1:
+            # 单 Column（直传或 cast/单参数函数）：可穿透
+            source_col = all_cols[0]
+            inner_cols[alias_name] = (source_col.table.lower() if source_col.table else "",
+                                      source_col.name.lower())
+        elif isinstance(col_node, exp.Column):
+            # 直传 Column（all_cols=1 已覆盖，这里是防御）
             inner_cols[alias_name] = (col_node.table.lower() if col_node.table else "",
                                       col_node.name.lower())
+        # 多 Column 表达式（a.x||a.y / coalesce(a,b)）：不穿透，保留在子查询层
 
     # 对顶层 columns 穿透
     changed = False
