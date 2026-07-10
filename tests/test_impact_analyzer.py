@@ -263,15 +263,14 @@ class TestPropagation:
         result = filter_and_propagate(
             [],
             [ChangeItem(before_table="ods.src_a", before_field="user_id",
-                        before_type="varchar(20)", after_type="varchar(50)",
+                        before_type="bigint", after_type="bigint",
                         change_type="1:1数据类型/长度变化")],
             knowledge, {},
         )
-        # 有 cast → 待确认
-        assert len(result.field_level_impacts) == 1
-        row = result.field_level_impacts[0]
-        assert row["target_field"] == "uid"
-        assert row["status"] == "🟡待确认"
+        # cast as bigint + 源新类型 bigint → cast关口兼容 → 无影响
+        # （之前一律待确认，现在精确判定cast吸收了）
+        assert len(result.field_level_impacts) == 0  # 无影响不进主表
+        assert result.summary["no_impact"] >= 1 or result.summary["not_hit"] >= 1
 
     def test_multi_source_field(self):
         """多源字段（COALESCE）：每源一行。"""
@@ -376,6 +375,135 @@ class TestSeverity:
         path = ImpactPath(target_field="f", change=fc)
         assess_severity(path, fc, knowledge, {})
         assert path.status == "🟡待确认"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 测试：类型变化兼容性判定
+# ═══════════════════════════════════════════════════════════════
+
+class TestTypeChangeCompat:
+    """类型变化的影响判定：源新类型 vs 目标DDL，cast参与判定。
+
+    判定逻辑：纯看兼容性。
+    - 源变后跟目标兼容 → 🟢
+    - 源变后跟目标不兼容 → 🔴
+    - 无DDL无cast无法判 → 🟡
+    """
+
+    def _test(self, before_t, after_t, target_ddl, hops=None):
+        """辅助：构造变更+路径，返回判定后的path"""
+        fc = ChangeItem(before_table="t", before_field="c", before_type=before_t,
+                        after_table="t", after_field="c", after_type=after_t,
+                        change_type="字段类型及长度变化")
+        path = ImpactPath(target_field="f", change=fc, hops=hops or [Hop(expression="c")])
+        k = _make_knowledge()
+        if target_ddl:
+            k["field_mappings"]["fields"] = [{"target_field": "f", "field_type": target_ddl}]
+        assess_severity(path, fc, k, {})
+        return path
+
+    # ── 长度兼容 ──
+
+    def test_varchar_grow_target_wider(self):
+        """varchar扩宽，目标更宽 → 🟢（兼容）。"""
+        p = self._test("varchar(20)", "varchar(50)", "varchar(100)")
+        assert p.status == "🟢无影响"
+
+    def test_varchar_grow_target_narrower(self):
+        """varchar扩宽，目标更窄 → 🔴（截断风险）。"""
+        p = self._test("varchar(20)", "varchar(50)", "varchar(30)")
+        assert p.status == "🔴有影响"
+
+    def test_varchar_grow_target_exact(self):
+        """varchar扩宽，目标刚好 → 🟢（恰好兼容）。"""
+        p = self._test("varchar(20)", "varchar(50)", "varchar(50)")
+        assert p.status == "🟢无影响"
+
+    def test_varchar_shrink(self):
+        """varchar缩短，目标比源新类型宽 → 🟢（缩短不会溢出）。"""
+        p = self._test("varchar(50)", "varchar(20)", "varchar(50)")
+        assert p.status == "🟢无影响"
+
+    # ── 类型大类变化（看兼容性）──
+
+    def test_int_to_varchar_target_varchar(self):
+        """int→varchar，目标本来就是varchar → 🟢（变得更兼容了）。"""
+        p = self._test("int", "varchar(20)", "varchar(50)")
+        assert p.status == "🟢无影响"
+
+    def test_int_to_varchar_target_int(self):
+        """int→varchar，目标是int → 🔴（源变后跟目标不兼容了）。"""
+        p = self._test("int", "varchar(20)", "integer")
+        assert p.status == "🔴有影响"
+
+    def test_int_to_numeric_safe(self):
+        """int→numeric，安全跨类 → 🟢（整数可精确表示为数值）。"""
+        p = self._test("int", "numeric(18,2)", "numeric(18,2)")
+        assert p.status == "🟢无影响"
+
+    # ── numeric 精度 ──
+
+    def test_numeric_precision_grow_compatible(self):
+        """numeric精度扩大，目标够宽 → 🟢。"""
+        p = self._test("numeric(10,2)", "numeric(18,2)", "numeric(18,2)")
+        assert p.status == "🟢无影响"
+
+    def test_numeric_precision_grow_incompatible(self):
+        """numeric精度扩大，目标不够 → 🔴。"""
+        p = self._test("numeric(10,2)", "numeric(18,2)", "numeric(10,2)")
+        assert p.status == "🔴有影响"
+
+    def test_numeric_scale_shrink_incompatible(self):
+        """numeric标度缩小，目标标度不够 → 🔴。"""
+        p = self._test("numeric(18,2)", "numeric(18,4)", "numeric(18,2)")
+        assert p.status == "🔴有影响"
+
+    # ── cast 参与判定 ──
+
+    def test_cast_absorbs_type_change(self):
+        """cast吸收了类型变化 → 🟢。"""
+        p = self._test("varchar(20)", "varchar(50)", "varchar(50)",
+                       hops=[Hop(expression="cast(c as varchar(50))")])
+        assert p.status == "🟢无影响"
+
+    def test_cast_truncates(self):
+        """cast显式截断 → 🔴（cast关口比源新类型窄）。"""
+        p = self._test("varchar(20)", "varchar(50)", "varchar(50)",
+                       hops=[Hop(expression="cast(c as varchar(20))")])
+        assert p.status == "🔴有影响"
+        assert "cast" in p.reason
+
+    def test_cast_no_ddl_uses_cast_as_gate(self):
+        """无DDL但有cast → cast作为关口判定。"""
+        p = self._test("varchar(20)", "varchar(50)", None,
+                       hops=[Hop(expression="cast(c as varchar(50))")])
+        assert p.status == "🟢无影响"
+
+    # ── 无DDL无cast ──
+
+    def test_no_ddl_no_cast_uncertain(self):
+        """无DDL无cast → 🟡待确认。"""
+        p = self._test("varchar(20)", "varchar(50)", None)
+        assert p.status == "🟡待确认"
+
+    # ── 类型归一化 ──
+
+    def test_type_normalization_variants(self):
+        """各种varchar写法归一化为同一家族。"""
+        from impact_analyzer import _parse_type_info
+        for t in ["nvarchar(50)", "varchar(50)", "character varying(50)",
+                  "VARCHAR2(50)", "NVARCHAR2(50)"]:
+            info = _parse_type_info(t)
+            assert info["family"] == "varchar", f"{t} 应归为varchar家族: {info}"
+            assert info["length"] == 50, f"{t} 长度应为50: {info}"
+
+    def test_type_normalization_numeric(self):
+        """numeric精度标度提取。"""
+        from impact_analyzer import _parse_type_info
+        info = _parse_type_info("numeric(18,2)")
+        assert info["family"] == "numeric"
+        assert info["length"] == 18
+        assert info["scale"] == 2
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -556,11 +684,12 @@ class TestEndToEnd:
         tc_list, fc_list, td = read_changes(str(xlsx_path))
         result = filter_and_propagate(tc_list, fc_list, knowledge, td)
 
-        # src_a.user_id 有 cast → 待确认，进主表
-        # src_b.amt 无 cast，int→bigint 直传，需看 DDL（无 DDL → 待确认）
+        # src_a.user_id: varchar→varchar, cast as bigint → 大类不兼容 → 🔴
+        # src_b.amt: int→bigint, 无DDL无cast → 无法判 → 🟡
         assert len(result.field_level_impacts) == 2
         statuses = {r["status"] for r in result.field_level_impacts}
-        assert all(s == "🟡待确认" for s in statuses)
+        assert "🔴有影响" in statuses  # user_id cast大类不兼容
+        assert "🟡待确认" in statuses   # amt 无DDL无cast
         # unrelated 未命中
         assert result.summary["not_hit"] >= 1
 

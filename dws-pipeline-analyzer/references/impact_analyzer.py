@@ -920,53 +920,230 @@ def assess_severity(path: ImpactPath, fc: ChangeItem, knowledge: dict, type_dict
 def _assess_type_change(path: ImpactPath, fc: ChangeItem, knowledge: dict):
     """类型/长度变化的严重度判定。
 
-    判定逻辑:
-      - 沿途有 cast/转换 → 检查是否吸收（粗判：有 cast 标待确认，精确判需语义）
-      - 目标 DDL 类型兼容 → 🟢
-      - 否则 → 🔴（截断/溢出风险）
-    MVP 立场：cast 转换不精确判断吸收，标待确认让人复核。
-    """
-    # 检查传播路径里是否有 cast/convert
-    has_cast = False
-    for hop in path.hops:
-        expr = (hop.expression or "").upper()
-        if "CAST(" in expr or "CONVERT(" in expr:
-            has_cast = True
-            break
+    判定逻辑（类型兼容性链）：
+      源新类型(after_type) →[沿途cast]→ 中间类型 → 目标DDL类型
 
-    if has_cast:
-        # 有 cast → 类型可能被吸收，但也可能转换出问题，标待确认
+    最终看"源新类型能否安全流入目标DDL"：
+      1. 类型大类变了（int↔varchar）→ 🔴必须适配
+      2. 同大类，长度/精度兼容（目标≥源）→ 🟢无影响
+      3. 同大类，长度/精度不兼容（目标<源）→ 🔴截断/溢出风险
+      4. cast 的目标类型参与判定（作为链上一个关口）
+
+    比较双方：源新类型(after_type) vs 目标DDL(field_type)，
+    沿途 cast 的目标类型作为"关口"也参与。
+    """
+    after_type = fc.after_type
+    target_type = _get_target_field_type(path.target_field, knowledge)
+
+    # 收集沿途 cast 的目标类型（作为兼容性链上的关口）
+    cast_types = _extract_cast_types(path.hops)
+
+    # 没有目标 DDL，也没有 cast → 无法判定
+    if not target_type and not cast_types:
         path.status = "🟡待确认"
         path.severity = "unknown"
-        path.reason = (
-            f"源字段类型 {fc.before_type}→{fc.after_type}，"
-            f"沿途有类型转换，是否被吸收需人工复核"
-        )
+        path.reason = (f"源类型 {fc.before_type}→{after_type}，"
+                       f"目标字段无 DDL 且无 cast，需人工确认")
         return
 
-    # 无 cast → 类型直接传导，检查目标 DDL 兼容性
-    target_type = _get_target_field_type(path.target_field, knowledge)
-    if target_type:
-        # 粗判：目标类型字符串包含 after_type 关键字 → 可能兼容
-        after_type_lower = fc.after_type.lower()
-        target_type_lower = target_type.lower()
-        # 提取基础类型名（varchar, bigint 等）
-        import re
-        after_base = re.match(r"(\w+)", after_type_lower)
-        target_base = re.match(r"(\w+)", target_type_lower)
-        if after_base and target_base and after_base.group(1) == target_base.group(1):
-            path.status = "🟢无影响"
-            path.severity = "none"
-            path.reason = f"源类型 {fc.after_type} 与目标 {target_type} 基础类型一致，兼容"
-        else:
+    # 解析各类型
+    after_info = _parse_type_info(after_type)
+    target_info = _parse_type_info(target_type) if target_type else None
+    cast_infos = [_parse_type_info(ct) for ct in cast_types]
+
+    # ── 第一步：类型大类判定 ──
+    # 源新类型 vs 目标DDL vs 每个cast关口，只要有一个大类不匹配 → 有影响
+    compare_targets = []
+    if target_info:
+        compare_targets.append(("目标DDL", target_info))
+    for i, ci in enumerate(cast_infos):
+        compare_targets.append((f"cast关口{i+1}", ci))
+
+    for label, t_info in compare_targets:
+        if not _same_type_family(after_info["family"], t_info["family"]):
             path.status = "🔴有影响"
             path.severity = "high"
-            path.reason = f"源类型变 {fc.before_type}→{fc.after_type}，目标 {target_type} 不兼容，有风险"
+            path.reason = (f"源新类型 {after_type}({after_info['family']}) 与{label} "
+                           f"{t_info['raw']}({t_info['family']}) 类型大类不一致，必须适配")
+            return
+
+    # ── 第二步：同大类，长度/精度兼容性判定 ──
+    # 取链上最窄的关口（目标DDL + 所有cast），看源新类型能否通过
+    for label, t_info in compare_targets:
+        compat = _check_length_compat(after_info, t_info)
+        if compat == "incompatible":
+            path.status = "🔴有影响"
+            path.severity = "high"
+            path.reason = (f"源新类型 {after_type} 长度/精度超出{label} {t_info['raw']}，"
+                           f"有截断/溢出风险，需适配")
+            return
+
+    # 所有关口都兼容
+    gate_desc = "、".join(f"{label}={t_info['raw']}" for label, t_info in compare_targets)
+    path.status = "🟢无影响"
+    path.severity = "none"
+    path.reason = (f"源新类型 {after_type} 可被{gate_desc}兼容，无影响")
+
+
+# ── 类型解析工具 ──
+
+# 类型大类归一化映射：各种写法 → 标准家族名
+_TYPE_FAMILY_MAP = {
+    # 整数家族
+    "int": "integer", "integer": "integer", "bigint": "integer",
+    "smallint": "integer", "tinyint": "integer", "int2": "integer",
+    "int4": "integer", "int8": "integer", "serial": "integer",
+    # 字符家族
+    "varchar": "varchar", "character": "varchar", "char": "varchar",
+    "text": "varchar", "string": "varchar", "nvarchar": "varchar",
+    "nvarchar2": "varchar", "varchar2": "varchar",
+    # 数值家族（带小数）
+    "numeric": "numeric", "decimal": "numeric", "number": "numeric",
+    "float": "numeric", "double": "numeric", "real": "numeric",
+    "float4": "numeric", "float8": "numeric", "double": "numeric",
+    "precision": "numeric",
+    # 日期时间家族
+    "date": "datetime", "timestamp": "datetime", "time": "datetime",
+    "datetime": "datetime",
+    # 布尔
+    "boolean": "boolean", "bool": "boolean",
+}
+
+
+def _parse_type_info(type_str: str) -> dict:
+    """解析类型字符串为结构化信息。
+
+    返回: {family, raw, length, precision, scale}
+    - family: 归一化大类（integer/varchar/numeric/datetime/boolean/unknown）
+    - raw: 原始类型字符串
+    - length: 长度（varchar 的 n，或 numeric 的 precision）
+    - scale: 小数位数（numeric 的 scale）
+    """
+    import re
+
+    if not type_str:
+        return {"family": "unknown", "raw": "", "length": None, "scale": None}
+
+    raw = type_str.strip()
+    lower = raw.lower()
+
+    # 去掉 "character varying" 的空格 → "charactervarying"，取第一个词
+    # 处理两段式类型名
+    lower_compact = lower.replace("varying", "").strip()
+    # 提取类型名（括号前的部分，可能含空格如 "character varying"）
+    type_name_match = re.match(r'^([a-zA-Z][a-zA-Z\s]*?)(?:\s*\(|\s*$)', lower)
+    if type_name_match:
+        base_name = type_name_match.group(1).strip()
+        # 两段式：character varying → varchar 家族
+        if "character" in base_name and "varying" in lower:
+            base_name = "varchar"
+        elif base_name == "character":
+            base_name = "char"
     else:
-        # 无目标 DDL 信息 → 待确认
-        path.status = "🟡待确认"
-        path.severity = "unknown"
-        path.reason = f"源类型 {fc.before_type}→{fc.after_type}，目标字段无 DDL，需人工确认"
+        base_name = lower.split("(")[0].split()[0] if lower.split() else "unknown"
+
+    family = _TYPE_FAMILY_MAP.get(base_name, "unknown")
+
+    # 提取括号内参数
+    length = None
+    scale = None
+    param_match = re.search(r'\(([^)]*)\)', lower)
+    if param_match:
+        params = [p.strip() for p in param_match.group(1).split(",")]
+        if params:
+            try:
+                length = int(params[0])
+            except (ValueError, TypeError):
+                pass
+        if len(params) > 1:
+            try:
+                scale = int(params[1])
+            except (ValueError, TypeError):
+                pass
+
+    return {"family": family, "raw": raw, "length": length, "scale": scale,
+            "base_name": base_name}
+
+
+def _same_type_family(f1: str, f2: str) -> bool:
+    """两个类型大类是否兼容（同家族或在安全转换范围内）。
+
+    安全跨类转换：integer → numeric（整数可安全转数值，不丢精度）
+    """
+    if f1 == f2:
+        return True
+    # integer → numeric 是安全的（整数可以精确表示为数值）
+    if {f1, f2} == {"integer", "numeric"}:
+        return True
+    return False
+
+
+def _check_length_compat(source: dict, target: dict) -> str:
+    """检查长度/精度兼容性。
+
+    返回: "compatible" | "incompatible" | "unknown"
+    - 目标无长度信息 → unknown（不阻断，由其他关口判）
+    - 目标长度 ≥ 源长度 → compatible
+    - 目标长度 < 源长度 → incompatible
+    """
+    # 目标没长度信息（如 text 类型）→ 不限制，兼容
+    if target["length"] is None:
+        return "compatible"
+    # 源没长度信息（如源端没填）→ 无法判，放行（标 unknown 但不阻断）
+    if source["length"] is None:
+        return "unknown"
+
+    # 字符家族：比长度
+    if source["family"] == "varchar" and target["family"] == "varchar":
+        if target["length"] >= source["length"]:
+            return "compatible"
+        return "incompatible"
+
+    # 数值家族：比精度+标度
+    if source["family"] == "numeric" and target["family"] == "numeric":
+        # 精度比较
+        if target["length"] is not None and source["length"] is not None:
+            if target["length"] < source["length"]:
+                return "incompatible"
+        # 标度比较（目标标度不能小于源标度，否则小数位丢失）
+        if target["scale"] is not None and source["scale"] is not None:
+            if target["scale"] < source["scale"]:
+                return "incompatible"
+        return "compatible"
+
+    # 整数家族：一般不比长度（int/bigint 已在大类映射里区分了）
+    # integer → numeric 的跨类安全转换，长度兼容性单独处理
+    if source["family"] == "integer" and target["family"] == "numeric":
+        # 整数转数值，目标精度要能容纳整数位数
+        if target["length"] is not None and source["length"] is not None:
+            if target["length"] < source["length"]:
+                return "incompatible"
+        return "compatible"
+
+    # 整数家族同类：不比长度（bigint/int 差异由大类决定）
+    if source["family"] == "integer" and target["family"] == "integer":
+        return "compatible"
+
+    return "compatible"
+
+
+def _extract_cast_types(hops: list) -> list:
+    """从传播路径的 hop 表达式里提取 cast 的目标类型。
+
+    匹配 cast(xxx as TYPE) 或 convert(xxx, TYPE) 里的 TYPE。
+    """
+    import re
+
+    cast_types = []
+    for hop in hops:
+        expr = hop.expression or ""
+        # cast(field as bigint) / cast(field as varchar(50))
+        for m in re.finditer(r'cast\s*\([^)]*?\s+as\s+([a-zA-Z][a-zA-Z0-9\s]*(?:\([^)]*\))?)', expr, re.IGNORECASE):
+            cast_types.append(m.group(1).strip())
+        # convert(type, field) — GaussDB/SQL Server 语法
+        for m in re.finditer(r'convert\s*\(\s*([a-zA-Z][a-zA-Z0-9\s]*(?:\([^)]*\))?)\s*,', expr, re.IGNORECASE):
+            cast_types.append(m.group(1).strip())
+    return cast_types
 
 
 def _assess_init(path: ImpactPath, fc: ChangeItem, knowledge: dict):
