@@ -1,8 +1,9 @@
 ---
 name: dws-pipeline-analyzer
 description: |-
-  DWS ETL 制品包分析器。从执行平台制品包（execution_tasks.xlsx）反向提取完整 ETL 知识，
-  自动生成知识文档、字段映射、资产说明书和技术设计文档。
+  DWS ETL 制品包分析器。从执行平台制品包（xlsx）或代码仓 yml 反向提取完整 ETL 知识，
+  自动生成知识文档、字段映射、资产说明书、技术设计文档。
+  支持关联影响分析（源端变更 → 本资产受什么影响）。
 
   Use proactively when:
   - 用户提供了 execution_tasks.xlsx（或提及"制品包""交付件""导出包"）
@@ -12,6 +13,8 @@ description: |-
   - 用户拖入 xlsx 文件并询问关于 ETL 的问题
   - 优化/改造前的现状分析
   - 存量资产文档化
+  - 用户说"源端变更""字段变了""影响分析""源系统切换"
+  - 用户提供了变更清单 + 要分析影响的资产
 
   Examples:
   - user: "分析这个制品包" → 全自动分析+生成三视图
@@ -19,6 +22,7 @@ description: |-
   - user: "这个表是干什么的？" → 分析+业务逻辑说明
   - user: "生成mapping文件" → 分析+mapping.xlsx
   - user: "出个技术设计文档" → 分析+tech_design.md
+  - user: "源端字段变了，对我的资产有什么影响" → 影响分析+impact.xlsx
 ---
 
 # DWS ETL 制品包分析器
@@ -116,11 +120,13 @@ python {skill_dir}/run.py view_generator \
 ## 核心能力
 
 - **CTE 穿透传播**：主查询引用 CTE 字段时，自动穿透加工逻辑（transform_type 升级）
-- **UNION ALL 支持**：集合操作多分支全部解析
+- **UNION ALL 支持**：集合操作多分支全部解析（含 CTE 内部 UNION、FROM 子查询内部 UNION）
 - **加工模式检测**：自动标注 CTE 预聚合/行转列/SCD2/增量去重等 7-8 个模式
-- **DDL 元数据**：字段类型+中文名从 DDL COMMENT 提取
+- **DDL 元数据**：字段类型+中文名从 DDL COMMENT 提取（含类型归一化，保留长度/精度）
 - **双源交叉验证**：TargetFields vs SQL AST 不一致预警
-- **双图模型**：调度图（平台配置）vs 数据依赖图（SQL 推导），差异 = 优化空间
+- **I 视图封装**：资产是对外 I 视图时，自动发现 F→I 封装链路，字段穿透 F 表
+- **加载策略检测**：自动检测全量/增量/分区交换，用于影响分析风险判定
+- **关联影响分析**：源端变更 → 本资产受什么影响，输出影响清单 Excel（16种变化类型，类型兼容性判定）
 
 ## 命令参数
 
