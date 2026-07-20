@@ -242,3 +242,104 @@ class TestTypeCheckScope:
         issues = _type_issues(kj)
         # 表达式输出的类型跟源字段无关，不该报
         assert len(issues) == 0, f"表达式不该报类型不一致: {issues}"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 精细化检查（value/cast/case_when分支）
+# ═══════════════════════════════════════════════════════════════
+
+class TestTypeCheckRefined:
+    """精细化类型检查：value查常量、cast查目标类型、case_when查分支字段。"""
+
+    def test_value_constant_too_long(self, tmp_path):
+        """常量赋值超长该报（'UNKNOWN_STATUS' → varchar(1)）。"""
+        rules = [
+            RawRule(rule_code="R1", rule_type=1, exec_sequence=1,
+                    target_schema="dws", target_table="final_t",
+                    query_sql="SELECT 'UNKNOWN_STATUS' AS flag FROM ods.src_a a"),
+        ]
+        ddls = {
+            "src_a": "CREATE TABLE src_a (id INT);",
+            "final_t": "CREATE TABLE final_t (flag VARCHAR(1));",
+        }
+        kj = _run_analysis(rules, ddls, tmp_path)
+        issues = _type_issues(kj)
+        assert len(issues) >= 1, "常量超长应该报"
+
+    def test_value_constant_fits(self, tmp_path):
+        """常量赋值能塞进目标不报（'N' → varchar(1)）。"""
+        rules = [
+            RawRule(rule_code="R1", rule_type=1, exec_sequence=1,
+                    target_schema="dws", target_table="final_t",
+                    query_sql="SELECT 'N' AS flag FROM ods.src_a a"),
+        ]
+        ddls = {
+            "src_a": "CREATE TABLE src_a (id INT);",
+            "final_t": "CREATE TABLE final_t (flag VARCHAR(1));",
+        }
+        kj = _run_analysis(rules, ddls, tmp_path)
+        issues = _type_issues(kj)
+        assert len(issues) == 0, f"'N'能塞进varchar(1)，不该报: {issues}"
+
+    def test_cast_target_matches(self, tmp_path):
+        """CAST目标类型跟DDL一致不报（cast(x as bigint) → bigint）。"""
+        rules = [
+            RawRule(rule_code="R1", rule_type=1, exec_sequence=1,
+                    target_schema="dws", target_table="final_t",
+                    query_sql="SELECT CAST(a.uid AS BIGINT) AS uid_big FROM ods.src_a a"),
+        ]
+        ddls = {
+            "src_a": "CREATE TABLE src_a (uid INT);",
+            "final_t": "CREATE TABLE final_t (uid_big BIGINT);",
+        }
+        kj = _run_analysis(rules, ddls, tmp_path)
+        issues = _type_issues(kj)
+        assert len(issues) == 0, f"cast bigint → bigint 不该报: {issues}"
+
+    def test_cast_target_mismatch(self, tmp_path):
+        """CAST目标类型跟DDL不一致该报（cast(x as varchar(5)) → varchar(1)）。"""
+        rules = [
+            RawRule(rule_code="R1", rule_type=1, exec_sequence=1,
+                    target_schema="dws", target_table="final_t",
+                    query_sql="SELECT CAST(a.code AS VARCHAR(5)) AS short_code FROM ods.src_a a"),
+        ]
+        ddls = {
+            "src_a": "CREATE TABLE src_a (code INT);",
+            "final_t": "CREATE TABLE final_t (short_code VARCHAR(1));",
+        }
+        kj = _run_analysis(rules, ddls, tmp_path)
+        issues = _type_issues(kj)
+        assert len(issues) >= 1, "cast varchar(5) → varchar(1) 该报截断"
+
+    def test_case_when_branch_field_checked(self, tmp_path):
+        """case_when 的 THEN/ELSE 分支字段参与检查，WHEN条件字段不参与。"""
+        # THEN 分支取 src.name(varchar50)，目标 varchar(50) 一致 → 不报
+        rules = [
+            RawRule(rule_code="R1", rule_type=1, exec_sequence=1,
+                    target_schema="dws", target_table="final_t",
+                    query_sql="SELECT CASE WHEN a.status = 1 THEN a.name ELSE '未知' END AS name_out FROM ods.src_a a"),
+        ]
+        ddls = {
+            "src_a": "CREATE TABLE src_a (status INT, name VARCHAR(50));",
+            "final_t": "CREATE TABLE final_t (name_out VARCHAR(50));",
+        }
+        kj = _run_analysis(rules, ddls, tmp_path)
+        issues = _type_issues(kj)
+        # status(int) 是 WHEN 条件，不该报；name(varchar50) 一致也不报
+        assert len(issues) == 0, f"case_when 条件字段status不该报，分支name一致也不报: {issues}"
+
+    def test_int_family_compatible(self, tmp_path):
+        """整数家族互转不报（int → bigint）。"""
+        rules = [
+            RawRule(rule_code="R1", rule_type=1, exec_sequence=1,
+                    target_schema="dws", target_table="final_t",
+                    query_sql="SELECT a.id AS out_id FROM ods.src_a a"),
+        ]
+        ddls = {
+            "src_a": "CREATE TABLE src_a (id INT);",
+            "final_t": "CREATE TABLE final_t (out_id BIGINT);",
+        }
+        kj = _run_analysis(rules, ddls, tmp_path)
+        issues = _type_issues(kj)
+        # int → bigint 是安全扩大，不该报
+        assert len(issues) == 0, f"int→bigint整数家族兼容不该报: {issues}"

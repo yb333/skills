@@ -5380,31 +5380,80 @@ def check_type_consistency(field_mappings: dict, table_catalog: dict,
         current_table = step_target_table.get(producing_step, "")
 
         # ★ 类型一致性检查的范围控制：
-        # 只检查"源字段类型应该传导到目标"的场景，跳过"输出类型由 SQL 语义决定"的场景。
+        # 按"输出类型的来源"决定怎么取源类型、是否检查。
         #
-        # 该检查：
-        #   direct（直传）— 字段没加工，源类型应=目标类型
-        #   aggregate 的 SUM/MIN/MAX — 不改变基础类型和精度，精度丢失该报
-        # 不该检查：
-        #   COUNT — 输出恒为 bigint，跟源类型无关
-        #   case_when — 输出是条件分支结果（'Y'/'N'），跟条件里的字段类型无关
-        #   expression（a+b / a||b）— 运算后类型变了
-        #   pivot/window/value — 结构/聚合变化，输出类型由 SQL 决定
+        # 检查方式：
+        #   direct / SUM/MIN/MAX → 从 catalog 查源表字段类型，走 lineage 对比
+        #   value（常量赋值）    → 从常量本身推断类型（'N'→varchar(1)），直接对比
+        #   expression 的 CAST   → 从 cast 提取目标类型（cast(x as bigint)→bigint），直接对比
+        #   case_when            → 提取 THEN/ELSE 分支里的字段，按 direct 处理
+        # 不检查：
+        #   COUNT（输出恒 bigint）、普通 expression（a||b / a+b 难以推断）、pivot/window
         transform_type = f.get("transform_type", "")
+
+        if transform_type == "value":
+            # 常量赋值：从 raw_sql 推断常量类型，跟目标 DDL 比
+            for lin in f.get("lineage", []):
+                raw_sql = lin.get("raw_sql") or ""
+                const_type = _infer_constant_type(raw_sql)
+                if const_type:
+                    _add_type_issue_if_mismatch(
+                        issues, target_field, ftype, const_type,
+                        "常量赋值", producing_step, current_table,
+                    )
+                break  # value 只有一个 lineage 条目
+            continue  # value 不走下面的 lineage 循环
+
+        if transform_type == "expression":
+            # 区分 CAST 表达式 vs 普通 expression
+            expr_sql = ""
+            for lin in f.get("lineage", []):
+                expr_sql = (lin.get("raw_sql") or "").upper()
+                if expr_sql:
+                    break
+            cast_type = _extract_cast_target_type(expr_sql)
+            if cast_type:
+                # CAST 表达式：用 cast 目标类型跟字段 DDL 比
+                _add_type_issue_if_mismatch(
+                    issues, target_field, ftype, cast_type,
+                    "CAST转换", producing_step, current_table,
+                )
+                continue
+            else:
+                # 普通 expression（a||b / a+b）：输出类型难推断，跳过
+                continue
+
+        if transform_type == "case_when":
+            # case_when：提取 THEN/ELSE 分支里的字段，按 direct 对比
+            # （条件 WHEN 里的字段不参与，那是判断逻辑不是输出来源）
+            branch_fields = _extract_case_when_branch_fields(f.get("lineage", []))
+            for bf in branch_fields:
+                src_alias, src_field, lin_step = bf
+                src_table = _resolve_alias_to_table(src_alias, lin_step, step_alias_map)
+                if not src_table:
+                    continue
+                src_type = _lookup_catalog_type(src_table, src_field, table_catalog)
+                if src_type:
+                    _add_type_issue_if_mismatch(
+                        issues, target_field, ftype, src_type,
+                        f"CASE分支字段({src_table}.{src_field})", producing_step, current_table,
+                    )
+            continue  # case_when 不走下面的 lineage 循环
+
         if transform_type == "aggregate":
-            # 进一步区分：COUNT 跳过，SUM/MIN/MAX 检查
+            # 区分 COUNT（跳过）vs SUM/MIN/MAX（检查）
             expr_sql = ""
             for lin in f.get("lineage", []):
                 expr_sql = (lin.get("raw_sql") or "").upper()
                 if expr_sql:
                     break
             if "COUNT(" in expr_sql or "COUNT (" in expr_sql:
-                continue  # COUNT 输出 bigint，跟源类型无关
-            # SUM/MIN/MAX 继续检查
-        elif transform_type != "direct":
-            continue  # case_when/expression/pivot/window/value 都跳过
+                continue  # COUNT 输出 bigint
+            # SUM/MIN/MAX 走下面的 lineage 对比
+        elif transform_type not in ("direct",):
+            continue  # pivot/window 等跳过
 
-        # 遍历 lineage，找指向 catalog 表的源字段
+        # 遍历 lineage，找指向 catalog 表的源字段（direct + SUM/MIN/MAX 走这里）
         for lin in f.get("lineage", []):
             src_alias = lin.get("source_table", "")
             src_field = lin.get("source_field", "") or target_field
@@ -5426,42 +5475,187 @@ def check_type_consistency(field_mappings: dict, table_catalog: dict,
             if not src_type:
                 continue
 
-            # 归一化对比（去空格、统一大小写）
-            ftype_norm = _normalize_type(ftype)
-            src_type_norm = _normalize_type(src_type)
-
-            if ftype_norm != src_type_norm:
-                # 精度变化（DECIMAL 精度不同）比纯类型不同更值得关注
-                severity = "medium"
-                mismatch_kind = "类型不一致"
-                if _is_precision_change(ftype_norm, src_type_norm):
-                    severity = "high"  # 精度丢失/截断风险
-                    mismatch_kind = "精度不一致"
-                elif ftype_norm.split("(")[0] != src_type_norm.split("(")[0]:
-                    severity = "high"  # 类型族不同（VARCHAR→INT）
-                    mismatch_kind = "类型不一致"
-
-                issues.append({
-                    "category": "type_consistency",
-                    "severity": severity,
-                    "title": f"字段{mismatch_kind}: {target_field} ({src_table} → {current_table})",
-                    "description": (
-                        f"字段 '{target_field}' 在 {src_table}（{lin_step}）类型为 {src_type}，"
-                        f"写入 {current_table}（{producing_step}）后类型变为 {ftype}，"
-                        f"{mismatch_kind}可能导致数据{'精度丢失或截断' if severity == 'high' else '异常'}"
-                    ),
-                    "field": target_field,
-                    "source_table": src_table,
-                    "source_field": src_field,
-                    "source_type": src_type,
-                    "source_step": lin_step,
-                    "current_table": current_table,
-                    "current_type": ftype,
-                    "current_step": producing_step,
-                    "mismatch_kind": mismatch_kind,
-                })
+            _add_type_issue_if_mismatch(
+                issues, target_field, ftype, src_type,
+                f"{src_table}（{lin_step}）", producing_step, current_table,
+                extra={"source_table": src_table, "source_field": src_field,
+                       "source_step": lin_step, "field": target_field},
+            )
 
     return issues
+
+
+def _add_type_issue_if_mismatch(
+    issues: list, target_field: str, target_type: str, source_type: str,
+    source_desc: str, producing_step: str, current_table: str,
+    extra: dict = None,
+):
+    """类型不一致时追加 issue（归一化对比 + 严重度判定）。
+
+    target_type 是目标字段 DDL 类型；source_type 是源类型（源表字段/常量/cast目标/分支字段）。
+    extra 额外字段（如 source_table/source_field，给 direct/aggregate 路径用）。
+    """
+    ftype_norm = _normalize_type(target_type)
+    src_type_norm = _normalize_type(source_type)
+    if ftype_norm == src_type_norm:
+        return  # 类型一致，不报
+
+    # 同家族的整数类型兼容（int/bigint/smallint 互转不丢数据，sqlglot 会把 bigint 标准化成 int）
+    if _same_int_family(ftype_norm, src_type_norm):
+        return
+
+    severity = "medium"
+    mismatch_kind = "类型不一致"
+    if _is_precision_change(ftype_norm, src_type_norm):
+        severity = "high"
+        mismatch_kind = "精度不一致"
+    elif ftype_norm.split("(")[0] != src_type_norm.split("(")[0]:
+        severity = "high"
+        mismatch_kind = "类型不一致"
+
+    issue = {
+        "category": "type_consistency",
+        "severity": severity,
+        "title": f"字段{mismatch_kind}: {target_field} ({source_desc} → {current_table})",
+        "description": (
+            f"字段 '{target_field}' 来源 {source_desc} 类型为 {source_type}，"
+            f"写入 {current_table}（{producing_step}）后类型为 {target_type}，"
+            f"{mismatch_kind}可能导致数据{'精度丢失或截断' if severity == 'high' else '异常'}"
+        ),
+        "field": target_field,
+        "source_type": source_type,
+        "current_table": current_table,
+        "current_type": target_type,
+        "current_step": producing_step,
+        "mismatch_kind": mismatch_kind,
+    }
+    if extra:
+        issue.update(extra)
+    issues.append(issue)
+
+
+def _infer_constant_type(raw_sql: str) -> str:
+    """从赋值表达式的常量推断类型。
+
+    'N' AS flag      → varchar(1)
+    'UNKNOWN' AS x   → varchar(7)
+    0 AS status      → integer
+    1.5 AS factor    → numeric(2,1)
+    CAST(0 AS ...)   → 走 _extract_cast_target_type
+    """
+    import re
+    if not raw_sql:
+        return ""
+    sql = raw_sql.strip()
+    # 去掉 AS alias 部分
+    sql_no_alias = re.sub(r'\s+AS\s+\w+\s*$', '', sql, flags=re.IGNORECASE).strip()
+
+    # 字符串常量
+    str_m = re.match(r"^'([^']*)'$", sql_no_alias)
+    if str_m:
+        val = str_m.group(1)
+        return f"varchar({len(val)})" if val else "varchar(0)"
+    # 数字常量（带小数）
+    if re.match(r"^-?\d+\.\d+$", sql_no_alias):
+        int_part, dec_part = sql_no_alias.lstrip("-").split(".")
+        return f"numeric({len(int_part) + len(dec_part)},{len(dec_part)})"
+    # 整数常量
+    if re.match(r"^-?\d+$", sql_no_alias):
+        return "integer"
+    return ""
+
+
+def _extract_cast_target_type(expr_sql_upper: str) -> str:
+    """从 CAST(x AS TYPE) 提取 TYPE（含长度/精度）。"""
+    import re
+    # cast(x as varchar(50)) / cast(x as bigint)
+    m = re.search(r'CAST\s*\([^)]*?\s+AS\s+([A-Z][A-Z0-9\s]*(?:\([^)]*\))?)',
+                  expr_sql_upper, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    return ""
+
+
+def _extract_case_when_branch_fields(lineage: list) -> list:
+    """从 case_when 字段的 lineage 提取 THEN/ELSE 分支里的源字段。
+
+    返回 [(src_alias, src_field, step), ...]
+    注意：WHEN 条件里的字段不提取（那是判断逻辑，不是输出来源）。
+    """
+    import sqlglot
+    from sqlglot import exp as EXP
+
+    # 从 lineage 的 raw_sql 里拿 case_when 表达式
+    raw_sql = ""
+    step = ""
+    for lin in lineage:
+        raw_sql = lin.get("raw_sql") or ""
+        step = lin.get("step") or ""
+        if raw_sql:
+            break
+    if not raw_sql:
+        return []
+
+    # 去掉 AS alias 后解析
+    import re
+    expr = re.sub(r'\s+AS\s+\w+\s*$', '', raw_sql, flags=re.IGNORECASE).strip()
+    try:
+        tree = sqlglot.parse_one(expr, dialect="oracle")
+    except Exception:
+        return []
+
+    branch_fields = []
+    for case_node in tree.find_all(EXP.Case):
+        # THEN/ELSE 分支
+        for branch in [case_node.args.get("default")] + list(case_node.find_all(EXP.If)):
+            pass  # sqlglot Case 结构：whens 是 (this=condition, expression=result) 对
+        # 正确遍历：Case 的 whens 是 If 节点列表，每个 If 的 this 是条件，expression 是结果
+        for if_node in case_node.args.get("whens", []):
+            result = if_node.args.get("expression") or if_node.this
+            if result:
+                for col in result.find_all(EXP.Column):
+                    branch_fields.append((
+                        col.table or "",
+                        col.name,
+                        step,
+                    ))
+        # ELSE 分支（default）
+        default = case_node.args.get("default")
+        if default:
+            for col in default.find_all(EXP.Column):
+                branch_fields.append((
+                    col.table or "",
+                    col.name,
+                    step,
+                ))
+    return branch_fields
+
+
+def _resolve_alias_to_table(src_alias: str, lin_step: str, step_alias_map: dict) -> str:
+    """别名 → 真实表名。"""
+    if not src_alias:
+        return ""
+    amap = step_alias_map.get(lin_step, {})
+    return amap.get(src_alias.upper(), "")
+
+
+def _lookup_catalog_type(src_table: str, src_field: str, table_catalog: dict) -> str:
+    """从 catalog 查源表字段类型。"""
+    src_table_key = _norm_table(src_table).lower()
+    src_meta = table_catalog.get(src_table_key, {})
+    return src_meta.get(src_field.lower(), {}).get("type", "")
+
+
+def _same_int_family(type1: str, type2: str) -> bool:
+    """两个类型是否都是整数家族（int/bigint/smallint/tinyint 等）。
+
+    sqlglot 解析时会把 bigint 标准化成 int，导致 cast(x as bigint) 提取出 int，
+    跟 DDL 的 bigint 归一化后不等。但整数互转不丢数据，不该报。
+    """
+    INT_TYPES = {"int", "integer", "bigint", "smallint", "tinyint"}
+    base1 = type1.split("(")[0]
+    base2 = type2.split("(")[0]
+    return base1 in INT_TYPES and base2 in INT_TYPES
 
 
 def _normalize_type(type_str: str) -> str:
