@@ -390,6 +390,13 @@ def _process_group(group, output_dir, raw, no_ai, ddl_dir):
         result.error = f"{type(e).__name__}: {e}"
         # output_dir 已在对象初始化时预赋值，失败组也能定位目录（便于排查/重跑）。
         # 详细错误经 _log_group_results 写入批次日志；这里不再 print，避免 stdout 累积。
+    finally:
+        # 每组分析完清 SQL AST 缓存，防批量场景内存持续增长
+        try:
+            from engine import clear_sql_ast_cache
+            clear_sql_ast_cache()
+        except Exception:
+            pass
     return result
 
 

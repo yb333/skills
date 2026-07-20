@@ -343,3 +343,64 @@ class TestTypeCheckRefined:
         issues = _type_issues(kj)
         # int → bigint 是安全扩大，不该报
         assert len(issues) == 0, f"int→bigint整数家族兼容不该报: {issues}"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 类型兼容判定（与影响分析同口径：源能被目标冗余兜底就不报）
+# ═══════════════════════════════════════════════════════════════
+
+class TestTypeCompatUnified:
+    """类型兼容判定两边统一：engine.check_type_consistency 和 impact_analyzer._assess_type_change 同口径。
+
+    核心规则：源类型能被目标冗余兜底（不丢数据）就不报。
+    - 整数家族互转（int/bigint/smallint）
+    - integer → numeric 安全跨类（目标精度够容纳）
+    - 同家族目标更宽
+    """
+
+    def test_int_to_numeric_compatible(self, tmp_path):
+        """int → numeric(18,2) 该不报（整数可安全转数值，目标精度够）。"""
+        rules = [
+            RawRule(rule_code="R1", rule_type=1, exec_sequence=1,
+                    target_schema="dws", target_table="final_t",
+                    query_sql="SELECT a.id AS out_id FROM ods.src_a a"),
+        ]
+        ddls = {
+            "src_a": "CREATE TABLE src_a (id INT);",
+            "final_t": "CREATE TABLE final_t (out_id NUMERIC(18,2));",
+        }
+        kj = _run_analysis(rules, ddls, tmp_path)
+        issues = _type_issues(kj)
+        assert len(issues) == 0, f"int→numeric(18,2) 安全跨类不该报: {issues}"
+
+    def test_int_to_numeric_precision_too_small(self, tmp_path):
+        """int → numeric(2,0) 该报（目标精度装不下整数）。"""
+        rules = [
+            RawRule(rule_code="R1", rule_type=1, exec_sequence=1,
+                    target_schema="dws", target_table="final_t",
+                    query_sql="SELECT a.id AS out_id FROM ods.src_a a"),
+        ]
+        ddls = {
+            "src_a": "CREATE TABLE src_a (id INT);",
+            "final_t": "CREATE TABLE final_t (out_id NUMERIC(2,0));",
+        }
+        kj = _run_analysis(rules, ddls, tmp_path)
+        issues = _type_issues(kj)
+        assert len(issues) >= 1, "int→numeric(2,0) 精度不够应该报"
+
+    def test_value_constant_type_consistency_field_present(self, tmp_path):
+        """value 路径的 issue 含 source_table 字段（高亮渲染统一）。"""
+        rules = [
+            RawRule(rule_code="R1", rule_type=1, exec_sequence=1,
+                    target_schema="dws", target_table="final_t",
+                    query_sql="SELECT 'UNKNOWN_STATUS' AS flag FROM ods.src_a a"),
+        ]
+        ddls = {
+            "src_a": "CREATE TABLE src_a (id INT);",
+            "final_t": "CREATE TABLE final_t (flag VARCHAR(1));",
+        }
+        kj = _run_analysis(rules, ddls, tmp_path)
+        issues = _type_issues(kj)
+        assert len(issues) >= 1
+        # value 路径也要有 source_table（HTML 高亮判定需要）
+        assert issues[0].get("source_table"), f"value issue 缺 source_table: {issues[0]}"

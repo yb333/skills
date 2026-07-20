@@ -156,6 +156,36 @@ _LINE_COMMENT_RE = re.compile(r"--[^\n]*")
 # 块注释：/* */（非贪婪，跨行）
 _BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 
+# ── SQL AST 解析缓存 ──
+# 同一条 SQL 在解析流程里会被多次解析（parse_single_sql/build_data_blocks/build_topology
+# 各解析一次）。缓存按"预处理后的 clean SQL + 方言"做 key，命中直接返回 AST。
+# 注意：sqlglot 的 AST 是可变对象，调用方不应修改缓存里的 tree（只读遍历）。
+_SQL_AST_CACHE: dict = {}
+
+
+def _parse_sqlglot_cached(sql: str, dialect: str = "oracle"):
+    """带缓存的 sqlglot.parse_one。
+
+    按 (sql, dialect) 缓存 AST。同一条 SQL 多次解析只做一次真正的 AST 构建。
+    返回的 tree 是共享对象，调用方只读遍历，不要修改。
+    """
+    cache_key = (sql, dialect)
+    cached = _SQL_AST_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    tree = sqlglot.parse_one(sql, dialect=dialect)
+    _SQL_AST_CACHE[cache_key] = tree
+    return tree
+
+
+def clear_sql_ast_cache():
+    """清空 SQL AST 缓存。
+
+    批量分析多个规则组时，每组的 SQL 不同，缓存会持续增长。
+    调用方可在每组分析完后清缓存控制内存（如 batch.py 每组后调一次）。
+    """
+    _SQL_AST_CACHE.clear()
+
 # ═══════════════════════════════════════════════════════════════
 # 数据类
 # ═══════════════════════════════════════════════════════════════
@@ -833,10 +863,6 @@ def collect_all_usage(unit, depth=0):
             j, w = collect_all_usage(cte_def["body"], depth + 1)
             join_usage.extend(j)
             where_usage.extend(w)
-        for cte_def in unit.cte_defs:
-            j, w = collect_all_usage(cte_def["body"], depth + 1)
-            join_usage.extend(j)
-            where_usage.extend(w)
 
     elif unit.type == "union":
         for b in unit.branches:
@@ -899,8 +925,8 @@ def parse_single_sql(sql: str, dialect: str = "dws") -> ParsedSQL:
     # 不应让 analyzer 主循环中断（一条坏 SQL 不该拖垮整个制品包分析），
     # 一律降级为带 parse_error 的 ParsedSQL，让该规则标记失败后继续。
     try:
-        tree = sqlglot.parse_one(clean, dialect=sqlglot_dialect)
-        result.clean_sql = clean  # 存预处理后的 SQL，供 build_data_blocks 复用（不重新 strip/replace）
+        tree = _parse_sqlglot_cached(clean, sqlglot_dialect)
+        result.clean_sql = clean  # 存预处理后的 SQL，供 build_data_blocks/topology 复用 + AST 缓存命中
         # SELECT * / t.* 检测
         if tree.find(exp.Star) is not None:
             result.has_star = True
@@ -2641,7 +2667,7 @@ def build_data_blocks(step: dict, df_step: dict, parsed, fields: list) -> list:
     if parsed and not parsed.parse_error:
         try:
             clean = parsed.clean_sql or _replace_placeholders(_strip_dws_clauses(parsed.raw_sql))
-            tree = sqlglot.parse_one(clean, dialect="oracle")
+            tree = _parse_sqlglot_cached(clean, "oracle")
         except Exception:
             tree = None
     else:
@@ -3399,12 +3425,13 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
 
         # 全树扫描所有表（含子查询内部），用于自引用检测
         # parse 只做一次（在 source_tables 循环之外），用 _norm_table 归一化去重
+        # 复用 parse_single_sql 存的 clean_sql（已剔注释+strip+replace），跟 build_data_blocks
+        # 共享 AST 缓存，不重新预处理
         all_sql_tables = []
         _all_sql_seen = set()
         try:
-            clean = _strip_dws_clauses(parsed.raw_sql)
-            clean = _replace_placeholders(clean)
-            tree = sqlglot.parse_one(clean, dialect="oracle")
+            clean = parsed.clean_sql or _replace_placeholders(_strip_dws_clauses(parsed.raw_sql))
+            tree = _parse_sqlglot_cached(clean, "oracle")
             if isinstance(tree, (exp.Union, exp.Intersect, exp.Except)):
                 # 集合操作：收集所有分支的表
                 branches = []
@@ -5400,6 +5427,8 @@ def check_type_consistency(field_mappings: dict, table_catalog: dict,
                     _add_type_issue_if_mismatch(
                         issues, target_field, ftype, const_type,
                         "常量赋值", producing_step, current_table,
+                        extra={"source_table": "(常量)", "source_field": target_field,
+                               "field": target_field},
                     )
                 break  # value 只有一个 lineage 条目
             continue  # value 不走下面的 lineage 循环
@@ -5417,6 +5446,8 @@ def check_type_consistency(field_mappings: dict, table_catalog: dict,
                 _add_type_issue_if_mismatch(
                     issues, target_field, ftype, cast_type,
                     "CAST转换", producing_step, current_table,
+                    extra={"source_table": "(CAST)", "source_field": target_field,
+                           "field": target_field},
                 )
                 continue
             else:
@@ -5437,6 +5468,8 @@ def check_type_consistency(field_mappings: dict, table_catalog: dict,
                     _add_type_issue_if_mismatch(
                         issues, target_field, ftype, src_type,
                         f"CASE分支字段({src_table}.{src_field})", producing_step, current_table,
+                        extra={"source_table": src_table, "source_field": src_field,
+                               "source_step": lin_step, "field": target_field},
                     )
             continue  # case_when 不走下面的 lineage 循环
 
@@ -5490,20 +5523,25 @@ def _add_type_issue_if_mismatch(
     source_desc: str, producing_step: str, current_table: str,
     extra: dict = None,
 ):
-    """类型不一致时追加 issue（归一化对比 + 严重度判定）。
+    """类型不一致时追加 issue（归一化对比 + 兼容性判定）。
 
     target_type 是目标字段 DDL 类型；source_type 是源类型（源表字段/常量/cast目标/分支字段）。
     extra 额外字段（如 source_table/source_field，给 direct/aggregate 路径用）。
+
+    判定逻辑与 impact_analyzer._assess_type_change 一致：
+    源类型能被目标冗余兜底（_is_type_compatible）就不报。
     """
     ftype_norm = _normalize_type(target_type)
     src_type_norm = _normalize_type(source_type)
     if ftype_norm == src_type_norm:
-        return  # 类型一致，不报
+        return  # 类型完全一致，不报
 
-    # 同家族的整数类型兼容（int/bigint/smallint 互转不丢数据，sqlglot 会把 bigint 标准化成 int）
-    if _same_int_family(ftype_norm, src_type_norm):
+    # ★ 兼容性判定：源类型能被目标冗余兜底就不报（跟影响分析同口径）
+    # 覆盖：整数家族互转、integer→numeric 安全跨类、同家族目标更宽
+    if _is_type_compatible(source_type, target_type):
         return
 
+    # 不兼容 → 判定严重度
     severity = "medium"
     mismatch_kind = "类型不一致"
     if _is_precision_change(ftype_norm, src_type_norm):
@@ -5596,11 +5634,11 @@ def _extract_case_when_branch_fields(lineage: list) -> list:
     if not raw_sql:
         return []
 
-    # 去掉 AS alias 后解析
+    # 去掉 AS alias 后解析（带缓存，同一表达式多次检查只解析一次）
     import re
     expr = re.sub(r'\s+AS\s+\w+\s*$', '', raw_sql, flags=re.IGNORECASE).strip()
     try:
-        tree = sqlglot.parse_one(expr, dialect="oracle")
+        tree = _parse_sqlglot_cached(expr, "oracle")
     except Exception:
         return []
 
@@ -5656,6 +5694,126 @@ def _same_int_family(type1: str, type2: str) -> bool:
     base1 = type1.split("(")[0]
     base2 = type2.split("(")[0]
     return base1 in INT_TYPES and base2 in INT_TYPES
+
+
+# ── 类型兼容判定（与 impact_analyzer.py 共用同一套逻辑）──
+# 两边判定口径必须一致：源类型能被目标冗余兜底就不报。
+
+# 类型大类归一化映射
+_TYPE_FAMILY_MAP = {
+    "int": "integer", "integer": "integer", "bigint": "integer",
+    "smallint": "integer", "tinyint": "integer", "int2": "integer",
+    "int4": "integer", "int8": "integer", "serial": "integer",
+    "varchar": "varchar", "character": "varchar", "char": "varchar",
+    "text": "varchar", "string": "varchar", "nvarchar": "varchar",
+    "nvarchar2": "varchar", "varchar2": "varchar",
+    "numeric": "numeric", "decimal": "numeric", "number": "numeric",
+    "float": "numeric", "double": "numeric", "real": "numeric",
+    "float4": "numeric", "float8": "numeric", "precision": "numeric",
+    "date": "datetime", "timestamp": "datetime", "time": "datetime",
+    "datetime": "datetime",
+    "boolean": "boolean", "bool": "boolean",
+}
+
+
+def _parse_type_info(type_str: str) -> dict:
+    """解析类型字符串为结构化信息：{family, raw, length, scale}。
+
+    family: 归一化大类（integer/varchar/numeric/datetime/boolean/unknown）
+    length: 长度（varchar 的 n，或 numeric 的 precision）
+    scale: 小数位数（numeric 的 scale）
+    """
+    import re
+    if not type_str:
+        return {"family": "unknown", "raw": "", "length": None, "scale": None}
+
+    raw = type_str.strip()
+    lower = raw.lower()
+
+    type_name_match = re.match(r'^([a-zA-Z][a-zA-Z\s]*?)(?:\s*\(|\s*$)', lower)
+    if type_name_match:
+        base_name = type_name_match.group(1).strip()
+        if "character" in base_name and "varying" in lower:
+            base_name = "varchar"
+        elif base_name == "character":
+            base_name = "char"
+    else:
+        base_name = lower.split("(")[0].split()[0] if lower.split() else "unknown"
+
+    family = _TYPE_FAMILY_MAP.get(base_name, "unknown")
+
+    length = None
+    scale = None
+    param_match = re.search(r'\(([^)]*)\)', lower)
+    if param_match:
+        params = [p.strip() for p in param_match.group(1).split(",")]
+        if params:
+            try:
+                length = int(params[0])
+            except (ValueError, TypeError):
+                pass
+        if len(params) > 1:
+            try:
+                scale = int(params[1])
+            except (ValueError, TypeError):
+                pass
+
+    return {"family": family, "raw": raw, "length": length, "scale": scale}
+
+
+def _is_type_compatible(source_type: str, target_type: str) -> bool:
+    """源类型能否被目标类型冗余兜底（不丢数据）。
+
+    与 impact_analyzer._assess_type_change 的兼容判定同一套逻辑：
+    - 同家族 + 目标长度≥源 → 兼容
+    - integer → numeric 安全跨类（整数可精确表示为数值）
+    - 整数家族互转（int/bigint/smallint）兼容
+    - 其他跨大类（int↔varchar↔date）不兼容
+    """
+    src = _parse_type_info(source_type)
+    tgt = _parse_type_info(target_type)
+
+    # 整数家族互转（含 sqlglot bigint→int 标准化场景）
+    if _same_int_family(_normalize_type(source_type), _normalize_type(target_type)):
+        return True
+
+    # integer → numeric 安全跨类：目标精度要能容纳整数位数
+    if src["family"] == "integer" and tgt["family"] == "numeric":
+        # integer 无显式长度时按基础类型给默认值（int≈10位，bigint≈19位，smallint≈5位）
+        src_len = src["length"]
+        if src_len is None:
+            src_len_map = {"int": 10, "integer": 10, "bigint": 19,
+                           "smallint": 5, "tinyint": 3}
+            src_base = _normalize_type(source_type).split("(")[0]
+            src_len = src_len_map.get(src_base, 10)
+        if tgt["length"] is not None:
+            return tgt["length"] >= src_len
+        return True  # 目标 numeric 无精度限制（罕见），兼容
+
+    # 同家族比长度
+    if src["family"] == tgt["family"]:
+        # 目标无长度（如 text）→ 不限制
+        if tgt["length"] is None:
+            return True
+        # 源无长度 → 无法判，保守兼容
+        if src["length"] is None:
+            return True
+        # varchar 比长度
+        if src["family"] == "varchar":
+            return tgt["length"] >= src["length"]
+        # numeric 比精度+标度
+        if src["family"] == "numeric":
+            if tgt["length"] < src["length"]:
+                return False
+            if src["scale"] is not None and tgt["scale"] is not None:
+                if tgt["scale"] < src["scale"]:
+                    return False
+            return True
+        # 整数/datetime/boolean 同家族
+        return True
+
+    # 跨大类（int↔varchar↔date）不兼容
+    return False
 
 
 def _normalize_type(type_str: str) -> str:
