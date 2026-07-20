@@ -168,3 +168,77 @@ class TestTypeConsistencyFallback:
         issues = _type_issues(kj)
         # tmp_t 没 DDL，无法对比 → 不报（不是漏报，是确实没数据可比）
         assert len(issues) == 0
+
+
+# ═══════════════════════════════════════════════════════════════
+# 类型检查范围控制（哪些加工类型该查/不该查）
+# ═══════════════════════════════════════════════════════════════
+
+class TestTypeCheckScope:
+    """类型一致性检查的范围：只查 direct + SUM/MIN/MAX，跳过 case_when/COUNT/expression。
+
+    背景：CASE WHEN flag=1 THEN 'Y' END AS del_flag，拿条件里的 flag(int)
+    跟输出 del_flag(varchar) 比类型是错的——输出类型由 SQL 语义决定，跟源字段无关。
+    """
+
+    def test_case_when_not_checked(self, tmp_path):
+        """case_when 加工的字段不做类型对比（条件字段类型跟输出无关）。"""
+        rules = [
+            RawRule(rule_code="R1", rule_type=1, exec_sequence=1,
+                    target_schema="dws", target_table="final_t",
+                    query_sql="SELECT CASE WHEN a.flag = 1 THEN 'Y' ELSE 'N' END AS del_flag FROM ods.src_a a"),
+        ]
+        ddls = {
+            "src_a": "CREATE TABLE src_a (flag INT NOT NULL);",
+            "final_t": "CREATE TABLE final_t (del_flag VARCHAR(1));",
+        }
+        kj = _run_analysis(rules, ddls, tmp_path)
+        issues = _type_issues(kj)
+        # flag(int) → del_flag(varchar) 是 case_when 语义决定，不该报
+        assert len(issues) == 0, f"case_when 不该报类型不一致: {issues}"
+
+    def test_count_not_checked(self, tmp_path):
+        """COUNT 聚合不做类型对比（输出恒为 bigint，跟源类型无关）。"""
+        rules = [
+            RawRule(rule_code="R1", rule_type=1, exec_sequence=1,
+                    target_schema="dws", target_table="final_t",
+                    query_sql="SELECT COUNT(*) AS cnt FROM ods.src_a a"),
+        ]
+        ddls = {
+            "src_a": "CREATE TABLE src_a (id INT);",
+            "final_t": "CREATE TABLE final_t (cnt BIGINT);",
+        }
+        kj = _run_analysis(rules, ddls, tmp_path)
+        issues = _type_issues(kj)
+        assert len(issues) == 0, f"COUNT 不该报类型不一致: {issues}"
+
+    def test_sum_precision_checked(self, tmp_path):
+        """SUM 精度丢失该报（SUM不改基础类型，精度丢失是真问题）。"""
+        rules = [
+            RawRule(rule_code="R1", rule_type=1, exec_sequence=1,
+                    target_schema="dws", target_table="final_t",
+                    query_sql="SELECT SUM(a.amount) AS total FROM ods.src_a a"),
+        ]
+        ddls = {
+            "src_a": "CREATE TABLE src_a (amount DECIMAL(18,4));",
+            "final_t": "CREATE TABLE final_t (total DECIMAL(18,2));",
+        }
+        kj = _run_analysis(rules, ddls, tmp_path)
+        issues = _type_issues(kj)
+        assert len(issues) >= 1, "SUM 精度丢失应该报"
+
+    def test_expression_not_checked(self, tmp_path):
+        """表达式加工（a||b）不做类型对比（运算后类型变了）。"""
+        rules = [
+            RawRule(rule_code="R1", rule_type=1, exec_sequence=1,
+                    target_schema="dws", target_table="final_t",
+                    query_sql="SELECT (a.first_name || a.last_name) AS full_name FROM ods.src_a a"),
+        ]
+        ddls = {
+            "src_a": "CREATE TABLE src_a (first_name VARCHAR(20), last_name VARCHAR(20));",
+            "final_t": "CREATE TABLE final_t (full_name VARCHAR(100));",
+        }
+        kj = _run_analysis(rules, ddls, tmp_path)
+        issues = _type_issues(kj)
+        # 表达式输出的类型跟源字段无关，不该报
+        assert len(issues) == 0, f"表达式不该报类型不一致: {issues}"

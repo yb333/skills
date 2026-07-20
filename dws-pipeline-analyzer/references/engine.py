@@ -5258,7 +5258,7 @@ def parse_ddl_for_types(ddl_dir: str, target_table: str) -> dict[str, str]:
     return {k: v["type"] for k, v in metadata.items() if v.get("type")}
 
 
-def build_table_catalog(rules: list, ddl_dir: str) -> dict:
+def build_table_catalog(rules: list, ddl_dir: str, parsed_map: dict = None) -> dict:
     """构建多表结构目录（过程表 + 目标表的 DDL 结构）。
 
     从 rules 遍历每一步的 target_table（含过程表/中间表），批量解析 DDL，
@@ -5281,7 +5281,7 @@ def build_table_catalog(rules: list, ddl_dir: str) -> dict:
         return {}
 
     catalog = {}
-    for rule in rules:
+    for i, rule in enumerate(rules):
         # 收集这一步涉及的所有表名（target_table + 交换分区的 exchange_source_table）
         tables_to_parse = []
         if rule.target_table:
@@ -5289,6 +5289,22 @@ def build_table_catalog(rules: list, ddl_dir: str) -> dict:
         # 交换分区：exchange_source_table 是真正的目标表（F表），必须纳入 catalog
         if rule.rule_type == 9 and rule.exchange_source_table:
             tables_to_parse.append((rule.target_schema, rule.exchange_source_table))
+
+        # ★ 源表也纳入 catalog（如果 DDL 目录里有对应 DDL）
+        # 用于跨表类型一致性检查：需要对比源表字段类型 vs 目标表字段类型
+        # parsed.source_tables 含本步所有源表（ParsedJoin 列表）
+        parsed = parsed_map.get(rule.rule_code) if parsed_map else None
+        if parsed:
+            for j in parsed.source_tables:
+                src_table = j.source_table
+                if not src_table or src_table.startswith("(subquery:"):
+                    continue
+                # 解析 schema.table
+                parts = src_table.split(".")
+                if len(parts) >= 2:
+                    tables_to_parse.append((parts[0], ".".join(parts[1:])))
+                else:
+                    tables_to_parse.append(("", src_table))
 
         for schema, table in tables_to_parse:
             if not table:
@@ -5362,6 +5378,31 @@ def check_type_consistency(field_mappings: dict, table_catalog: dict,
         target_field = f.get("target_field", "")
         producing_step = f.get("producing_step", "")
         current_table = step_target_table.get(producing_step, "")
+
+        # ★ 类型一致性检查的范围控制：
+        # 只检查"源字段类型应该传导到目标"的场景，跳过"输出类型由 SQL 语义决定"的场景。
+        #
+        # 该检查：
+        #   direct（直传）— 字段没加工，源类型应=目标类型
+        #   aggregate 的 SUM/MIN/MAX — 不改变基础类型和精度，精度丢失该报
+        # 不该检查：
+        #   COUNT — 输出恒为 bigint，跟源类型无关
+        #   case_when — 输出是条件分支结果（'Y'/'N'），跟条件里的字段类型无关
+        #   expression（a+b / a||b）— 运算后类型变了
+        #   pivot/window/value — 结构/聚合变化，输出类型由 SQL 决定
+        transform_type = f.get("transform_type", "")
+        if transform_type == "aggregate":
+            # 进一步区分：COUNT 跳过，SUM/MIN/MAX 检查
+            expr_sql = ""
+            for lin in f.get("lineage", []):
+                expr_sql = (lin.get("raw_sql") or "").upper()
+                if expr_sql:
+                    break
+            if "COUNT(" in expr_sql or "COUNT (" in expr_sql:
+                continue  # COUNT 输出 bigint，跟源类型无关
+            # SUM/MIN/MAX 继续检查
+        elif transform_type != "direct":
+            continue  # case_when/expression/pivot/window/value 都跳过
 
         # 遍历 lineage，找指向 catalog 表的源字段
         for lin in f.get("lineage", []):
@@ -5698,7 +5739,7 @@ def analyze_pipeline(
     # ── Step 5a: 构建多表结构目录（DDL，可选增强，容错）──
     # catalog 含过程表+目标表的 DDL 字段结构，供字段级类型下注(P2)和
     # 跨表一致性检查(P3)使用。DDL 找不到 → catalog 为空 → 字段无类型，不阻塞。
-    table_catalog = build_table_catalog(rules, ddl_dir) if ddl_dir else {}
+    table_catalog = build_table_catalog(rules, ddl_dir, parsed_map) if ddl_dir else {}
 
     # ── Step 5b: 字段映射（双源交叉：target_fields + SQL AST + DDL类型下注）──
     field_mappings = build_field_mappings(rules, parsed_map, target_fields, table_catalog)
