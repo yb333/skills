@@ -2915,6 +2915,20 @@ function drawChainLinks(treeId, layerCount, fieldName) {
     return null;
   }
 
+  // ★ 入边/出边分组：同一目标(to)的多条入边、同一来源(from)的多条出边，
+  //   连接点在卡片宽度内均匀分散，避免多条线挤在卡片中心重叠
+  var outgoingByFrom = {};   // {from_stepId: [dep, ...]}
+  var incomingByTo = {};     // {to_stepId: [dep, ...]}
+  for (var di = 0; di < deps.length; di++) {
+    var dep0 = deps[di];
+    if (!fieldStepIds[dep0.from] || !fieldStepIds[dep0.to]) continue;
+    var fc0 = fieldChain.chains.find(function(c) { return c.step_id === dep0.from; });
+    var tc0 = fieldChain.chains.find(function(c) { return c.step_id === dep0.to; });
+    if (fc0 && tc0 && !shouldConnect(fc0.scenario || '', tc0.scenario || '')) continue;
+    (outgoingByFrom[dep0.from] = outgoingByFrom[dep0.from] || []).push(dep0);
+    (incomingByTo[dep0.to] = incomingByTo[dep0.to] || []).push(dep0);
+  }
+
   for (var di = 0; di < deps.length; di++) {
     var dep = deps[di];
     if (!fieldStepIds[dep.from] || !fieldStepIds[dep.to]) continue;
@@ -2927,19 +2941,82 @@ function drawChainLinks(treeId, layerCount, fieldName) {
     var toDom = findDomByStep(dep.to);
     if (!fromDom || !toDom) continue;
 
-    // 用 offsetTop/offsetLeft 计算坐标（不受滚动影响）
     var fromOff = getOffset(fromDom, tree);
     var toOff = getOffset(toDom, tree);
-    var x1 = fromOff.x + fromOff.w / 2;
+
+    // 出边连接点 x：同一来源的多条出边在卡片宽度内分散（不都取中心）
+    var outs = outgoingByFrom[dep.from] || [dep];
+    var outIdx = outs.indexOf(dep);
+    var x1 = fromOff.x + fromOff.w * (outs.length > 1 ? (outIdx + 1) / (outs.length + 1) : 0.5);
     var y1 = fromOff.y;           // 下卡片顶部
-    var x2 = toOff.x + toOff.w / 2;
+
+    // 入边连接点 x：同一目标的多条入边在卡片宽度内分散
+    var ins = incomingByTo[dep.to] || [dep];
+    var inIdx = ins.indexOf(dep);
+    var x2 = toOff.x + toOff.w * (ins.length > 1 ? (inIdx + 1) / (ins.length + 1) : 0.5);
     var y2 = toOff.y + toOff.h;   // 上卡片底部
+
+    // 折线中点：在两层卡片之间的间隙中点走（避免压在卡片上）
     var midY = (y1 + y2) / 2;
-    paths += '<path d="M ' + x1 + ' ' + y1 + ' L ' + x1 + ' ' + midY + ' L ' + x2 + ' ' + midY + ' L ' + x2 + ' ' + y2 + '" stroke="' + lineColor + '" stroke-width="1.5" fill="none" opacity="0.6" />';
-    paths += '<polygon points="' + (x2-5) + ',' + (y2+2) + ' ' + (x2+5) + ',' + (y2+2) + ' ' + x2 + ',' + (y2-5) + '" fill="' + lineColor + '" opacity="0.6" />';
+
+    // path 加 class 和 data 属性，支持 hover 高亮
+    paths += '<path class="chain-edge" data-from="' + escapeHtml(dep.from) + '" data-to="' + escapeHtml(dep.to) + '"'
+           + ' d="M ' + x1 + ' ' + y1 + ' L ' + x1 + ' ' + midY + ' L ' + x2 + ' ' + midY + ' L ' + x2 + ' ' + y2 + '"'
+           + ' stroke="' + lineColor + '" stroke-width="1.5" fill="none" opacity="0.6" />';
+    paths += '<polygon class="chain-edge-arrow" data-from="' + escapeHtml(dep.from) + '" data-to="' + escapeHtml(dep.to) + '"'
+           + ' points="' + (x2-5) + ',' + (y2+2) + ' ' + (x2+5) + ',' + (y2+2) + ' ' + x2 + ',' + (y2-5) + '"'
+           + ' fill="' + lineColor + '" opacity="0.6" />';
   }
 
   svg.innerHTML = '<g>' + paths + '</g>';
+  svg.style.pointerEvents = 'auto';  // 允许 path 接收 hover
+
+  // ★ hover 高亮：鼠标进入某条连线时，该线变粗变亮，其他线变淡
+  var chainEdges = svg.querySelectorAll('.chain-edge');
+  var chainArrows = svg.querySelectorAll('.chain-edge-arrow');
+  chainEdges.forEach(function(p, idx) {
+    var fromId = p.getAttribute('data-from');
+    var toId = p.getAttribute('data-to');
+    var matchArrow = svg.querySelectorAll('.chain-edge-arrow[data-from="' + fromId + '"][data-to="' + toId + '"]');
+    p.addEventListener('mouseenter', function() {
+      // 当前线高亮
+      p.setAttribute('stroke-width', '3');
+      p.setAttribute('stroke', '#2563eb');
+      p.setAttribute('opacity', '1');
+      matchArrow.forEach(function(a) { a.setAttribute('fill', '#2563eb'); a.setAttribute('opacity', '1'); });
+      // 其他线变淡
+      chainEdges.forEach(function(other) {
+        if (other !== p) other.setAttribute('opacity', '0.15');
+      });
+      chainArrows.forEach(function(other) {
+        if (other.getAttribute('data-from') !== fromId || other.getAttribute('data-to') !== toId) {
+          other.setAttribute('opacity', '0.15');
+        }
+      });
+      // 起止卡片高亮边框
+      var fromDom2 = findDomByStep(fromId);
+      var toDom2 = findDomByStep(toId);
+      if (fromDom2) fromDom2.style.outline = '2px solid #2563eb';
+      if (toDom2) toDom2.style.outline = '2px solid #2563eb';
+    });
+    p.addEventListener('mouseleave', function() {
+      // 还原所有线
+      chainEdges.forEach(function(other) {
+        other.setAttribute('stroke-width', '1.5');
+        other.setAttribute('stroke', lineColor);
+        other.setAttribute('opacity', '0.6');
+      });
+      chainArrows.forEach(function(other) {
+        other.setAttribute('fill', lineColor);
+        other.setAttribute('opacity', '0.6');
+      });
+      // 还原卡片边框
+      var fromDom2 = findDomByStep(fromId);
+      var toDom2 = findDomByStep(toId);
+      if (fromDom2) fromDom2.style.outline = '';
+      if (toDom2) toDom2.style.outline = '';
+    });
+  });
 }
 
 // ================================================================
