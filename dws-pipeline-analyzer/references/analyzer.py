@@ -1300,7 +1300,11 @@ def main():
           f"问题数: {len(quality['issues'])}")
     print()
 
-    # 写入文件
+    # 性能诊断：读各阶段耗时（在写 JSON 前读，因为 _timings 不写进 JSON）
+    timings = knowledge.get("meta", {}).get("_timings", {})
+
+    # 写入文件（_timings 是性能诊断用，不写进 JSON）
+    knowledge["meta"].pop("_timings", None)
     output_file = output_dir / "knowledge_draft.json"
     output_file.write_text(
         json.dumps(knowledge, ensure_ascii=False, indent=2),
@@ -1320,6 +1324,16 @@ def main():
     print(f"步骤数: {len(rules)}")
     print(f"字段数: {stats['total_in_sql']}")
     print(f"问题数: {len(quality['issues'])}")
+
+    # 性能诊断：输出慢阶段（>0.5s 的才显示，避免正常情况刷屏）
+    slow = sorted(timings.items(), key=lambda x: -x[1])
+    slow_filtered = [(n, t) for n, t in slow if t > 0.5]
+    total_t = sum(timings.values()) if timings else 0
+    if slow_filtered:
+        print(f"\n分析耗时: {total_t:.1f}s（慢阶段:）")
+        for name, t in slow_filtered:
+            print(f"  {name}: {t:.1f}s")
+
     print(f"\n下一步: AI 读 knowledge_summary.md，输出自然语言补充，保存为 knowledge_ai.md")
     print(f"        然后: python run.py view_generator --input knowledge_draft.json --ai-input knowledge_ai.md ...")
 

@@ -2734,7 +2734,7 @@ function openDetail(fieldName, scenario) {
         html += '<div id="' + layerId + '" style="display:flex;gap:48px;justify-content:center;margin-bottom:20px;">';
         group.forEach(function(c, ci) {
           var cScenario = c.scenario || '';
-          html += '<div class="chain-node-wrapper" data-layer="' + seqIdx + '" data-branch="' + ci + '" data-scenario="' + escapeHtml(cScenario) + '" style="display:flex;flex-direction:column;align-items:center;">';
+          html += '<div class="chain-node-wrapper" data-layer="' + seqIdx + '" data-branch="' + ci + '" data-scenario="' + escapeHtml(cScenario) + '" data-step-id="' + escapeHtml(c.step_id || '') + '" style="display:flex;flex-direction:column;align-items:center;">';
           html += renderChainNode(c);
           html += '</div>';
         });
@@ -2743,9 +2743,9 @@ function openDetail(fieldName, scenario) {
         html += '<div id="' + layerId + '" style="display:flex;justify-content:center;margin-bottom:20px;">';
         var c0 = group[0];
         var c0Scenario = c0.scenario || '';
-        html += '<div class="chain-node-wrapper" data-layer="' + seqIdx + '" data-branch="0" data-scenario="' + escapeHtml(c0Scenario) + '" style="display:flex;flex-direction:column;align-items:center;">';
-        html += renderChainNode(c0);
-        html += '</div>';
+        html += '<div class="chain-node-wrapper" data-layer="' + seqIdx + '" data-branch="0" data-scenario="' + escapeHtml(c0Scenario) + '" data-step-id="' + escapeHtml(c0.step_id || '') + '" style="display:flex;flex-direction:column;align-items:center;">';
+          html += renderChainNode(c0);
+          html += '</div>';
         html += '</div>';
       }
     });
@@ -3017,6 +3017,56 @@ function drawChainLinks(treeId, layerCount, fieldName) {
       if (toDom2) toDom2.style.outline = '';
     });
   });
+
+  // ★ 卡片 hover → 高亮相连线（双向触发：鼠标在卡片上也能高亮相关连线）
+  // 找当前 tree 内所有卡片，hover 时高亮 data-from 或 data-to 等于此卡片的连线
+  var treeEl = document.getElementById(treeId);
+  if (treeEl) {
+    var cardNodes = treeEl.querySelectorAll('.chain-node-wrapper[data-step-id]');
+    cardNodes.forEach(function(card) {
+      var cardStepId = card.getAttribute('data-step-id');
+      if (!cardStepId) return;
+      card.addEventListener('mouseenter', function() {
+        // 高亮：from 或 to 等于此卡片的连线
+        var hit = 0;
+        chainEdges.forEach(function(p) {
+          var pf = p.getAttribute('data-from');
+          var pt = p.getAttribute('data-to');
+          if (pf === cardStepId || pt === cardStepId) {
+            p.setAttribute('stroke-width', '3');
+            p.setAttribute('stroke', '#2563eb');
+            p.setAttribute('opacity', '1');
+            hit++;
+          } else {
+            p.setAttribute('opacity', '0.15');
+          }
+        });
+        chainArrows.forEach(function(a) {
+          var af = a.getAttribute('data-from');
+          var at = a.getAttribute('data-to');
+          if (af === cardStepId || at === cardStepId) {
+            a.setAttribute('fill', '#2563eb');
+            a.setAttribute('opacity', '1');
+          } else {
+            a.setAttribute('opacity', '0.15');
+          }
+        });
+        if (hit > 0) card.style.outline = '2px solid #2563eb';
+      });
+      card.addEventListener('mouseleave', function() {
+        chainEdges.forEach(function(other) {
+          other.setAttribute('stroke-width', '1.5');
+          other.setAttribute('stroke', lineColor);
+          other.setAttribute('opacity', '0.6');
+        });
+        chainArrows.forEach(function(other) {
+          other.setAttribute('fill', lineColor);
+          other.setAttribute('opacity', '0.6');
+        });
+        card.style.outline = '';
+      });
+    });
+  }
 }
 
 // ================================================================

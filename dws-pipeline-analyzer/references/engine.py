@@ -6071,8 +6071,12 @@ def analyze_pipeline(
         parsed_map: {rule_code: ParsedSQL}，供调用方做 _generate_ai_summary 等下游复用，
             避免调用方重复构造 parsed_map（否则又回到两套解析逻辑）。
     """
+    import time as _time
+    _timings = {}
+
     # ── Step 3: SQL 解析（分层：SELECT类深度解析，其他记录） ──
     parsed_map = {}
+    _t0 = _time.time()
     for rule in rules:
         if rule.rule_type in SELECT_RULE_TYPES and rule.query_sql:
             parsed_map[rule.rule_code] = parse_single_sql(rule.query_sql, dialect)
@@ -6081,28 +6085,40 @@ def analyze_pipeline(
             parsed_map[rule.rule_code] = ParsedSQL(raw_sql=rule.query_sql)
         else:
             parsed_map[rule.rule_code] = ParsedSQL(parse_error="空 SQL")
+    _timings["parse_sql"] = _time.time() - _t0
 
     # ── Step 4: 拓扑构建 ──
+    _t0 = _time.time()
     topology = build_topology(rules, parsed_map)
+    _timings["build_topology"] = _time.time() - _t0
 
     # ── Step 5: 数据流 ──
+    _t0 = _time.time()
     data_flow = build_data_flow(rules, parsed_map)
+    _timings["build_data_flow"] = _time.time() - _t0
 
     # ── Step 5a: 构建多表结构目录（DDL，可选增强，容错）──
-    # catalog 含过程表+目标表的 DDL 字段结构，供字段级类型下注(P2)和
-    # 跨表一致性检查(P3)使用。DDL 找不到 → catalog 为空 → 字段无类型，不阻塞。
+    _t0 = _time.time()
     table_catalog = build_table_catalog(rules, ddl_dir, parsed_map) if ddl_dir else {}
+    _timings["build_table_catalog"] = _time.time() - _t0
 
     # ── Step 5b: 字段映射（双源交叉：target_fields + SQL AST + DDL类型下注）──
+    _t0 = _time.time()
     field_mappings = build_field_mappings(rules, parsed_map, target_fields, table_catalog)
+    _timings["build_field_mappings"] = _time.time() - _t0
 
     # ── Step 5c: 关联键跨步骤追溯 ──
+    _t0 = _time.time()
     enrich_join_key_lineage(data_flow, rules, parsed_map, topology, field_mappings)
+    _timings["enrich_join_key_lineage"] = _time.time() - _t0
 
     # ── Step 5d: 字段物理来源穿透（供 mapping 用）──
+    _t0 = _time.time()
     enrich_field_physical_sources(field_mappings, data_flow, rules, parsed_map, topology)
+    _timings["enrich_field_physical_sources"] = _time.time() - _t0
 
     # ── Step 5e: 结构化步骤概述 + 数据块（步骤卡片的加工逻辑展示）──
+    _t0 = _time.time()
     topo_steps = topology.get("steps", [])
     df_steps = data_flow.get("steps", [])
     fields_list = field_mappings.get("fields", [])
@@ -6113,14 +6129,17 @@ def analyze_pipeline(
             rc = ts.get("rule_code", "")
             parsed = parsed_map.get(rc)
             ds["data_blocks"] = build_data_blocks(ts, ds, parsed, fields_list)
+    _timings["build_data_blocks"] = _time.time() - _t0
 
     # ── Step 6: 质量分析 ──
+    _t0 = _time.time()
     quality = analyze_quality(topology, data_flow, field_mappings, parsed_map)
+    _timings["analyze_quality"] = _time.time() - _t0
 
     # ── Step 6b: 跨表字段类型一致性检查（P3，依赖 DDL catalog）──
-    # 同一字段在过程表和目标表类型不一致 → 精度丢失/截断风险
-    # DDL 找不到（catalog 为空）→ 不检查，不阻塞
+    _t0 = _time.time()
     type_issues = check_type_consistency(field_mappings, table_catalog, rules, parsed_map)
+    _timings["check_type_consistency"] = _time.time() - _t0
     if type_issues:
         quality["issues"].extend(type_issues)
         # 重新统计 issue_statistics（high 归入 medium 档，因为 statistics 只有4档）
@@ -6193,6 +6212,7 @@ def analyze_pipeline(
             "load_strategy": load_strategy,
             "target_field_types": {k: v["type"] for k, v in target_metadata.items() if v.get("type")},
             "target_field_comments": {k: v["comment"] for k, v in target_metadata.items() if v.get("comment")},
+            "_timings": _timings,  # 各阶段耗时（秒），供性能诊断
         },
         "topology": topology,
         "data_flow": data_flow,
