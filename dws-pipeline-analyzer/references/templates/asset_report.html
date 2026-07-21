@@ -2398,11 +2398,6 @@ function renderQuality() {
       groups[catLabel].push(iss);
     });
 
-    // 组内按严重度排序（critical 在前）
-    Object.keys(groups).forEach(function(k) {
-      groups[k].sort(function(a, b) { return sevRank(b.severity) - sevRank(a.severity); });
-    });
-
     // 组间按组内最高严重度排序（最严重的组排最前）
     var groupKeys = Object.keys(groups).sort(function(a, b) {
       var maxA = Math.max.apply(null, groups[a].map(function(i) { return sevRank(i.severity); }));
