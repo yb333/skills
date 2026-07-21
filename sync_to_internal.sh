@@ -122,19 +122,30 @@ git add -A
 if git diff --cached --quiet; then
     echo "  无变更，内容已是最新。"
 else
-    # 提取外网最新 commit 的短 hash 做提交信息
-    SHORT_HASH=$(echo "$EXTERNAL_VERSION" | cut -d' ' -f1)
-    COMMIT_MSG=$(echo "$EXTERNAL_VERSION" | cut -d' ' -f2-)
-    git commit -m "sync: 同步外网更新 ($SHORT_HASH)
+    # 用外网最新 commit 的原始 message 做提交信息（不加"同步"前缀）
+    # 从临时目录取完整 commit message
+    cd "$TEMP_DIR"
+    COMMIT_SUBJECT=$(git log -1 --format="%s")
+    COMMIT_HASH=$(git rev-parse --short HEAD)
+    COMMIT_BODY=$(git log -1 --format="%b")
+    cd "$INTERNAL_REPO"
 
-$COMMIT_MSG" 2>&1 | tail -3
+    echo "  提交信息: $COMMIT_SUBJECT"
+    echo ""
+
+    # 用外网原始 commit message（带 hash 标注来源）
+    if [ -z "$COMMIT_BODY" ]; then
+        git commit -m "$COMMIT_SUBJECT ($COMMIT_HASH)" 2>&1 | tail -3
+    else
+        git commit -m "$COMMIT_SUBJECT ($COMMIT_HASH)" -m "$COMMIT_BODY" 2>&1 | tail -3
+    fi
     echo ""
     echo "[Step 4] 推送到内网远端..."
     git push 2>&1 | tail -3
     echo ""
     echo "═══════════════════════════════════════════════"
     echo "  ✅ 同步完成"
-    echo "  提交: $SHORT_HASH $COMMIT_MSG"
+    echo "  $COMMIT_HASH $COMMIT_SUBJECT"
     echo "═══════════════════════════════════════════════"
 fi
 

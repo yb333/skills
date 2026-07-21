@@ -133,19 +133,30 @@ git diff --cached --quiet
 if !errorlevel! equ 0 (
     echo   无变更，内容已是最新。
 ) else (
-    REM 提取外网最新 commit 的短信息
+    REM 提取外网最新 commit 的完整 message（用原始提交信息，不加"同步"前缀）
     pushd "%TEMP_DIR%"
-    for /f "delims=" %%H in ('git log --oneline -1') do set "EXT_VERSION=%%H"
+    REM 取最新 commit 的 subject（第一行 message）
+    for /f "delims=" %%H in ('git log -1 --format^="%%s"') do set "COMMIT_MSG=%%H"
+    REM 取最新 commit 的完整 hash 短缩
+    for /f "delims=" %%H in ('git rev-parse --short HEAD') do set "COMMIT_HASH=%%H"
+    REM 取 body（如果有多行 message）
+    for /f "delims=" %%H in ('git log -1 --format^="%%b"') do set "COMMIT_BODY=%%H"
     popd
-    echo   外网版本: !EXT_VERSION!
-    git commit -m "sync: 同步外网更新 - !EXT_VERSION!" 2>&1
+    echo   提交信息: !COMMIT_MSG!
+    echo.
+    REM 用外网的原始 commit message 做提交信息（带 hash 标注来源）
+    if "!COMMIT_BODY!"=="" (
+        git commit -m "!COMMIT_MSG! (!COMMIT_HASH!)" 2>&1
+    ) else (
+        git commit -m "!COMMIT_MSG! (!COMMIT_HASH!)" -m "!COMMIT_BODY!" 2>&1
+    )
     echo.
     echo [Step 4] 推送到内网远端...
     git push 2>&1
     echo.
     echo ═══════════════════════════════════════════════
     echo   同步完成
-    echo   !EXT_VERSION!
+    echo   !COMMIT_HASH! !COMMIT_MSG!
     echo ═══════════════════════════════════════════════
 )
 popd
