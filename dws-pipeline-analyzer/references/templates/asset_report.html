@@ -64,6 +64,13 @@
    ============================================================ */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* 全局允许文字选中复制（个别交互元素如 tab 栏单独设 user-select:none）
+   SVG 内的文字（foreignObject/edge-label）也一并允许选中 */
+html, body, div, span, p, td, th, code, pre, li, foreignObject, div.node-content, text.edge-label {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   font-size: 14px;
