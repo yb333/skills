@@ -2758,7 +2758,9 @@ function openDetail(fieldName, scenario) {
     });
 
     // SVG 连线放在 tree container 里面（absolute 定位相对于 treeId 的 position:relative）
-    html += '<svg id="' + treeId + '_svg" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:visible;z-index:0;"></svg>';
+    // SVG 本身 pointer-events:none（不挡住下面的卡片，卡片可选中可hover）
+    // 只有 path 元素自己接收事件（在 drawChainLinks 里设 pointer-events:stroke）
+    html += '<svg id="' + treeId + '_svg" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:visible;z-index:1;">';
     html += '</div>'; // tree container 闭合
 
     // 渲染后画连线
@@ -2976,7 +2978,11 @@ function drawChainLinks(treeId, layerCount, fieldName) {
   }
 
   svg.innerHTML = '<g>' + paths + '</g>';
-  svg.style.pointerEvents = 'auto';  // 允许 path 接收 hover
+  // ★ SVG 本身保持 pointer-events:none（不挡卡片），只让 path 元素接收事件
+  // path 设 pointer-events:stroke（只有线的描边区域接收事件，中间空白不挡）
+  svg.querySelectorAll('.chain-edge').forEach(function(p) {
+    p.style.pointerEvents = 'stroke';
+  });
 
   // ★ hover 高亮：鼠标进入某条连线时，该线变粗变亮，其他线变淡
   var chainEdges = svg.querySelectorAll('.chain-edge');
