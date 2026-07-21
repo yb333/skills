@@ -484,7 +484,10 @@ def build_report_data(knowledge):
         "table_cn_name": bl.get("summary", "").split("，")[0] if bl.get("summary") else "",
         "description": bl.get("summary", ""),
         "rule_count": len(steps_list),
-        "field_count": len(set(f.get("target_field", "") for f in fields_list if f.get("target_field"))),
+        # 目标字段数：只算最终目标表（最大 exec_sequence 步骤）的字段，不算中间步骤
+        # 中间步骤的字段不是资产的字段，算进去会多计
+        "field_count": len([f for f in fields_list
+                           if f.get("producing_step") == _max_step.get("step_id", "")]),
         "source_count": len(df.get("tables", [])),
         "scenario_count": len([s for s in scenarios if not s.get("is_common", False)]),
         "is_multi_scenario": len(scenarios) > 1,
