@@ -2372,6 +2372,10 @@ function renderQuality() {
 
   // Issues — 按 category 分组，每组可折叠
   if (issues.length > 0) {
+    // 严重度权重（数字越大越严重），用于组内和组间排序
+    var sevWeight = { 'critical': 5, 'high': 4, 'medium': 3, 'low': 2, 'info': 1 };
+    function sevRank(s) { return sevWeight[s] || 0; }
+
     // 按类别分组
     var groups = {};
     issues.forEach(function(iss) {
@@ -2379,9 +2383,14 @@ function renderQuality() {
       var catLabels = {
         'data_quality': '数据质量',
         'data_lineage': '数据血缘',
+        'type_consistency': '类型一致性',
         'performance': '性能',
+        'code_quality': '代码质量',
+        'scheduling': '调度',
+        'parse_error': '解析错误',
         'maintainability': '可维护性',
         'field_mapping': '字段映射',
+        'design': '设计',
         'other': '其他'
       };
       var catLabel = catLabels[cat] || cat;
@@ -2389,9 +2398,19 @@ function renderQuality() {
       groups[catLabel].push(iss);
     });
 
-    var groupKeys = Object.keys(groups);
-    html += '<div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:8px;">问题列表 <span style="font-weight:400;color:var(--text-muted);">(' + issues.length + ' 个，按类别分组)</span></div>';
-    
+    // 组内按严重度排序（critical 在前）
+    Object.keys(groups).forEach(function(k) {
+      groups[k].sort(function(a, b) { return sevRank(b.severity) - sevRank(a.severity); });
+    });
+
+    // 组间按组内最高严重度排序（最严重的组排最前）
+    var groupKeys = Object.keys(groups).sort(function(a, b) {
+      var maxA = Math.max.apply(null, groups[a].map(function(i) { return sevRank(i.severity); }));
+      var maxB = Math.max.apply(null, groups[b].map(function(i) { return sevRank(i.severity); }));
+      return maxB - maxA;
+    });
+
+    html += '<div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:8px;">问题列表 <span style="font-weight:400;color:var(--text-muted);">(' + issues.length + ' 个，按严重度排序)</span></div>';
     groupKeys.forEach(function(catLabel) {
       var catIssues = groups[catLabel];
       // 需关注 = 严重度 high/medium/critical（high 是类型不一致/精度丢失，比 medium 更严重）
