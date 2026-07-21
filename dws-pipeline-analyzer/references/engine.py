@@ -3557,15 +3557,15 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
                 "pattern": pattern,
             })
 
-    # ── 隐式依赖（同目标表多步骤写入）──
+    # ── 隐式依赖（写入者 → 后续读者，含单写入者）──
+    # 即使只有一个步骤写某张表，后续读这张表的步骤也依赖它（写→读依赖）
+    # 不限于多写入者：单写入者的"写→读"同样是真实的数据依赖
     implicit_dependencies = []
     for table, writers in target_writers.items():
-        if len(writers) <= 1:
-            continue
         # 找出写入该表的最大执行序列之后，是否有步骤读取该表
         max_writer_seq = max(
             s["exec_sequence"] for s in steps if s["step_id"] in writers
-        )
+        ) if writers else 0
         # 后续步骤中读取该表的
         later_readers = []
         for s in steps:
@@ -3669,6 +3669,21 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
 
     # ── 过度约束分析 ──
     over_constraints = []
+    # 先算每个步骤的 actually_depends（数据层面真实依赖谁）
+    step_depends = {}  # {step_id: [dep_step_id, ...]}
+    for s in steps:
+        deps = []
+        for d in data_dependencies:
+            if d["to"] == s["step_id"]:
+                deps.append(d["from"])
+        for imp in implicit_dependencies:
+            if imp["to"] == s["step_id"]:
+                if isinstance(imp["from"], list):
+                    deps.extend(imp["from"])
+                else:
+                    deps.append(imp["from"])
+        step_depends[s["step_id"]] = list(set(deps))
+
     for s in steps:
         my_seq = s["exec_sequence"]
         # 调度层面等谁：所有前置层级的步骤
@@ -3677,26 +3692,34 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
             if seq < my_seq:
                 waits_for.extend(sids)
 
-        # 数据层面依赖谁
-        actually_depends = []
-        for d in data_dependencies:
-            if d["to"] == s["step_id"]:
-                actually_depends.append(d["from"])
-        for imp in implicit_dependencies:
-            if imp["to"] == s["step_id"]:
-                if isinstance(imp["from"], list):
-                    actually_depends.extend(imp["from"])
-                else:
-                    actually_depends.append(imp["from"])
-
+        actually_depends = step_depends.get(s["step_id"], [])
         over = [w for w in waits_for if w not in actually_depends]
-        if over and waits_for:
-            over_constraints.append({
-                "step": s["step_id"],
-                "schedule_waits_for": waits_for,
-                "actually_depends_on": list(set(actually_depends)),
-                "over_constrained_on": over,
-            })
+
+        if not over or not waits_for:
+            continue
+
+        # ★ 串行链抑制：如果这个步骤有真实数据依赖（actually_depends 非空），
+        # 且它依赖的步骤本身也是"被调度序约束的"（不是 seq=0 的源头步骤），
+        # 那这个步骤的过度约束是被链条顺带的——优化前面它就自动提前了，不报。
+        # 只报"源头性"的过度约束：有独立数据依赖路径、或完全无依赖却在等的步骤。
+        if actually_depends:
+            # 检查依赖的步骤是否都在前置调度层（如果是，说明这是串行链中段，不报）
+            dep_seqs = []
+            for dep_id in actually_depends:
+                dep_step = next((st for st in steps if st["step_id"] == dep_id), None)
+                if dep_step:
+                    dep_seqs.append(dep_step["exec_sequence"])
+            # 如果所有依赖都在 my_seq-1（紧邻前一层），这是串行链中段，不报
+            # 只有依赖跨层（跳层依赖，如 seq=2 直接依赖 seq=0）才可能是源头性优化点
+            if dep_seqs and all(ds == my_seq - 1 for ds in dep_seqs):
+                continue  # 串行链中段，被前面顺带，不报
+
+        over_constraints.append({
+            "step": s["step_id"],
+            "schedule_waits_for": waits_for,
+            "actually_depends_on": actually_depends,
+            "over_constrained_on": over,
+        })
 
     # ── 场景分组 ──
     scenarios = build_scenarios(rules, parsed_map)
