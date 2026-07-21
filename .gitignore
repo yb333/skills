@@ -1,4 +1,9 @@
 __pycache__/
 *.pyc
-关联影响分析提效汇报.html
-关联影响分析提效汇报*.html
+.DS_Store
+
+# 汇报/演示材料（不属于 agent 本体）
+*汇报*.html
+*蓝图*.html
+*说明书*.html
+demo_*.html
