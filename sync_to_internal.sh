@@ -98,7 +98,7 @@ for item in "${SYNC_ITEMS[@]}"; do
 done
 
 # 清理内网仓库里不该有的开发文件（如果有）
-DEV_FILES=("tests" "docs" "architecture.md" "pack_release.py" "sync_to_internal.sh" "release")
+DEV_FILES=("tests" "docs" "architecture.md" "pack_release.py" "sync_to_internal.sh" "sync_to_internal.bat" "sample_rule.yml" "release")
 for df in "${DEV_FILES[@]}"; do
     if [ -e "$INTERNAL_REPO/$df" ]; then
         rm -rf "$INTERNAL_REPO/$df"

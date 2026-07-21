@@ -106,7 +106,7 @@ for %%D in (tests docs release) do (
         echo   - %%D（移除开发文件）
     )
 )
-for %%F in (architecture.md pack_release.py sync_to_internal.sh sync_to_internal.bat) do (
+for %%F in (architecture.md pack_release.py sync_to_internal.sh sync_to_internal.bat sample_rule.yml) do (
     if exist "!INTERNAL_REPO!\%%F" (
         del /q "!INTERNAL_REPO!\%%F"
         echo   - %%F（移除开发文件）
