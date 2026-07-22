@@ -908,16 +908,33 @@ def parse_single_sql(sql: str, dialect: str = "dws") -> ParsedSQL:
     # 防御：如果 SQL 含多条语句（DDL 文件被误传，含 COMMENT/CREATE 等），
     # 只保留 SELECT/WITH 语句。COMMENT ON COLUMN 的双引号会导致 sqlglot
     # ParseError，必须在解析前去掉。
+    # ★ 注意：split 前先保护字符串字面量里的分号（如 LISTAGG(x, ';') 里的分号）
     if ";" in clean:
-        stmts = [s.strip() for s in clean.split(";") if s.strip()]
+        # 保护单引号内的分号：临时替换成占位符
+        protected = clean
+        str_placeholders = []
+        import re as _re
+        for m in _re.finditer(r"'[^']*'", protected):
+            placeholder = f"\x00STR{len(str_placeholders)}\x00"
+            str_placeholders.append((placeholder, m.group(0)))
+            protected = protected[:m.start()] + placeholder + protected[m.end():]
+
+        stmts = [s.strip() for s in protected.split(";") if s.strip()]
+        # 还原占位符
+        stmts = [s for s in stmts]
         select_stmts = [s for s in stmts
                         if s.upper().startswith(("SELECT", "WITH"))]
         if select_stmts:
+            # 还原后用分号连接
             clean = "; ".join(select_stmts)
         elif stmts and not stmts[0].upper().startswith(("SELECT", "WITH")):
             # 整个 SQL 不是 SELECT（如纯 DDL），标记错误
             result.parse_error = "非 SELECT/WITH 语句（DDL？）"
             return result
+
+        # 还原字符串占位符
+        for placeholder, original in str_placeholders:
+            clean = clean.replace(placeholder, original)
 
     # 在清理注释之前，先提取 SQL 注释中的字段名映射
     # 用于给无别名的列（审计字段等）赋予正确名称
