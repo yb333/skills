@@ -506,6 +506,9 @@ def build_report_data(knowledge):
         "asset_info": asset_info,
         # 加工方式（增量/全量/分区/追加）
         "load_strategy": meta.get("load_strategy", {}),
+        # 多规则组链路信息（单规则组时为空）
+        "is_multi_group": meta.get("is_multi_group", False),
+        "chain_groups": meta.get("chain_groups", []),
     }
 
     # ── lineage (分层布局) ──
@@ -536,6 +539,10 @@ def build_report_data(knowledge):
 
     # ── steps (步骤详情 + SQL) ──
     steps_out = []
+    # 多规则组：建 target_table → rule_group_name 映射（用于步骤卡片标注归属）
+    chain_group_map = {}
+    for cg in meta.get("chain_groups", []):
+        chain_group_map[cg.get("target_table", "").lower()] = cg.get("name", "")
     for s in steps_list:
         step_id = s["step_id"]
         df_step = next((d for d in data_flow_steps if d.get("step_id") == step_id), {})
@@ -566,6 +573,8 @@ def build_report_data(knowledge):
             "raw_sql": df_step.get("raw_sql", ""),
             # I 视图步骤标注：从 topology steps 的 is_view_step 取（统一真相源）
             "is_view_step": s.get("is_view_step", False),
+            # 多规则组：该步骤属于哪个规则组（从 target_table 反查 chain_groups）
+            "rule_group_name": chain_group_map.get(s.get("target_table", "").lower(), ""),
             "join_usage": df_step.get("join_usage", []),
             "where_usage": df_step.get("where_usage", []),
             "groupby_usage": df_step.get("groupby_usage", []),
