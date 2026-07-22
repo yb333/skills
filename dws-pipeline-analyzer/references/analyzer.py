@@ -1634,6 +1634,13 @@ def main_chain():
         rule_group_code="CHAIN",
     )
 
+    # 标记这是多规则组链路分析（供报告区分）
+    knowledge["meta"]["is_multi_group"] = True
+    knowledge["meta"]["chain_groups"] = [
+        {"name": g["rule_group_en"], "target_table": g["target_table"], "depth": g["depth"]}
+        for g in sorted(result["groups"], key=lambda x: x["depth"])
+    ]
+
     # 输出
     safe_name = "chain_" + final_group_dir.name
     output_dir = Path(args.output) / safe_name
@@ -1646,15 +1653,37 @@ def main_chain():
         encoding="utf-8", newline="\n",
     )
 
+    # 生成 AI 摘要
+    summary_text = _generate_ai_summary(
+        knowledge, merged_rules, parsed_map,
+        knowledge["topology"], knowledge["field_mappings"],
+        knowledge["quality"], knowledge["data_flow"],
+    )
+    (output_dir / "knowledge_summary.md").write_text(summary_text, encoding="utf-8", newline="\n")
+
+    # 生成三件套（mapping + asset_report + tech_design）
+    print(f"\n[Step 4] 生成视图...")
+    try:
+        from view_generator import generate_mapping, generate_asset_report, generate_tech_design
+        generate_mapping(knowledge, output_dir)
+        generate_asset_report(knowledge, output_dir)
+        generate_tech_design(knowledge, output_dir)
+    except Exception as e:
+        print(f"  [WARN] 视图生成失败: {e}", file=sys.stderr)
+
     stats = knowledge["field_mappings"]["statistics"]
     target_table = knowledge["meta"]["target_table"]
     print(f"\n=== 完成 ===")
-    print(f"输出: {output_file}")
+    print(f"输出目录: {output_dir}")
     print(f"规则组数: {len(result['groups'])}")
     print(f"步骤数: {len(merged_rules)}")
     print(f"字段数: {stats['total_in_sql']}")
     print(f"目标表: {target_table}")
-    print(f"\n下一步: python run.py view_generator --input knowledge_draft.json --output . --views all")
+    print(f"\n已生成:")
+    print(f"  - knowledge_draft.json")
+    print(f"  - mapping.xlsx")
+    print(f"  - asset_report.html")
+    print(f"  - tech_design.md")
 
 
 # ═══════════════════════════════════════════════════════════════
