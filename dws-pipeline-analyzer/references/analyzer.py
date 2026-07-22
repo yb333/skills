@@ -1528,33 +1528,95 @@ def merge_rule_groups(groups_info, repo_root, ddl_dir=""):
         groups_info: trace_upstream_rule_groups 的返回值
 
     Returns:
-        merged_rules: 合并后的 RawRule 列表（exec_sequence 已全局重编号）
+        merged_rules: 合并后的 RawRule 列表（exec_sequence 已按依赖拓扑排序重编号）
     """
-    from engine import RawRule
+    from engine import RawRule, _norm_table
 
-    # 按 depth 降序排（depth 大的 = 上游 = 先执行）
-    sorted_groups = sorted(groups_info["groups"], key=lambda g: -g["depth"])
+    groups = groups_info["groups"]
+    if not groups:
+        return []
 
-    merged_rules = []
-    # ★ 用偏移量保留组内并行结构：
-    # 同一个 exec_sequence 的规则保持并行（seq 不变），
-    # 组间用偏移量保证上游在前（上游 seq 整体小于下游）。
-    # 不要拍平成一条线（那会让并行的规则变成串行）。
-    seq_offset = 0
-    for group_info in sorted_groups:
-        raw = read_yml(group_info["dir"])
-        group_rules = raw.get("rules", [])
-        if not group_rules:
+    # 读所有规则组的 rules（缓存，避免重复 read_yml）
+    group_rules_cache = {}
+    for g in groups:
+        raw = read_yml(g["dir"])
+        group_rules_cache[g["dir"]] = raw.get("rules", [])
+
+    # 算每个规则组的 target_table（归一化）
+    group_target = {}  # {group_dir: norm_target_table}
+    for g in groups:
+        rules = group_rules_cache.get(g["dir"], [])
+        if rules:
+            max_seq_rule = max(rules, key=lambda r: r.exec_sequence)
+            group_target[g["dir"]] = _norm_table(max_seq_rule.target_table)
+
+    # 算组间依赖关系：A 写的表被 B 的源表引用 → B 依赖 A
+    # group_deps[dir] = set(被依赖的 dir)
+    group_deps = {g["dir"]: set() for g in groups}
+    for g in groups:
+        for src_table in g.get("source_tables", []):
+            table_part = src_table.split(".")[-1] if "." in src_table else src_table
+            src_key = _norm_table(table_part)
+            # 找哪个规则组写了这张表
+            for other_dir, other_target in group_target.items():
+                if other_target == src_key and other_dir != g["dir"]:
+                    group_deps[g["dir"]].add(other_dir)
+
+    # 按依赖拓扑排序（被依赖的先处理）
+    # 用深度优先拓扑排序
+    sorted_dirs = []
+    visited = set()
+    temp_mark = set()
+
+    def _topo_sort(dir_path):
+        if dir_path in visited:
+            return
+        if dir_path in temp_mark:
+            return  # 环检测
+        temp_mark.add(dir_path)
+        for dep_dir in group_deps.get(dir_path, set()):
+            _topo_sort(dep_dir)
+        temp_mark.discard(dir_path)
+        visited.add(dir_path)
+        sorted_dirs.append(dir_path)
+
+    for g in groups:
+        _topo_sort(g["dir"])
+
+    # 计算每个组的偏移量：= max(依赖组的全局最大seq) + 1
+    # 互相不依赖的组 seq 重叠（都从能开始的最早seq开始）
+    group_offset = {}  # {dir: offset}
+    group_global_max = {}  # {dir: 该组加偏移后的全局最大seq}
+
+    for dir_path in sorted_dirs:
+        rules = group_rules_cache.get(dir_path, [])
+        if not rules:
+            group_offset[dir_path] = 0
+            group_global_max[dir_path] = 0
             continue
-        # 该组内最大的原始 exec_sequence
-        max_seq_in_group = max(r.exec_sequence for r in group_rules)
-        # 该组的偏移量 = 当前累计偏移
-        for rule in group_rules:
+        max_seq_in_group = max(r.exec_sequence for r in rules)
+
+        # 偏移 = 依赖的所有组中最大的全局seq + 1
+        deps = group_deps.get(dir_path, set())
+        if deps:
+            offset = max(group_global_max.get(d, 0) for d in deps) + 1
+        else:
+            offset = 0  # 没有依赖，从0开始（可能跟其他无依赖组重叠）
+
+        group_offset[dir_path] = offset
+        group_global_max[dir_path] = offset + max_seq_in_group
+
+    # 合并 rules，应用偏移量
+    merged_rules = []
+    for g in groups:
+        dir_path = g["dir"]
+        offset = group_offset.get(dir_path, 0)
+        for rule in group_rules_cache.get(dir_path, []):
             merged_rules.append(RawRule(
                 rule_code=rule.rule_code,
                 rule_name=rule.rule_name,
                 rule_type=rule.rule_type,
-                exec_sequence=rule.exec_sequence + seq_offset,
+                exec_sequence=rule.exec_sequence + offset,
                 target_schema=rule.target_schema,
                 target_table=rule.target_table,
                 delete_mode=rule.delete_mode,
@@ -1563,8 +1625,6 @@ def merge_rule_groups(groups_info, repo_root, ddl_dir=""):
                 rule_group_code=rule.rule_group_code,
                 rule_group_en=rule.rule_group_en,
             ))
-        # 下一组的偏移 = 当前组最大 seq + 偏移 + 1（留一个间隔）
-        seq_offset += max_seq_in_group + 1
 
     return merged_rules
 

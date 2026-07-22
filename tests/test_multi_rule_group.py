@@ -180,19 +180,16 @@ class TestMergeRuleGroups:
     """多规则组合并 + exec_sequence 重编号。"""
 
     def test_merged_seq_upstream_first(self, tmp_path):
-        """合并后上游（depth大的）排前面。"""
+        """合并后最终F的seq大于所有mid的seq（按依赖拓扑排序）。"""
         repo, final_dir, _ = _make_chain_repo(tmp_path)
         result = trace_upstream_rule_groups(final_dir, repo)
         merged = merge_rule_groups(result, repo)
 
-        # seq 排序：mid 规则组在前，最终 F 在后
-        target_by_seq = [(r.exec_sequence, r.target_table) for r in merged]
-        # 最终 F 应该是最后一个
-        assert target_by_seq[-1][1] == "dwb_trade_order_f"
-        # mid 在前面
-        mid_targets = [t for _, t in target_by_seq[:-1]]
-        assert "dwb_trade_mid_f" in mid_targets
-        assert "dwb_detail_mid_f" in mid_targets
+        # 最终 F 的 seq 应大于所有 mid
+        mid_seqs = [r.exec_sequence for r in merged if r.target_table != "dwb_trade_order_f"]
+        final_seqs = [r.exec_sequence for r in merged if r.target_table == "dwb_trade_order_f"]
+        assert min(final_seqs) > max(mid_seqs), \
+            f"最终F seq应大于mid: mid={mid_seqs} final={final_seqs}"
 
     def test_merged_seq_upstream_before_downstream(self, tmp_path):
         """合并后上游规则组的 seq 整体小于下游。"""
@@ -274,11 +271,18 @@ class TestChainAnalysis:
         # 3 个步骤
         assert len(kj["topology"]["steps"]) == 3
 
-        # 数据依赖：mid 规则组 → 最终 F
+        # 数据依赖：两个 mid 的 step 都连到最终 F 的 step
         deps = kj["topology"].get("data_dependencies", [])
-        # step_1(写mid1) 和 step_2(写mid2) 都依赖到 step_3(最终F)
-        to_step3 = [d for d in deps if d["to"] == "step_3"]
-        assert len(to_step3) >= 2  # 两个 mid 都连到最终 F
+        # 找最终 F 的 step_id（按 target_table 找，不硬编码 step_3）
+        final_step = next(
+            (s for s in kj["topology"]["steps"]
+             if s["target_table"] == "dwb_trade_order_f"), None
+        )
+        assert final_step, "应找到最终F的step"
+        final_step_id = final_step["step_id"]
+        # 两个 mid 的 step 都应有依赖连到最终 F
+        to_final = [d for d in deps if d["to"] == final_step_id]
+        assert len(to_final) >= 2, f"两个mid都应连到最终F({final_step_id}): {to_final}"
 
         # 最终目标表是 dwb_trade_order_f
         assert kj["meta"]["target_table"] == "dwb_trade_order_f"
