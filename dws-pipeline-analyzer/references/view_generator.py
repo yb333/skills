@@ -489,7 +489,7 @@ def build_report_data(knowledge):
         # 中间步骤的字段不是资产的字段，算进去会多计
         "field_count": len([f for f in fields_list
                            if f.get("producing_step") == _max_step.get("step_id", "")]),
-        "source_count": len(df.get("tables", [])),
+        "source_count": len([t for t in df.get("tables", []) if t.get("role") == "source"]),
         "scenario_count": len([s for s in scenarios if not s.get("is_common", False)]),
         "is_multi_scenario": len(scenarios) > 1,
         "generated_at": meta.get("analysis_time", datetime.now().strftime("%Y-%m-%d %H:%M")),
