@@ -1339,6 +1339,325 @@ def main():
 
 
 # ═══════════════════════════════════════════════════════════════
+# 多规则组链路分析（/analyze-chain）
+# ═══════════════════════════════════════════════════════════════
+
+
+def build_target_index(repo_root, scope_dir=None):
+    """扫描代码仓，建 {target_table → [规则组目录]} 索引。
+
+    Args:
+        repo_root: 代码仓根目录（含 BFT/）
+        scope_dir: 搜索范围（子项目目录），None 则扫整个 BFT/BftWideTable
+
+    Returns:
+        {norm_target_table: [{dir, schema, rule_group_en, rule_group_code}]}
+    """
+    import yaml as _yaml
+    from engine import _norm_table
+
+    repo = Path(repo_root)
+    bft = repo / "BFT" / "BftWideTable"
+    if scope_dir:
+        # 在指定子项目目录下扫
+        search_root = Path(scope_dir)
+    else:
+        search_root = bft
+
+    if not search_root.is_dir():
+        return {}
+
+    index = {}
+    for yml_file in search_root.rglob("*.yml"):
+        group_dir = yml_file.parent
+        try:
+            data = _yaml.safe_load(yml_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not data or not isinstance(data, dict):
+            continue
+
+        target_table = _yml_get(data, "target_table", _YML_RULE_KEY_ALIASES)
+        target_schema = _yml_get(data, "target_schema", _YML_RULE_KEY_ALIASES)
+        rule_group_en = _yml_get(data, "rule_group_en", _YML_RULE_KEY_ALIASES).strip()
+        rule_group_code = _yml_get(data, "rule_group_code", _YML_RULE_KEY_ALIASES)
+
+        if not target_table:
+            continue
+
+        key = _norm_table(target_table)
+        index.setdefault(key, []).append({
+            "dir": str(group_dir),
+            "schema": target_schema,
+            "rule_group_en": rule_group_en,
+            "rule_group_code": rule_group_code,
+            "target_table": target_table,
+        })
+
+    return index
+
+
+def trace_upstream_rule_groups(
+    final_group_dir, repo_root, max_depth=6,
+):
+    """从最终 F 表规则组出发，递归追溯所有上游 mid/tmp 规则组。
+
+    算法：
+      1. 分析最终规则组 → 取穿透后的源表
+      2. 筛出"被代码仓里某规则组写的"表（在索引里能找到的）
+      3. 对每个上游规则组递归 Step 1-2
+      4. 直到源表都是 ods（索引里找不到写入者）
+
+    Args:
+        final_group_dir: 最终 F 表规则组目录
+        repo_root: 代码仓根目录
+
+    Returns:
+        {
+            "groups": [{dir, rule_group_en, target_table, source_tables, depth}],
+            "not_found": [表名列表],  # 源表找不到写入者（可能是 ods 源表）
+            "cycle_detected": bool,
+        }
+    """
+    from engine import analyze_pipeline, _norm_table
+    from analyzer import read_yml, detect_dialect
+
+    # 确定搜索范围：先子项目，后项目级
+    final_path = Path(final_group_dir).resolve()
+    # 子项目 = 规则组目录的父目录（如 SUB_TRADE）
+    sub_project_dir = final_path.parent
+    # 项目 = 子项目的父目录（如 P_TRADE）
+    project_dir = sub_project_dir.parent
+
+    # 先在子项目下建索引
+    sub_index = build_target_index(repo_root, sub_project_dir)
+
+    groups = []
+    visited_dirs = set()
+    not_found_tables = set()
+
+    def _trace(group_dir, depth):
+        group_dir_resolved = str(Path(group_dir).resolve())
+        if group_dir_resolved in visited_dirs:
+            return  # 环检测
+        if depth > max_depth:
+            return
+        visited_dirs.add(group_dir_resolved)
+
+        # 读规则组
+        raw = read_yml(group_dir)
+        if not raw.get("rules"):
+            return
+
+        rules = raw["rules"]
+        rule_group_en = raw.get("rule_group_en", "")
+        dialect = detect_dialect(rules)
+
+        # 分析 → 取穿透后的源表
+        target_fields = raw.get("target_fields", {})
+        group_variables = raw.get("group_variables", {})
+        _, parsed_map = analyze_pipeline(rules, target_fields, group_variables, dialect)
+
+        # 收集所有步骤的穿透源表
+        source_tables = set()
+        for rule in rules:
+            parsed = parsed_map.get(rule.rule_code)
+            if not parsed:
+                continue
+            for j in parsed.source_tables:
+                if not j.source_table or j.source_table.startswith("(subquery:"):
+                    continue
+                source_tables.add(j.source_table)
+            # CTE 内部表也要收
+            for cte in parsed.ctes:
+                for t in cte.source_tables:
+                    tname = t.get("name", "")
+                    if tname:
+                        source_tables.add(tname)
+
+        # 目标表（这个规则组写的）
+        target_table = ""
+        if rules:
+            # 取最大 exec_sequence 的规则的目标表（最终产出）
+            max_seq_rule = max(rules, key=lambda r: r.exec_sequence)
+            target_table = max_seq_rule.target_table
+
+        groups.append({
+            "dir": str(group_dir),
+            "rule_group_en": rule_group_en,
+            "target_table": target_table,
+            "source_tables": list(source_tables),
+            "depth": depth,
+        })
+
+        # 对每个源表，找写入者
+        for src_table in source_tables:
+            # 归一化：去 schema 前缀（dws.dwb_trade_mid_f → dwb_trade_mid_f）
+            # 索引 key 是 _norm_table(target_table)，yml 里 target_table 不带 schema
+            table_part = src_table.split(".")[-1] if "." in src_table else src_table
+            key = _norm_table(table_part)
+            writers = sub_index.get(key, [])
+            if not writers:
+                # 子项目找不到，试项目级
+                if not hasattr(_trace, "_project_index"):
+                    _trace._project_index = build_target_index(repo_root, project_dir)
+                writers = _trace._project_index.get(key, [])
+
+            if not writers:
+                not_found_tables.add(src_table)
+                continue
+
+            for writer in writers:
+                _trace(writer["dir"], depth + 1)
+
+    _trace(final_group_dir, 0)
+
+    return {
+        "groups": groups,
+        "not_found": sorted(not_found_tables),
+        "cycle_detected": len(visited_dirs) < len(groups),
+    }
+
+
+def merge_rule_groups(groups_info, repo_root, ddl_dir=""):
+    """合并多个规则组的 rules，重新编号 exec_sequence，返回合并后的 rules 列表。
+
+    拓扑排序：被依赖的（depth 大的，上游的）排前面，依赖别人的（depth 小的，下游的）排后面。
+
+    Args:
+        groups_info: trace_upstream_rule_groups 的返回值
+
+    Returns:
+        merged_rules: 合并后的 RawRule 列表（exec_sequence 已全局重编号）
+    """
+    from engine import RawRule
+
+    # 按 depth 降序排（depth 大的 = 上游 = 先执行）
+    sorted_groups = sorted(groups_info["groups"], key=lambda g: -g["depth"])
+
+    merged_rules = []
+    global_seq = 0
+    for group_info in sorted_groups:
+        raw = read_yml(group_info["dir"])
+        for rule in raw.get("rules", []):
+            global_seq += 1
+            # 重新编号 exec_sequence
+            merged_rules.append(RawRule(
+                rule_code=f"{rule.rule_code}",
+                rule_name=rule.rule_name,
+                rule_type=rule.rule_type,
+                exec_sequence=global_seq,
+                target_schema=rule.target_schema,
+                target_table=rule.target_table,
+                delete_mode=rule.delete_mode,
+                query_sql=rule.query_sql,
+                exchange_source_table=getattr(rule, "exchange_source_table", ""),
+                rule_group_code=rule.rule_group_code,
+                rule_group_en=rule.rule_group_en,
+            ))
+
+    return merged_rules
+
+
+def main_chain():
+    """多规则组链路分析 CLI 入口。"""
+    parser = argparse.ArgumentParser(
+        description="多规则组链路分析（/analyze-chain）",
+    )
+    parser.add_argument("--input", required=True,
+                        help="最终 F 表规则组目录或表名")
+    parser.add_argument("--output", required=True,
+                        help="输出基础目录")
+    parser.add_argument("--repo-root", default="",
+                        help="代码仓根目录（含 BFT/），不指定则自动从 input 向上找")
+    parser.add_argument("--ddl-dir", default="",
+                        help="DDL 文件目录（可选）")
+    args = parser.parse_args()
+
+    input_path = Path(args.input)
+
+    # 定位代码仓根
+    if args.repo_root:
+        repo_root = Path(args.repo_root)
+    else:
+        repo_root = _find_repo_root(input_path if input_path.is_dir() else input_path.parent)
+        if not repo_root:
+            print("[ERROR] 无法定位代码仓根（需含 BFT/ + DDL/），请用 --repo-root 指定", file=sys.stderr)
+            sys.exit(1)
+
+    # 定位最终 F 表规则组目录
+    if input_path.is_dir():
+        final_group_dir = input_path
+    else:
+        # 按表名定位（复用现有 locate_asset_dirs 逻辑）
+        from impact_analyzer import locate_asset_dirs
+        located = locate_asset_dirs([args.input], str(repo_root))
+        info = located.get(args.input, {})
+        if not info.get("found"):
+            print(f"[ERROR] 未定位到规则组目录: {args.input}", file=sys.stderr)
+            sys.exit(1)
+        final_group_dir = Path(info["dir"])
+
+    print(f"=== 多规则组链路分析 ===")
+    print(f"最终规则组: {final_group_dir.name}")
+    print(f"代码仓根: {repo_root}")
+
+    # 追溯上游
+    print(f"\n[Step 1] 追溯上游规则组...")
+    result = trace_upstream_rule_groups(final_group_dir, repo_root)
+    print(f"  找到 {len(result['groups'])} 个规则组:")
+    for g in sorted(result["groups"], key=lambda x: x["depth"]):
+        indent = "    " * g["depth"]
+        print(f"  {indent}{g['rule_group_en']} → 写 {g['target_table']}")
+    if result["not_found"]:
+        print(f"  源表（不追溯）: {', '.join(result['not_found'])}")
+
+    # 合并
+    print(f"\n[Step 2] 合并规则组...")
+    merged_rules = merge_rule_groups(result, repo_root)
+    print(f"  合并后 {len(merged_rules)} 条规则（exec_sequence 已重编号）")
+
+    # DDL 发现
+    ddl_dir = args.ddl_dir
+    if not ddl_dir and repo_root:
+        try:
+            ddl_dir = _auto_discover_ddl_from_repo(merged_rules, final_group_dir) or ""
+        except Exception:
+            ddl_dir = ""
+
+    # 分析
+    print(f"\n[Step 3] 分析完整链路...")
+    dialect = detect_dialect(merged_rules)
+    knowledge, parsed_map = analyze_pipeline(
+        merged_rules, {}, {}, dialect,
+        ddl_dir=ddl_dir, source_file="",
+        rule_group_code="CHAIN",
+    )
+
+    # 输出
+    safe_name = "chain_" + final_group_dir.name
+    output_dir = Path(args.output) / safe_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    knowledge["meta"].pop("_timings", None)
+    output_file = output_dir / "knowledge_draft.json"
+    output_file.write_text(
+        json.dumps(knowledge, ensure_ascii=False, indent=2),
+        encoding="utf-8", newline="\n",
+    )
+
+    stats = knowledge["field_mappings"]["statistics"]
+    target_table = knowledge["meta"]["target_table"]
+    print(f"\n=== 完成 ===")
+    print(f"输出: {output_file}")
+    print(f"规则组数: {len(result['groups'])}")
+    print(f"步骤数: {len(merged_rules)}")
+    print(f"字段数: {stats['total_in_sql']}")
+    print(f"目标表: {target_table}")
+    print(f"\n下一步: python run.py view_generator --input knowledge_draft.json --output . --views all")
+
+
+# ═══════════════════════════════════════════════════════════════
 # 兼容层：re-export engine 的符号
 # 引擎代码已物理搬入 engine.py。以下 re-export 保证现有代码
 # `from analyzer import xxx` 继续可用（过渡期，新代码请直接 from engine import）。
@@ -1360,4 +1679,8 @@ from engine import (  # noqa: E402,F401
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "--chain":
+        sys.argv.pop(1)
+        main_chain()
+    else:
+        main()
