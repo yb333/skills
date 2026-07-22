@@ -1278,6 +1278,7 @@ body {
         <button onclick="lineageZoom(0.8)" style="padding:4px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg-card);cursor:pointer;font-size:14px;">-</button>
         <button onclick="lineageZoomReset()" style="padding:4px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg-card);cursor:pointer;font-size:12px;">重置</button>
         <button id="toggleSourcesBtn" onclick="toggleSourceTables()" style="padding:4px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg-card);cursor:pointer;font-size:12px;">显示来源表</button>
+        <span id="lineageGroupTags" style="display:flex;gap:4px;flex-wrap:wrap;"></span>
         <span style="font-size:11px;color:var(--text-muted);">滚轮缩放 · 拖拽平移 · 点击步骤高亮</span>
       </div>
       <div class="lineage-wrapper" id="lineageWrapper"></div>
@@ -1666,6 +1667,28 @@ function renderLineage() {
   var selfRefs = lineage.self_references || [];
   var layout = lineage.layout || {};
 
+  // ★ 多规则组：在工具栏生成可点击的规则组标签
+  var groupTagsEl = document.getElementById('lineageGroupTags');
+  if (groupTagsEl) {
+    var s = REPORT_DATA.summary || {};
+    if (s.is_multi_group && s.chain_groups && s.chain_groups.length > 0) {
+      var sortedGroups = s.chain_groups.slice().sort(function(a, b) { return b.depth - a.depth; });
+      var tagsHtml = '<span style="font-size:11px;color:var(--text-muted);margin-right:2px;">规则组：</span>';
+      sortedGroups.forEach(function(g) {
+        tagsHtml += '<button onclick="toggleRuleGroupHighlight(\'' + g.name.replace(/'/g, "\\'") + '\')" '
+                 + 'style="padding:2px 8px;border:1px solid #a78bfa;border-radius:4px;background:#f3e8ff;'
+                 + 'color:#7c3aed;font-size:11px;font-weight:600;cursor:pointer;transition:all 0.1s;" '
+                 + 'onmouseenter="this.style.background=\'#ddd6fe\'" '
+                 + 'onmouseleave="if(!this.classList.contains(\'rg-active\'))this.style.background=\'#f3e8ff\'"'
+                 + ' id="rgTag_' + g.name.replace(/\W/g, '_') + '"'
+                 + '>' + escapeHtml(g.name) + '</button>';
+      });
+      groupTagsEl.innerHTML = tagsHtml;
+    } else {
+      groupTagsEl.innerHTML = '';
+    }
+  }
+
   // Use layout dimensions or compute from nodes
   var svgW = layout.width || Math.max.apply(null, nodes.map(function(n) { return n.x + n.width; })) + 40;
   var svgH = layout.height || Math.max.apply(null, nodes.map(function(n) { return n.y + n.height; })) + 40;
@@ -1975,6 +1998,35 @@ function clearRuleGroupHighlight() {
       rect.style.stroke = '';
     }
   });
+}
+
+// 点击切换规则组高亮（再点取消）
+var activeRuleGroup = null;
+function toggleRuleGroupHighlight(groupName) {
+  // 重置所有标签样式
+  document.querySelectorAll('[id^="rgTag_"]').forEach(function(btn) {
+    btn.classList.remove('rg-active');
+    btn.style.background = '#f3e8ff';
+    btn.style.borderColor = '#a78bfa';
+  });
+
+  if (activeRuleGroup === groupName) {
+    // 再点同一个 → 取消
+    activeRuleGroup = null;
+    clearRuleGroupHighlight();
+    return;
+  }
+
+  activeRuleGroup = groupName;
+  // 高亮当前标签
+  var tagBtn = document.getElementById('rgTag_' + groupName.replace(/\W/g, '_'));
+  if (tagBtn) {
+    tagBtn.classList.add('rg-active');
+    tagBtn.style.background = '#7c3aed';
+    tagBtn.style.borderColor = '#7c3aed';
+    tagBtn.style.color = 'white';
+  }
+  highlightRuleGroup(groupName);
 }
 
 // ── 数据流向图缩放/拖拽 ──
