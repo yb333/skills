@@ -73,44 +73,44 @@ if not exist "%TEMP_DIR%\.git" (
 )
 echo.
 
-REM ── Step 2: 同步成品文件到内网仓库 ──
-echo [Step 2] 同步成品文件到内网仓库...
+REM ── Step 2: 全量同步（排除开发文件）──
+REM 策略：默认全部同步，只排除已知开发文件。
+REM       以后加任何新文件都自动同步，不用改脚本。
+echo [Step 2] 全量同步到内网仓库...
 
-REM 要同步的成品（目录用 robocopy，文件用 copy）
-REM dws-pipeline-analyzer 目录
-if exist "%TEMP_DIR%\dws-pipeline-analyzer" (
-    if exist "!INTERNAL_REPO!\dws-pipeline-analyzer" rmdir /s /q "!INTERNAL_REPO!\dws-pipeline-analyzer"
-    xcopy "%TEMP_DIR%\dws-pipeline-analyzer" "!INTERNAL_REPO!\dws-pipeline-analyzer\" /E /I /Q /Y >nul
-    echo   + dws-pipeline-analyzer\
-)
-
-REM commands 目录
-if exist "%TEMP_DIR%\commands" (
-    if exist "!INTERNAL_REPO!\commands" rmdir /s /q "!INTERNAL_REPO!\commands"
-    xcopy "%TEMP_DIR%\commands" "!INTERNAL_REPO!\commands\" /E /I /Q /Y >nul
-    echo   + commands\
-)
-
-REM 单个文件（sample_rule.yml 是开发者样例，不同步给用户）
-    if exist "%TEMP_DIR%\%%F" (
-        copy /Y "%TEMP_DIR%\%%F" "!INTERNAL_REPO!\%%F" >nul
-        echo   + %%F
+REM 先清空内网仓库（保留 .git）
+pushd "!INTERNAL_REPO!"
+for /d %%D in (*) do rmdir /s /q "%%D" 2>nul
+del /q * 2>nul
+REM 清掉隐藏文件（除了 .git）
+for /f "delims=" %%F in ('dir /a /b ^| findstr /v "^\.git$"') do (
+    if exist "%%F\" (
+        rmdir /s /q "%%F" 2>nul
+    ) else (
+        del /q "%%F" 2>nul
     )
 )
+popd
 
-REM 清理内网仓库里不该有的开发文件（防止残留）
-for %%D in (tests docs release) do (
-    if exist "!INTERNAL_REPO!\%%D" (
-        rmdir /s /q "!INTERNAL_REPO!\%%D"
-        echo   - %%D（移除开发文件）
-    )
+REM 排除列表（开发文件不同步给用户）
+REM 用 robocopy 全量复制 + /XF 排除文件 + /XD 排除目录
+robocopy "%TEMP_DIR%" "!INTERNAL_REPO!" /E /NFL /NDL /NP /NJH /NJS ^
+    /XD tests docs release __pycache__ .pytest_cache .git ^
+    /XF architecture.md pack_release.py sync_to_internal.sh sync_to_internal.bat sample_rule.yml .gitignore .DS_Store 2>nul
+
+REM robocopy 返回码 0-7 都是正常的（0=无变更 1=有复制）
+if !errorlevel! GTR 7 (
+    echo [ERROR] robocopy 失败
+    goto :cleanup
 )
-for %%F in (architecture.md pack_release.py sync_to_internal.sh sync_to_internal.bat sample_rule.yml) do (
-    if exist "!INTERNAL_REPO!\%%F" (
-        del /q "!INTERNAL_REPO!\%%F"
-        echo   - %%F（移除开发文件）
-    )
+echo   + 全量同步完成（排除开发文件）
+
+REM 清理垃圾
+for /d /r "!INTERNAL_REPO!" %%D in (__pycache__) do (
+    if exist "%%D" rmdir /s /q "%%D" 2>nul
 )
+del /s /q "!INTERNAL_REPO!\*.pyc" 2>nul
+del /s /q "!INTERNAL_REPO!\.DS_Store" 2>nul
 
 REM 清理 __pycache__ / .pyc / .DS_Store
 attrib -h -s "!INTERNAL_REPO!\__pycache__" 2>nul

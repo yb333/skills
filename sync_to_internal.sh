@@ -71,41 +71,36 @@ EXTERNAL_VERSION=$(cd "$TEMP_DIR" && git log --oneline -1)
 echo "  最新提交: $EXTERNAL_VERSION"
 echo ""
 
-# ── Step 2: 同步成品文件到内网仓库 ──
-echo "[Step 2] 同步成品文件到内网仓库..."
+# ── Step 2: 全量同步（排除开发文件）──
+# 策略：默认全部同步，只排除已知开发文件。
+#       以后加任何新文件都自动同步，不用改脚本。
+echo "[Step 2] 全量同步到内网仓库..."
 
-# 要同步的成品（目录或文件）
-SYNC_ITEMS=(
-    "dws-pipeline-analyzer"
-    "commands"
-    "README.md"
-    "install.sh"
-    "install.bat"
-    "install.py"
-)
+# 排除列表（这些文件/目录不给用户）
+EXCLUDES="tests docs release __pycache__ .pytest_cache .git .gitignore architecture.md pack_release.py sync_to_internal.sh sync_to_internal.bat sample_rule.yml"
 
-# 先清理内网仓库里旧的同名成品（保持干净），再复制新的
-for item in "${SYNC_ITEMS[@]}"; do
-    if [ ! -e "$TEMP_DIR/$item" ]; then
+# 先清空内网仓库（保留 .git），再全部复制（排除开发文件）
+cd "$INTERNAL_REPO"
+find . -not -path './.git/*' -not -path './.git' -not -name '.' -delete 2>/dev/null || true
+
+cd "$TEMP_DIR"
+for item in *; do
+    skip=false
+    for ex in $EXCLUDES; do
+        if [ "$item" = "$ex" ]; then
+            skip=true
+            break
+        fi
+    done
+    if $skip; then
+        echo "  - $item（开发文件，跳过）"
         continue
     fi
-    # 删除旧的（避免残留已删除的文件）
-    rm -rf "$INTERNAL_REPO/$item"
-    # 复制新的
-    cp -r "$TEMP_DIR/$item" "$INTERNAL_REPO/$item"
+    cp -r "$item" "$INTERNAL_REPO/"
     echo "  + $item"
 done
 
-# 清理内网仓库里不该有的开发文件（如果有）
-DEV_FILES=("tests" "docs" "architecture.md" "pack_release.py" "sync_to_internal.sh" "sync_to_internal.bat" "sample_rule.yml" "release")
-for df in "${DEV_FILES[@]}"; do
-    if [ -e "$INTERNAL_REPO/$df" ]; then
-        rm -rf "$INTERNAL_REPO/$df"
-        echo "  - $df（移除开发文件）"
-    fi
-done
-
-# 清理 __pycache__/.pyc/.DS_Store
+# 清理垃圾文件
 find "$INTERNAL_REPO" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 find "$INTERNAL_REPO" -name "*.pyc" -delete 2>/dev/null || true
 find "$INTERNAL_REPO" -name ".DS_Store" -delete 2>/dev/null || true
