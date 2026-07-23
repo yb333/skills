@@ -91,16 +91,20 @@ echo "[Step 3] 推送到内网仓库..."
 # 添加内网仓为 remote
 git remote add internal "$INTERNAL_REPO" 2>/dev/null || git remote set-url internal "$INTERNAL_REPO"
 
-# 检测当前分支
+# 检测分支（外网是 main，内网可能是 master）
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
-echo "  分支: $BRANCH"
+echo "  外网分支: $BRANCH"
+
+# 检测内网仓的分支名
+INTERNAL_BRANCH=$(cd "$INTERNAL_REPO" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "master")
+echo "  内网分支: $INTERNAL_BRANCH"
 echo ""
 
-# 先 pull 内网仓的内容（合并历史）
-git pull internal "$BRANCH" --allow-unrelated-histories --no-edit 2>&1 | tail -3 || true
+# 先 pull 内网仓的内容（合并历史，以内网仓分支名为准）
+git pull internal "$INTERNAL_BRANCH" --allow-unrelated-histories --no-edit 2>&1 | tail -3 || true
 
-# push 到内网仓（--force 以外网代码为准）
-git push --force internal "$BRANCH" 2>&1 | tail -3
+# push 到内网仓（外网 main → 内网 master，--force 以外网代码为准）
+git push --force internal "$BRANCH:$INTERNAL_BRANCH" 2>&1 | tail -3
 
 echo ""
 echo "═══════════════════════════════════════════════"

@@ -112,19 +112,26 @@ if !errorlevel! neq 0 (
     git remote set-url internal "!INTERNAL_REPO!"
 )
 
-REM 检测当前分支名
+REM 检测当前分支名（外网是 main，内网可能是 master）
 for /f "delims=" %%B in ('git rev-parse --abbrev-ref HEAD') do set "BRANCH=%%B"
-echo   分支: !BRANCH!
+echo   外网分支: !BRANCH!
+
+REM 检测内网仓的分支名
+set "INTERNAL_BRANCH=master"
+pushd "!INTERNAL_REPO!"
+for /f "delims=" %%B in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set "INTERNAL_BRANCH=%%B"
+popd
+echo   内网分支: !INTERNAL_BRANCH!
 echo.
 
-REM 先 pull 内网仓的内容（让 git 做合并，以内网仓已有历史为基础）
-git pull internal !BRANCH! --allow-unrelated-histories --no-edit 2>&1
+REM 先 pull 内网仓的内容（合并历史，以内网仓分支名为准）
+git pull internal !INTERNAL_BRANCH! --allow-unrelated-histories --no-edit 2>&1
 if !errorlevel! neq 0 (
     echo   [INFO] pull 失败（可能内网仓还没有此分支），直接 push...
 )
 
-REM push 到内网仓（--force 以外网代码为准）
-git push --force internal !BRANCH! 2>&1
+REM push 到内网仓（外网 main → 内网 master，--force 以外网代码为准）
+git push --force internal !BRANCH!:!INTERNAL_BRANCH! 2>&1
 if !errorlevel! neq 0 (
     echo   [ERROR] push 失败
     popd
