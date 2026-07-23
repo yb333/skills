@@ -1977,12 +1977,14 @@ def main_chain():
     # 生成三件套（mapping + asset_report + tech_design）
     print(f"\n[Step 4] 生成视图...")
     _t_view0 = _t_usage.time()
+    _view_exc = None
     try:
         from view_generator import generate_mapping, generate_asset_report, generate_tech_design
         generate_mapping(knowledge, output_dir)
         generate_asset_report(knowledge, output_dir)
         generate_tech_design(knowledge, output_dir)
     except Exception as e:
+        _view_exc = e
         print(f"  [WARN] 视图生成失败: {e}", file=sys.stderr)
     _t_view = round(_t_usage.time() - _t_view0, 2)
 
@@ -2017,7 +2019,8 @@ def main_chain():
                 "write_json_and_summary": _t_json_summary,
                 "view_generation": _t_view,
             },
-            "status": "ok",
+            "status": "partial" if _view_exc else "ok",
+            "error_type": "view_generation_error" if _view_exc else "",
             "quality_issues": len(knowledge.get("quality", {}).get("issues", [])),
         })
     except Exception:
