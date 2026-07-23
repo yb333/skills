@@ -100,10 +100,8 @@ INTERNAL_BRANCH=$(cd "$INTERNAL_REPO" && git rev-parse --abbrev-ref HEAD 2>/dev/
 echo "  内网分支: $INTERNAL_BRANCH"
 echo ""
 
-# 允许 push 到非 bare 仓的当前分支（否则报 branch is currently checked out）
-cd "$INTERNAL_REPO" && git config receive.denyCurrentBranch updateInstead 2>/dev/null || true
-
 # 直接 force push（以外网为准，不 pull 不 merge，避免冲突）
+# 注意：内网仓需手动设一次 git config receive.denyCurrentBranch updateInstead
 git push --force internal "$BRANCH:$INTERNAL_BRANCH" 2>&1 | tail -3
 
 echo ""
