@@ -46,7 +46,8 @@ CONFIG_PATH = USAGE_DIR / "config.json"
 CSV_PATH = USAGE_DIR / "usage.csv"
 QUEUE_PATH = USAGE_DIR / "usage_queue.jsonl"
 
-# 数据字典 —— 18 字段，分 5 组（顺序即 CSV 列顺序，勿改）
+# 数据字典 —— 核心固定列 + extra（JSON，扩展用）
+# 扩展时新字段自动进 extra，不用改 FIELD_NAMES / schema / 看板
 FIELD_NAMES = [
     # A. 标识与上下文
     "run_id", "trace_id", "timestamp", "install_id", "user",
@@ -58,6 +59,8 @@ FIELD_NAMES = [
     "elapsed_sec", "elapsed_detail", "status", "error_type",
     # E. 质量与环境
     "quality_issues", "agent_version", "python_version", "os",
+    # F. 扩展（未知字段自动收入，JSON 字符串）
+    "extra",
 ]
 
 
@@ -341,14 +344,21 @@ def record(data: dict) -> None:
         # 补充运行时字段
         cfg = load_config()
         row = {k: "" for k in FIELD_NAMES}
-        row.update(data)
-        row["run_id"] = row.get("run_id") or str(uuid.uuid4())
+        # 把不在固定列的字段收进 extra（JSON），扩展时无需改 FIELD_NAMES/schema
+        extra = {}
+        for k, v in data.items():
+            if k in FIELD_NAMES:
+                row[k] = v
+            elif v is not None and v != "":
+                extra[k] = v
+        row["run_id"] = data.get("run_id") or str(uuid.uuid4())
         row["timestamp"] = datetime.now().isoformat(timespec="seconds")
         row["install_id"] = cfg.get("install_id", "unknown")
-        row["user"] = row.get("user") or _get_user()
+        row["user"] = data.get("user") or _get_user()
         row["agent_version"] = __version__
         row["python_version"] = platform.python_version()
         row["os"] = _get_os()
+        row["extra"] = json.dumps(extra, ensure_ascii=False) if extra else ""
         # elapsed_detail 序列化为 JSON 字符串（CSV 存文本，服务端存 TEXT）
         detail = row.get("elapsed_detail")
         if isinstance(detail, dict):

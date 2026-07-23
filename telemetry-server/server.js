@@ -66,6 +66,7 @@ db.exec(`
     agent_version TEXT,
     python_version TEXT,
     os TEXT,
+    extra TEXT,
     received_at INTEGER NOT NULL
   );
 
@@ -89,13 +90,17 @@ try {
     db.exec('ALTER TABLE usage_records ADD COLUMN trace_id TEXT');
     console.log('[Migration] Added column trace_id');
   }
+  if (!colNames.includes('extra')) {
+    db.exec('ALTER TABLE usage_records ADD COLUMN extra TEXT');
+    console.log('[Migration] Added column extra');
+  }
 } catch (e) { /* 首次建表无此列检测可忽略 */ }
 
 const INSERT_COLS = [
   'run_id', 'trace_id', 'timestamp', 'install_id', 'user_name', 'command', 'input_type',
   'asset', 'target_table', 'batch_id', 'rule_count', 'field_count',
   'source_count', 'elapsed_sec', 'elapsed_detail', 'status', 'error_type',
-  'quality_issues', 'agent_version', 'python_version', 'os'
+  'quality_issues', 'agent_version', 'python_version', 'os', 'extra'
 ];
 
 const insertStmt = db.prepare(
@@ -159,18 +164,30 @@ function handlePostUsage(payload) {
   const now = Date.now();
   let received = 0;
 
+  // 已知固定列（用于判断哪些字段该进 extra）
+  const KNOWN_COLS = new Set(INSERT_COLS.concat(['user']));
+
   // node:sqlite 无 db.transaction() helper，手动 BEGIN/COMMIT/ROLLBACK
   try {
     db.exec('BEGIN');
     for (const r of records) {
       if (!r || !r.run_id || !r.command) continue;
+      // 收集未知字段进 extra（扩展时新字段自动存，不改 schema）
+      let extra = {};
+      try { extra = r.extra ? JSON.parse(r.extra) : {}; } catch (e) { extra = {}; }
+      for (const k of Object.keys(r)) {
+        if (!KNOWN_COLS.has(k) && r[k] !== null && r[k] !== undefined && r[k] !== '') {
+          extra[k] = r[k];
+        }
+      }
       const result = insertStmt.run(
         toStr(r.run_id), toStr(r.trace_id), toStr(r.timestamp), toStr(r.install_id), toStr(r.user_name),
         toStr(r.command), toStr(r.input_type), toStr(r.asset), toStr(r.target_table),
         toStr(r.batch_id), toInt(r.rule_count), toInt(r.field_count), toInt(r.source_count),
         toFloat(r.elapsed_sec), toStr(r.elapsed_detail), toStr(r.status) || 'unknown',
         toStr(r.error_type), toInt(r.quality_issues), toStr(r.agent_version),
-        toStr(r.python_version), toStr(r.os), now
+        toStr(r.python_version), toStr(r.os),
+        Object.keys(extra).length ? JSON.stringify(extra) : null, now
       );
       if (result.changes > 0) received++;
     }
@@ -271,12 +288,14 @@ function handleStats() {
     GROUP BY error_type ORDER BY count DESC
   `).all();
 
-  // 7. 输入类型占比
+  // 7. 输入类型占比（只统计有用户输入的命令，排除 view-generator）
   result.input_types = db.prepare(`
     SELECT
-      COALESCE(input_type, '(unknown)') AS input_type,
+      COALESCE(input_type, '(未记录)') AS input_type,
       COUNT(*) AS count
-    FROM usage_records GROUP BY input_type ORDER BY count DESC
+    FROM usage_records
+    WHERE command != 'view-generator'
+    GROUP BY input_type ORDER BY count DESC
   `).all();
 
   // 8. 版本分布
@@ -412,6 +431,8 @@ function handleDashboard() {
 </div>
 
 <script>
+// 命令名中文映射 —— 只做翻译，新命令不在这里也能正常显示（显示英文原名）
+// 扩展时加新命令，想显示中文名就在这里加一行（不加也不影响功能）
 var COMMAND_NAMES = {
   'analyze': '资产文档化',
   'analyze-chain': '多规则组链路分析',
@@ -426,7 +447,8 @@ var INPUT_NAMES = {
   'yml_dir': '代码仓yml目录',
   'table_name': '仅表名',
   'impact_excel': '变更清单Excel',
-  'field_list': '字段列表'
+  'field_list': '字段列表',
+  'knowledge_json': '解析结果JSON(view-generator)'
 };
 
 function fmtTime(s) {
@@ -439,7 +461,7 @@ function esc(s) {
   });
 }
 function cmdLabel(c) { return COMMAND_NAMES[c] || c || '(unknown)'; }
-function inputLabel(i) { return INPUT_NAMES[i] || i || '(unknown)'; }
+function inputLabel(i) { return INPUT_NAMES[i] || i || '(未记录)'; }
 
 function renderOverview(o) {
   var html = '';
