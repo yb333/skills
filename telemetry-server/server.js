@@ -58,6 +58,7 @@ db.exec(`
     field_count INTEGER,
     source_count INTEGER,
     elapsed_sec REAL,
+    elapsed_detail TEXT,
     status TEXT NOT NULL,
     error_type TEXT,
     quality_issues INTEGER,
@@ -75,11 +76,20 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_usage_status ON usage_records(status);
 `);
 
+// ── 自动迁移：旧库升级时补 elapsed_detail 列（幂等，已有则跳过）──
+try {
+  const cols = db.prepare("PRAGMA table_info(usage_records)").all();
+  if (!cols.some(c => c.name === 'elapsed_detail')) {
+    db.exec('ALTER TABLE usage_records ADD COLUMN elapsed_detail TEXT');
+    console.log('[Migration] Added column elapsed_detail');
+  }
+} catch (e) { /* 首次建表无此列检测可忽略 */ }
+
 const INSERT_COLS = [
   'run_id', 'timestamp', 'install_id', 'user_name', 'command', 'input_type',
   'asset', 'target_table', 'batch_id', 'rule_count', 'field_count',
-  'source_count', 'elapsed_sec', 'status', 'error_type', 'quality_issues',
-  'agent_version', 'python_version', 'os'
+  'source_count', 'elapsed_sec', 'elapsed_detail', 'status', 'error_type',
+  'quality_issues', 'agent_version', 'python_version', 'os'
 ];
 
 const insertStmt = db.prepare(
@@ -152,9 +162,9 @@ function handlePostUsage(payload) {
         toStr(r.run_id), toStr(r.timestamp), toStr(r.install_id), toStr(r.user_name),
         toStr(r.command), toStr(r.input_type), toStr(r.asset), toStr(r.target_table),
         toStr(r.batch_id), toInt(r.rule_count), toInt(r.field_count), toInt(r.source_count),
-        toFloat(r.elapsed_sec), toStr(r.status) || 'unknown', toStr(r.error_type),
-        toInt(r.quality_issues), toStr(r.agent_version), toStr(r.python_version), toStr(r.os),
-        now
+        toFloat(r.elapsed_sec), toStr(r.elapsed_detail), toStr(r.status) || 'unknown',
+        toStr(r.error_type), toInt(r.quality_issues), toStr(r.agent_version),
+        toStr(r.python_version), toStr(r.os), now
       );
       if (result.changes > 0) received++;
     }

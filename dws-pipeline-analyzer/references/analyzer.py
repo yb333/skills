@@ -1312,9 +1312,12 @@ def main():
 
     # 性能诊断：读各阶段耗时（在写 JSON 前读，因为 _timings 不写进 JSON）
     timings = knowledge.get("meta", {}).get("_timings", {})
+    # 解析阶段总耗时（_timings 里所有阶段之和）
+    _t_parse = round(sum(timings.values()), 2) if timings else 0
 
     # 写入文件（_timings 是性能诊断用，不写进 JSON）
     knowledge["meta"].pop("_timings", None)
+    _t_json0 = _t_usage.time()
     output_file = output_dir / "knowledge_draft.json"
     output_file.write_text(
         json.dumps(knowledge, ensure_ascii=False, indent=2),
@@ -1326,6 +1329,7 @@ def main():
     summary_file = output_dir / "knowledge_summary.md"
     summary_text = _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings, quality, data_flow)
     summary_file.write_text(summary_text, encoding="utf-8", newline="\n")
+    _t_json_summary = round(_t_usage.time() - _t_json0, 2)
 
     print(f"\n=== 完成 ===")
     print(f"输出: {output_file}")
@@ -1358,6 +1362,10 @@ def main():
             "rule_count": len(rules),
             "field_count": stats.get("total_in_sql", 0) if isinstance(stats, dict) else 0,
             "elapsed_sec": round(_t_usage.time() - _t0_usage, 2),
+            "elapsed_detail": {
+                "parse": _t_parse,
+                "write_json_and_summary": _t_json_summary,
+            },
             "status": "error" if _usage_exc is not None else "ok",
             "error_type": _cls_err(_usage_exc),
             "quality_issues": len(quality["issues"]) if isinstance(quality, dict) and "issues" in quality else 0,
@@ -1780,7 +1788,10 @@ def main_chain():
 
     # 在 pop 前读 _timings（运营埋点用）
     _chain_timings = knowledge.get("meta", {}).get("_timings", {})
+    _t_parse = round(sum(_chain_timings.values()), 2) if _chain_timings else 0
     knowledge["meta"].pop("_timings", None)
+
+    _t_json0 = _t_usage.time()
     output_file = output_dir / "knowledge_draft.json"
     output_file.write_text(
         json.dumps(knowledge, ensure_ascii=False, indent=2),
@@ -1794,9 +1805,11 @@ def main_chain():
         knowledge["quality"], knowledge["data_flow"],
     )
     (output_dir / "knowledge_summary.md").write_text(summary_text, encoding="utf-8", newline="\n")
+    _t_json_summary = round(_t_usage.time() - _t_json0, 2)
 
     # 生成三件套（mapping + asset_report + tech_design）
     print(f"\n[Step 4] 生成视图...")
+    _t_view0 = _t_usage.time()
     try:
         from view_generator import generate_mapping, generate_asset_report, generate_tech_design
         generate_mapping(knowledge, output_dir)
@@ -1804,6 +1817,7 @@ def main_chain():
         generate_tech_design(knowledge, output_dir)
     except Exception as e:
         print(f"  [WARN] 视图生成失败: {e}", file=sys.stderr)
+    _t_view = round(_t_usage.time() - _t_view0, 2)
 
     stats = knowledge["field_mappings"]["statistics"]
     target_table = knowledge["meta"]["target_table"]
@@ -1830,6 +1844,11 @@ def main_chain():
             "rule_count": len(result["groups"]),
             "field_count": stats.get("total_in_sql", 0) if isinstance(stats, dict) else 0,
             "elapsed_sec": round(_t_usage.time() - _t0_usage, 2),
+            "elapsed_detail": {
+                "parse": _t_parse,
+                "write_json_and_summary": _t_json_summary,
+                "view_generation": _t_view,
+            },
             "status": "ok",
             "quality_issues": len(knowledge.get("quality", {}).get("issues", [])),
         })

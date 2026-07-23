@@ -46,7 +46,7 @@ CONFIG_PATH = USAGE_DIR / "config.json"
 CSV_PATH = USAGE_DIR / "usage.csv"
 QUEUE_PATH = USAGE_DIR / "usage_queue.jsonl"
 
-# 数据字典 —— 16 字段，分 5 组（顺序即 CSV 列顺序，勿改）
+# 数据字典 —— 17 字段，分 5 组（顺序即 CSV 列顺序，勿改）
 FIELD_NAMES = [
     # A. 标识与上下文
     "run_id", "timestamp", "install_id", "user",
@@ -55,7 +55,7 @@ FIELD_NAMES = [
     # C. 规模指标
     "rule_count", "field_count", "source_count",
     # D. 执行结果
-    "elapsed_sec", "status", "error_type",
+    "elapsed_sec", "elapsed_detail", "status", "error_type",
     # E. 质量与环境
     "quality_issues", "agent_version", "python_version", "os",
 ]
@@ -349,6 +349,10 @@ def record(data: dict) -> None:
         row["agent_version"] = __version__
         row["python_version"] = platform.python_version()
         row["os"] = _get_os()
+        # elapsed_detail 序列化为 JSON 字符串（CSV 存文本，服务端存 TEXT）
+        detail = row.get("elapsed_detail")
+        if isinstance(detail, dict):
+            row["elapsed_detail"] = json.dumps(detail, ensure_ascii=False)
         # CSV 先落（本地永远有完整存档）
         _write_csv(row)
         # 同步上报（失败落队列，不抛）
