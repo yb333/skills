@@ -135,6 +135,8 @@ else
     fi
     echo ""
     echo "[Step 4] 推送到内网远端..."
+    # 先 pull 内网仓可能有的变更（rebase 避免无谓 merge commit）
+    git pull --rebase 2>&1 | tail -3
     git push 2>&1 | tail -3
     echo ""
     echo "═══════════════════════════════════════════════"
