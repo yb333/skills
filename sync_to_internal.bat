@@ -162,3 +162,6 @@ popd
 
 :cleanup
 if exist "%TEMP_DIR%" rmdir /s /q "%TEMP_DIR%" 2>nul
+echo.
+echo 按任意键关闭...
+pause >nul
