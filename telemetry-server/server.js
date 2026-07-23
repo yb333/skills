@@ -181,7 +181,8 @@ function handlePostUsage(payload) {
         }
       }
       const result = insertStmt.run(
-        toStr(r.run_id), toStr(r.trace_id), toStr(r.timestamp), toStr(r.install_id), toStr(r.user_name),
+        toStr(r.run_id), toStr(r.trace_id), toStr(r.timestamp), toStr(r.install_id),
+        toStr(r.user_name || r.user),
         toStr(r.command), toStr(r.input_type), toStr(r.asset), toStr(r.target_table),
         toStr(r.batch_id), toInt(r.rule_count), toInt(r.field_count), toInt(r.source_count),
         toFloat(r.elapsed_sec), toStr(r.elapsed_detail), toStr(r.status) || 'unknown',
