@@ -11,3 +11,5 @@ release/
 *说明书*.html
 demo_*.html
 .zcode/
+output/
+schedule_tasks*

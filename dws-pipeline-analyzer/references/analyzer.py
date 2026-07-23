@@ -757,6 +757,7 @@ def _parse_lts_task(yml_path: Path) -> dict | None:
         "owner": str(data.get("*责任人") or data.get("责任人") or ""),
         "start_time": str(data.get("开始时间") or ""),
         "depends_prev_cycle": str(data.get("依赖上一周期") or ""),
+        "multi_day": str(data.get("是否一天多调") or ""),
         "task_group": str(data.get("*任务组名称") or data.get("任务组名称") or ""),
         "project": str(data.get("*项目名称") or data.get("项目名称") or ""),
         "group_code": group_code,

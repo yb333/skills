@@ -449,6 +449,27 @@ def _layer_from_schema(schema, table=""):
 
 # ── 数据转换 ──────────────────────────────────────────────
 
+def _get_schedule_type(schedule):
+    """从调度信息推断调度类型标签（一天一调/一天多调等）。
+
+    判断依据：F 任务的"是否一天多调"字段 + cron 表达式。
+    """
+    if not schedule or not schedule.get("f_task"):
+        return ""
+    ft = schedule["f_task"]
+    multi_day = str(ft.get("multi_day", "") or ft.get("是否一天多调", ""))
+    if multi_day in ("是", "Y", "true", "True"):
+        return "一天多调"
+    # 从 cron 推断：小时位有逗号或 / 表示一天多次
+    cron = str(ft.get("schedule_cron", ""))
+    parts = cron.split()
+    if len(parts) >= 3:
+        hour = parts[2]
+        if "," in hour or "/" in hour or hour == "*":
+            return "一天多调"
+    return "一天一调"
+
+
 def build_report_data(knowledge):
     """将 knowledge 结构转换为 HTML 模板所需的 REPORT_DATA"""
 
@@ -509,6 +530,8 @@ def build_report_data(knowledge):
         # 多规则组链路信息（单规则组时为空）
         "is_multi_group": meta.get("is_multi_group", False),
         "chain_groups": meta.get("chain_groups", []),
+        # 调度类型（一天一调/一天多调等）
+        "schedule_type": _get_schedule_type(meta.get("schedule")),
     }
 
     # ── lineage (分层布局) ──

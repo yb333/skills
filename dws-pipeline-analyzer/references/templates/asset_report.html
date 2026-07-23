@@ -1266,6 +1266,19 @@ body {
     </div>
   </div>
 
+  <!-- Schedule -->
+  <div class="section-card" id="scheduleSection">
+    <button class="collapsible-toggle" id="scheduleToggle">
+      <span class="toggle-arrow">&#9654;</span>
+      <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      调度信息
+      <span class="section-count" id="scheduleCount"></span>
+    </button>
+    <div class="collapsible-body" id="scheduleBody">
+      <div class="section-body" id="scheduleContent"></div>
+    </div>
+  </div>
+
   <!-- Section 3: Lineage -->
   <div class="section-card">
     <div class="section-header">
@@ -1347,19 +1360,6 @@ body {
     </button>
     <div class="collapsible-body" id="qualityBody">
       <div class="section-body" id="qualityContent"></div>
-    </div>
-  </div>
-
-  <!-- Section 8: Schedule -->
-  <div class="section-card" id="scheduleSection">
-    <button class="collapsible-toggle" id="scheduleToggle">
-      <span class="toggle-arrow">&#9654;</span>
-      <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-      调度信息
-      <span class="section-count" id="scheduleCount"></span>
-    </button>
-    <div class="collapsible-body" id="scheduleBody">
-      <div class="section-body" id="scheduleContent"></div>
     </div>
   </div>
 
@@ -1594,7 +1594,8 @@ function renderOverview() {
     stepMetric,
     { label: '目标字段', value: s.field_count || (REPORT_DATA.schema_fields ? REPORT_DATA.schema_fields.length : 0) },
     { label: '加工方式', value: (s.load_strategy && s.load_strategy.label) ? s.load_strategy.label : '-',
-      title: (s.load_strategy && s.load_strategy.detail) ? s.load_strategy.detail : '' }
+      title: (s.load_strategy && s.load_strategy.detail) ? s.load_strategy.detail : '' },
+    { label: '调度类型', value: s.schedule_type || '-' }
   ];
 
   var metricsHtml = '';
@@ -1603,7 +1604,8 @@ function renderOverview() {
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>',
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>',
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>'
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>'
     ];
     var isClickable = (m.label === '来源表');
     metricsHtml += '<div class="metric-card"' + (isClickable ? ' style="cursor:pointer;" onclick="showSourceTablesModal()"' : '') + '>';
@@ -2645,43 +2647,79 @@ function renderSchedule() {
 
   var html = '';
 
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function(c) {
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+    });
+  }
+
+  // cron 表达式翻译成人话
+  function cronToText(cron) {
+    if (!cron || cron == '-') return '-';
+    // Quartz 格式：秒 分 时 日 月 周  （如 0 30 2 * * ?）
+    var parts = cron.trim().split(/\s+/);
+    if (parts.length < 6) return cron;
+    var sec = parts[0], min = parts[1], hour = parts[2], day = parts[3], month = parts[4], week = parts[5];
+    // 天级调度（日位是 *，周位是 ?或*）
+    if ((day === '*' || day === '?') && (week === '*' || week === '?')) {
+      var h = hour === '*' ? '每小时' : hour.padStart(2,'0') + '时';
+      var m = min === '*' ? (hour === '*' ? '每分' : '每分') : min.padStart(2,'0') + '分';
+      return '每天 ' + (hour === '*' ? '' : hour.padStart(2,'0') + ':' + min.padStart(2,'0'));
+    }
+    // 月级（月位非 *）
+    if (month !== '*') return '每月' + month + '日 ' + hour + ':' + min;
+    // 周级（周位非 ?/*）
+    if (week !== '?' && week !== '*') {
+      var weekMap = {'SUN':'日','MON':'一','TUE':'二','WED':'三','THU':'四','FRI':'五','SAT':'六'};
+      var w = weekMap[week.toUpperCase()] || week;
+      return '每周' + w + ' ' + hour.padStart(2,'0') + ':' + min.padStart(2,'0');
+    }
+    return cron;
+  }
+
   // 渲染单个调度任务卡片
   function taskCard(task, label, isI) {
     if (!task) return '';
-    var cronText = task.schedule_cron || '-';
     var jobs = task.jobs || [];
     var params = task.params || [];
+    // 区分执行 job（url/database）和依赖 job（tskdep/url虚拟）
+    var execJobs = jobs.filter(function(j) {
+      return j.type === 'url' || j.type === 'database' || j.type === 'sp';
+    });
+    var depJobs = jobs.filter(function(j) {
+      return j.type === 'tskdep';
+    });
+
     var out = '';
     out += '<div style="margin-bottom:20px;border:1px solid #e0e0e0;border-radius:8px;padding:16px;'
       + (isI ? 'background:#faf5ff;' : '') + '">';
     out += '<h3 style="font-size:14px;margin-bottom:12px;color:' + (isI ? '#7c3aed' : '#1a73e8') + ';">'
-      + label + '：' + esc(task.task_name || '-')
-      + '<span style="font-size:12px;color:#888;margin-left:8px;">' + esc(task.task_type || '') + '</span></h3>';
+      + label + '：' + esc(task.task_name || '-') + '</h3>';
 
     // 调度基本信息
     out += '<div class="metric-cards" style="margin-bottom:14px;">';
-    out += metricCard('调度周期', esc(cronText));
+    out += metricCard('调度周期', esc(cronToText(task.schedule_cron)));
+    out += metricCard('原始表达式', esc(task.schedule_cron || '-'));
     out += metricCard('责任人', esc(task.owner || '-'));
-    out += metricCard('开始时间', esc(task.start_time || '-'));
     out += metricCard('依赖上周期', esc(task.depends_prev_cycle || '-'));
     out += '</div>';
 
-    // Job 依赖链
-    if (jobs.length) {
-      out += '<table style="width:100%;font-size:12px;margin-bottom:12px;border-collapse:collapse;">';
+    // 执行 Job（执行规则组的 job，一般只有1个）
+    if (execJobs.length) {
+      out += '<div style="font-size:12px;color:#666;margin-bottom:6px;">'
+        + '执行Job（调规则组加工）</div>';
+      out += '<table style="width:100%;font-size:12px;margin-bottom:14px;border-collapse:collapse;">';
       out += '<thead><tr style="background:#f5f7fa;">'
         + '<th style="padding:6px 8px;text-align:left;">Job名称</th>'
         + '<th style="padding:6px 8px;">类型</th>'
-        + '<th style="padding:6px 8px;">父节点</th>'
         + '<th style="padding:6px 8px;">重试</th>'
         + '<th style="padding:6px 8px;">超时(分)</th>'
         + '<th style="padding:6px 8px;">异常处理</th>'
         + '</tr></thead><tbody>';
-      jobs.forEach(function(j) {
+      execJobs.forEach(function(j) {
         out += '<tr style="border-bottom:1px solid #eee;">'
-          + '<td style="padding:6px 8px;">' + esc(j.name || '-') + '</td>'
+          + '<td style="padding:6px 8px;font-weight:500;color:#1a73e8;">' + esc(j.name || '-') + '</td>'
           + '<td style="padding:6px 8px;text-align:center;">' + esc(j.type || '-') + '</td>'
-          + '<td style="padding:6px 8px;text-align:center;">' + esc(j.parent || '-') + '</td>'
           + '<td style="padding:6px 8px;text-align:center;">' + esc(j.retry_count || '-')
             + '次/' + esc(j.retry_interval || '-') + 's</td>'
           + '<td style="padding:6px 8px;text-align:center;">' + esc(j.timeout || '-') + '</td>'
@@ -2691,7 +2729,28 @@ function renderSchedule() {
       out += '</tbody></table>';
     }
 
-    // 任务参数
+    // 依赖 Job（调度依赖，对应来源表）
+    if (depJobs.length) {
+      out += '<div style="font-size:12px;color:#666;margin-bottom:6px;">'
+        + '调度依赖（' + depJobs.length + '个，一般对应来源表）</div>';
+      out += '<table style="width:100%;font-size:12px;margin-bottom:14px;border-collapse:collapse;">';
+      out += '<thead><tr style="background:#fff3e0;">'
+        + '<th style="padding:6px 8px;text-align:left;">依赖Job名称</th>'
+        + '<th style="padding:6px 8px;">类型</th>'
+        + '<th style="padding:6px 8px;">父节点</th>'
+        + '</tr></thead><tbody>';
+      depJobs.forEach(function(j) {
+        var depType = j.type === 'url' ? '虚拟依赖' : j.type;
+        out += '<tr style="border-bottom:1px solid #eee;">'
+          + '<td style="padding:6px 8px;">' + esc(j.name || '-') + '</td>'
+          + '<td style="padding:6px 8px;text-align:center;">' + esc(depType) + '</td>'
+          + '<td style="padding:6px 8px;text-align:center;">' + esc(j.parent || '-') + '</td>'
+          + '</tr>';
+      });
+      out += '</tbody></table>';
+    }
+
+    // 任务参数（折叠）
     if (params.length) {
       out += '<details style="margin-top:8px;"><summary style="cursor:pointer;font-size:12px;color:#666;">'
         + '任务参数 (' + params.length + ')</summary>';
