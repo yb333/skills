@@ -77,7 +77,7 @@ echo ""
 echo "[Step 2] 全量同步到内网仓库..."
 
 # 排除列表（这些文件/目录不给用户）
-EXCLUDES="tests docs release __pycache__ .pytest_cache .git .gitignore architecture.md pack_release.py sync_to_internal.sh sync_to_internal.bat start_telemetry.sh start_telemetry.bat telemetry-server sample_rule.yml"
+EXCLUDES="tests docs release __pycache__ .pytest_cache .git .gitignore architecture.md pack_release.py sync_to_internal.sh sync_to_internal.bat start_telemetry.sh start_telemetry.bat stop_telemetry.bat telemetry-server sample_rule.yml"
 
 # 先清空内网仓库（保留 .git），再全部复制（排除开发文件）
 cd "$INTERNAL_REPO"

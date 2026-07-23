@@ -96,7 +96,7 @@ REM 排除列表（开发文件不同步给用户）
 REM 用 robocopy 全量复制 + /XF 排除文件 + /XD 排除目录
 robocopy "%TEMP_DIR%" "!INTERNAL_REPO!" /E /NFL /NDL /NP /NJH /NJS ^
     /XD tests docs release __pycache__ .pytest_cache .git telemetry-server ^
-    /XF architecture.md pack_release.py sync_to_internal.sh sync_to_internal.bat start_telemetry.sh start_telemetry.bat sample_rule.yml .gitignore .DS_Store 2>nul
+    /XF architecture.md pack_release.py sync_to_internal.sh sync_to_internal.bat start_telemetry.sh start_telemetry.bat stop_telemetry.bat sample_rule.yml .gitignore .DS_Store 2>nul
 
 REM robocopy 返回码 0-7 都是正常的（0=无变更 1=有复制）
 if !errorlevel! GTR 7 (
