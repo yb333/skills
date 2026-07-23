@@ -256,10 +256,11 @@ function handleStats() {
     FROM usage_records GROUP BY command ORDER BY count DESC
   `).all();
 
-  // 4. 安装实例活跃度（不显示人名，按 install_id 统计）
+  // 4. 用户活跃度（按 install_id 去重，显示工号）
   result.instance_activity = db.prepare(`
     SELECT
       install_id,
+      COALESCE(MAX(user_name), '(未识别)') AS user_name,
       COUNT(DISTINCT CASE WHEN trace_id IS NOT NULL AND trace_id != '' THEN trace_id ELSE run_id END) AS actions,
       COUNT(*) AS records,
       MAX(timestamp) AS last_active
@@ -322,6 +323,7 @@ function handleStats() {
       v.trace_id,
       v.target_table,
       v.install_id,
+      v.user_name,
       a.elapsed_sec AS parse_sec,
       v.elapsed_sec AS view_sec,
       json_extract(v.elapsed_detail, '$.ai_inference') AS ai_inference_sec,
@@ -399,8 +401,8 @@ function handleDashboard() {
 
   <div class="grid-2">
     <div class="section">
-      <h2>安装实例活跃度</h2>
-      <table><thead><tr><th>实例</th><th>行为数</th><th>调用次数</th><th>最后活跃</th></tr></thead><tbody id="instanceTable"></tbody></table>
+      <h2>用户活跃度</h2>
+      <table><thead><tr><th>工号</th><th>行为数</th><th>调用次数</th><th>最后活跃</th></tr></thead><tbody id="instanceTable"></tbody></table>
     </div>
     <div class="section">
       <h2>资产分析 Top10（去重）</h2>
@@ -465,7 +467,7 @@ function inputLabel(i) { return INPUT_NAMES[i] || i || '(未记录)'; }
 
 function renderOverview(o) {
   var html = '';
-  html += card('安装实例', o.total_users || 0, '按 install_id 去重');
+  html += card('用户数', o.total_users || 0, '按 install_id 去重');
   html += card('分析行为数', o.total_actions || 0, '一次完整分析=1次（去重）');
   html += card('脚本调用数', o.total_records || 0,
     '成功 ' + (o.total_ok||0) + ' / 失败 ' + (o.total_error||0));
@@ -552,8 +554,7 @@ function render(data) {
     return [cmdLabel(r.command), r.count, fmtTime(r.last_used)];
   });
   renderTable('instanceTable', data.instance_activity || [], function(r) {
-    var sid = r.install_id ? r.install_id.substring(0, 8) : '-';
-    return [sid, r.actions, r.records, fmtTime(r.last_active)];
+    return [r.user_name || '(未识别)', r.actions, r.records, fmtTime(r.last_active)];
   });
   renderTable('assetTable', data.top_assets || [], function(r) {
     return [r.asset, r.count, fmtTime(r.last_analyzed)];
@@ -569,7 +570,7 @@ function render(data) {
     var sid = r.install_id ? r.install_id.substring(0, 8) : '-';
     return [
       r.target_table || '-',
-      sid,
+      r.user_name || sid,
       r.parse_sec || '-',
       ai,
       r.view_sec || '-',

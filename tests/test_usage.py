@@ -12,7 +12,6 @@
     pytest tests/test_usage.py -v
 """
 
-import csv
 import io
 import json
 import sys
@@ -26,7 +25,6 @@ sys.path.insert(0, str(ANALYZER_REF))
 
 import usage
 from usage import (
-    FIELD_NAMES,
     _classify_error,
     _is_enabled,
     flush_queue,
@@ -35,7 +33,7 @@ from usage import (
 )
 
 # 路径常量必须通过 usage.XXX 动态访问 —— monkeypatch 改的是模块属性，
-# from usage import usage.CSV_PATH 拿到的是导入时的值快照，不会跟着变。
+# from usage import 拿到的是导入时的值快照，不会跟着变。
 # 下面这些 helper 确保测试代码始终读到被 monkeypatch 后的当前值。
 
 
@@ -51,7 +49,7 @@ def isolated_usage(monkeypatch, tmp_path):
     fake_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(usage, "USAGE_DIR", fake_dir)
     monkeypatch.setattr(usage, "CONFIG_PATH", fake_dir / "config.json")
-    monkeypatch.setattr(usage, "CSV_PATH", fake_dir / "usage.csv")
+    monkeypatch.setattr(usage, "LOCAL_LOG_PATH", fake_dir / "usage.jsonl")
     monkeypatch.setattr(usage, "QUEUE_PATH", fake_dir / "usage_queue.jsonl")
     # 清掉环境变量（其他测试可能设过）
     monkeypatch.delenv("ANALYZER_NO_TELEMETRY", raising=False)
@@ -131,43 +129,49 @@ class TestConfig:
 
 
 # ════════════════════════════════════════════════════════════════════════
-# 2. CSV 写入
+# 2. JSONL 本地存档
 # ════════════════════════════════════════════════════════════════════════
 
-class TestCsvWrite:
-    """CSV 表头创建、追加、字段完整。"""
+class TestJsonlWrite:
+    """JSONL 写入、追加、字段完整。"""
 
-    def test_csv_header_created_on_first_write(self, isolated_usage, fake_post_ok):
-        """首次写 CSV 自动建表头"""
+    def test_jsonl_created_on_first_write(self, isolated_usage, fake_post_ok):
+        """首次写自动创建 jsonl 文件"""
         record({"command": "analyze"})
-        assert usage.CSV_PATH.exists()
-        with open(usage.CSV_PATH, encoding="utf-8") as f:
-            reader = csv.reader(f)
-            header = next(reader)
-        assert header == FIELD_NAMES
+        assert usage.LOCAL_LOG_PATH.exists()
+        with open(usage.LOCAL_LOG_PATH, encoding="utf-8") as f:
+            row = json.loads(f.readline())
+        assert row["command"] == "analyze"
 
-    def test_csv_row_fields_complete(self, isolated_usage, fake_post_ok):
-        """每行包含全部 16 字段（缺失的填空字符串）"""
+    def test_jsonl_row_has_core_fields(self, isolated_usage, fake_post_ok):
+        """每行包含核心字段"""
         record({"command": "analyze", "asset": "DWB_TEST_F", "elapsed_sec": 1.2})
-        with open(usage.CSV_PATH, encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-        assert len(rows) == 1
-        row = rows[0]
-        for field in FIELD_NAMES:
-            assert field in row, f"字段缺失: {field}"
+        with open(usage.LOCAL_LOG_PATH, encoding="utf-8") as f:
+            row = json.loads(f.readline())
         assert row["command"] == "analyze"
         assert row["asset"] == "DWB_TEST_F"
-        assert row["elapsed_sec"] == "1.2"
+        assert row["elapsed_sec"] == 1.2  # JSONL 里是数字不是字符串
+        assert row["run_id"]
+        assert row["timestamp"]
 
-    def test_csv_appends_multiple_rows(self, isolated_usage, fake_post_ok):
+    def test_jsonl_appends_multiple_rows(self, isolated_usage, fake_post_ok):
         """多次 record 追加多行"""
         for i in range(3):
             record({"command": "analyze", "asset": f"ASSET_{i}"})
-        with open(usage.CSV_PATH, encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
+        with open(usage.LOCAL_LOG_PATH, encoding="utf-8") as f:
+            rows = [json.loads(l) for l in f if l.strip()]
         assert len(rows) == 3
+
+    def test_jsonl_no_misalignment_on_field_change(self, isolated_usage, fake_post_ok):
+        """改字段不影响旧行（JSONL 每行独立，不像 CSV 会错位）"""
+        record({"command": "analyze", "asset": "OLD"})
+        # 模拟字段变化后写新行（extra 字段）
+        record({"command": "analyze", "asset": "NEW", "new_field": 42})
+        with open(usage.LOCAL_LOG_PATH, encoding="utf-8") as f:
+            rows = [json.loads(l) for l in f if l.strip()]
+        assert rows[0]["asset"] == "OLD"
+        assert rows[1]["asset"] == "NEW"
+        assert rows[1].get("extra")  # new_field 进了 extra
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -178,16 +182,15 @@ class TestRecordRobustness:
     """record() 全程吞异常、自动补字段、关闭时不写。"""
 
     def test_record_silently_ignored_when_disabled(self, isolated_usage, disabled):
-        """关闭时不写 CSV"""
+        """关闭时不写本地存档"""
         record({"command": "analyze"})
-        assert not usage.CSV_PATH.exists()
+        assert not usage.LOCAL_LOG_PATH.exists()
 
     def test_record_auto_fills_runtime_fields(self, isolated_usage, fake_post_ok):
         """自动补充 run_id / timestamp / install_id / user / os / python_version"""
         record({"command": "analyze"})
-        with open(usage.CSV_PATH, encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            row = next(reader)
+        with open(usage.LOCAL_LOG_PATH, encoding="utf-8") as f:
+            row = json.loads(f.readline())
         assert row["run_id"]  # 自动生成
         assert row["timestamp"]  # ISO 时间
         assert row["install_id"]  # 从 config
@@ -200,7 +203,7 @@ class TestRecordRobustness:
         record("not a dict")
         record(None)
         record([])
-        assert not usage.CSV_PATH.exists() or _count_csv_rows() == 0
+        assert not usage.LOCAL_LOG_PATH.exists() or _count_log_rows() == 0
 
     def test_record_never_raises(self, isolated_usage, monkeypatch):
         """即使内部函数抛异常，record 也不抛"""
@@ -212,19 +215,19 @@ class TestRecordRobustness:
     def test_timestamp_iso_format(self, isolated_usage, fake_post_ok):
         """timestamp 是 ISO 格式（含日期+时间）"""
         record({"command": "analyze"})
-        with open(usage.CSV_PATH, encoding="utf-8") as f:
-            row = next(csv.DictReader(f))
+        with open(usage.LOCAL_LOG_PATH, encoding="utf-8") as f:
+            row = json.loads(f.readline())
         ts = row["timestamp"]
         # 形如 2026-07-23T14:30:15
         assert "T" in ts or " " in ts
         assert len(ts) >= 10
 
 
-def _count_csv_rows():
-    if not usage.CSV_PATH.exists():
+def _count_log_rows():
+    if not usage.LOCAL_LOG_PATH.exists():
         return 0
-    with open(usage.CSV_PATH, encoding="utf-8") as f:
-        return sum(1 for _ in csv.DictReader(f))
+    with open(usage.LOCAL_LOG_PATH, encoding="utf-8") as f:
+        return sum(1 for l in f if l.strip())
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -250,11 +253,11 @@ class TestReporting:
         assert queued["command"] == "analyze"
         assert queued["asset"] == "DWB_X_F"
 
-    def test_csv_always_written_regardless_of_post(self, isolated_usage, fake_post_fail):
-        """无论 POST 成败，CSV 都写（完整本地存档）"""
+    def test_log_always_written_regardless_of_post(self, isolated_usage, fake_post_fail):
+        """无论 POST 成败，本地存档都写（完整存档）"""
         record({"command": "analyze"})
-        assert usage.CSV_PATH.exists()
-        assert _count_csv_rows() == 1
+        assert usage.LOCAL_LOG_PATH.exists()
+        assert _count_log_rows() == 1
 
     def test_queue_corrupted_line_deleted(self, isolated_usage, monkeypatch):
         """队列文件有损坏行时，读取后重建（只留能解析的）"""
@@ -407,7 +410,7 @@ class TestIntegration:
     def test_record_failure_does_not_break_main(self, isolated_usage, monkeypatch):
         """即使 record 内部全坏，主流程仍成功"""
         # 让 record 的一切底层都抛
-        monkeypatch.setattr(usage, "_write_csv",
+        monkeypatch.setattr(usage, "_write_log",
                             lambda r: (_ for _ in ()).throw(IOError("disk full")))
 
         def fake_main():

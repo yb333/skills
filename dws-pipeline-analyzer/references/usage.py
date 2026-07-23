@@ -11,14 +11,13 @@
 数据流：
     命令结束(main 的 finally，交付物已落盘后)
        → 构建一行记录(record dict)
-       → 写本地 usage.csv (完整存档，永远在)
+       → 写本地 usage.jsonl (完整存档，每行一个JSON)
        → 同步 POST 到服务端 (超时 2s，失败静默)
            ├ 成功 → 结束
            └ 失败 → 追加 usage_queue.jsonl
                       → 下次启动 flush_queue 补发 → 成功则删
 """
 
-import csv
 import json
 import os
 import platform
@@ -43,7 +42,7 @@ HTTP_TIMEOUT = 2.0
 # 本地存档目录（与 opencode 运行时隔离，是 analyzer-agent 自己的数据）
 USAGE_DIR = Path.home() / ".analyzer-agent"
 CONFIG_PATH = USAGE_DIR / "config.json"
-CSV_PATH = USAGE_DIR / "usage.csv"
+LOCAL_LOG_PATH = USAGE_DIR / "usage.jsonl"
 QUEUE_PATH = USAGE_DIR / "usage_queue.jsonl"
 
 # 数据字典 —— 核心固定列 + extra（JSON，扩展用）
@@ -137,47 +136,21 @@ def _is_enabled() -> bool:
 # ── 环境信息 ─────────────────────────────────────────────────────────────
 
 def _get_user() -> str:
-    """取用户标识（内部团队工具，需知道谁在用）。
+    """取用户标识（工号，如 a12345）。
 
-    多层 fallback，确保子进程/AI agent 调用时也能拿到可靠标识：
-    1. Windows: ctypes 调 GetUserNameW（读进程安全令牌，不依赖环境变量）
-    2. Unix: getpass.getuser()（走 getpwuid 系统调用，不依赖环境变量）
-    3. socket.gethostname()（主机名兜底，系统调用，子进程也可靠）
-    4. 环境变量 USER/USERNAME（最后兜底）
+    Windows 上 USERNAME 环境变量就是用户的工号/域账号，getpass.getuser()
+    能拿到。这是内部团队 AD 域统一分配的标识，可靠且有意义。
 
-    安全说明：只读当前进程的用户名/主机名，不收集域账号、MAC、硬件序列号
-    等敏感信息。用户名是系统公开信息，内部团队工具用于识别谁在用。
+    不用 hostname 兜底（那是电脑名不是人，无意义）。
+    拿不到就返回空，看板显示"未识别"。
     """
-    # 1. 用户名（平台分支）
     try:
-        if sys.platform == "win32":
-            # Windows: getpass 只查 USERNAME 环境变量（子进程不可靠），
-            # 改用 ctypes 调 GetUserNameW 读安全令牌（可靠）
-            try:
-                import ctypes
-                buf = ctypes.create_unicode_buffer(256)
-                n = ctypes.wintypes.DWORD(256)
-                if ctypes.windll.advapi32.GetUserNameW(buf, ctypes.byref(n)):
-                    return buf.value
-            except Exception:
-                pass
-        else:
-            # Unix: getpass.getuser() 走 getpwuid 系统调用，可靠
-            import getpass
-            name = getpass.getuser()
-            if name:
-                return name
+        import getpass
+        name = getpass.getuser()
+        if name:
+            return name
     except Exception:
         pass
-    # 2. 主机名（系统级调用，不受环境变量透传影响，最可靠的兜底）
-    try:
-        import socket
-        host = socket.gethostname()
-        if host:
-            return host
-    except Exception:
-        pass
-    # 3. 环境变量兜底
     try:
         return os.environ.get("USER") or os.environ.get("USERNAME") or ""
     except Exception:
@@ -232,19 +205,18 @@ def _classify_error(exc) -> str:
         return "unknown"
 
 
-# ── 本地存档（CSV） ──────────────────────────────────────────────────────
+# ── 本地存档（JSONL） ────────────────────────────────────────────────────
 
-def _write_csv(row: dict) -> None:
-    """追加一行到 usage.csv，文件不存在则带表头创建。"""
+def _write_log(row: dict) -> None:
+    """追加一行到 usage.jsonl（每行一个 JSON）。
+
+    JSONL 比 CSV 的优势：每行自带字段名，改字段不影响旧行，
+    数字就是数字、JSON 原生支持，不会被 Excel 破坏。
+    """
     try:
         _ensure_dir()
-        file_exists = CSV_PATH.exists()
-        with open(CSV_PATH, "a", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=FIELD_NAMES,
-                                    extrasaction="ignore")
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(row)
+        with open(LOCAL_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
     except Exception:
         pass
 
@@ -395,7 +367,7 @@ def record(data: dict) -> None:
         if isinstance(detail, dict):
             row["elapsed_detail"] = json.dumps(detail, ensure_ascii=False)
         # CSV 先落（本地永远有完整存档）
-        _write_csv(row)
+        _write_log(row)
         # 同步上报（失败落队列，不抛）
         if not _post_one(row):
             _enqueue(row)
@@ -432,7 +404,7 @@ def main():
     if args.export:
         import shutil
         try:
-            shutil.copy2(CSV_PATH, args.export)
+            shutil.copy2(LOCAL_LOG_PATH, args.export)
             print(f"已导出到: {args.export}")
         except Exception as e:
             print(f"导出失败: {e}")
@@ -447,18 +419,19 @@ def main():
     print(f"上报地址: {_detect_endpoint()}")
     print(f"环境变量 ANALYZER_NO_TELEMETRY={os.environ.get('ANALYZER_NO_TELEMETRY', '未设置')}")
     print()
-    if CSV_PATH.exists():
+    if LOCAL_LOG_PATH.exists():
         try:
-            with open(CSV_PATH, encoding="utf-8") as f:
-                lines = f.readlines()
-            data_lines = [l for l in lines if l.strip()]
+            with open(LOCAL_LOG_PATH, encoding="utf-8") as f:
+                lines = [l for l in f if l.strip()]
             print(f"=== 本地存档 ===")
-            print(f"CSV 路径: {CSV_PATH}")
-            print(f"总记录数: {len(data_lines) - 1}")  # 减表头
-            # 最近 5 条
+            print(f"日志路径: {LOCAL_LOG_PATH}")
+            print(f"总记录数: {len(lines)}")
             print(f"最近记录:")
-            for line in data_lines[-5:]:
-                print(f"  {line.strip()[:120]}")
+            for line in lines[-5:]:
+                row = json.loads(line)
+                print(f"  [{row.get('timestamp','')}] {row.get('user','')} "
+                      f"{row.get('command','')} {row.get('asset','')} "
+                      f"{row.get('elapsed_sec','')}s")
         except Exception as e:
             print(f"读取失败: {e}")
     else:
