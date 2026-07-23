@@ -191,7 +191,7 @@ body {
    ============================================================ */
 .metric-cards {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 20px;
 }
@@ -2682,81 +2682,90 @@ function renderSchedule() {
     if (!task) return '';
     var jobs = task.jobs || [];
     var params = task.params || [];
-    // 区分执行 job（url/database）和依赖 job（tskdep/url虚拟）
+    var accent = isI ? '#7c3aed' : '#1a73e8';
+    var bg = isI ? '#faf5ff' : '#f0f7ff';
+
+    // 区分执行 job 和依赖 job
     var execJobs = jobs.filter(function(j) {
       return j.type === 'url' || j.type === 'database' || j.type === 'sp';
     });
     var depJobs = jobs.filter(function(j) {
-      return j.type === 'tskdep';
+      return j.type === 'tskdep' || j.type === 'url';
     });
 
-    var out = '';
-    out += '<div style="margin-bottom:20px;border:1px solid #e0e0e0;border-radius:8px;padding:16px;'
-      + (isI ? 'background:#faf5ff;' : '') + '">';
-    out += '<h3 style="font-size:14px;margin-bottom:12px;color:' + (isI ? '#7c3aed' : '#1a73e8') + ';">'
-      + label + '：' + esc(task.task_name || '-') + '</h3>';
-
-    // 调度基本信息（精简：只留调度周期和依赖上周期）
-    out += '<div class="metric-cards" style="margin-bottom:14px;">';
-    out += metricCard('调度周期', esc(cronToText(task.schedule_cron)));
-    out += metricCard('依赖上周期', esc(task.depends_prev_cycle || '-'));
-    out += '</div>';
-
-    // 执行 Job（执行规则组的 job，一般只有1个，只显示名称）
-    if (execJobs.length) {
-      out += '<div style="font-size:12px;color:#666;margin-bottom:6px;">'
-        + '执行Job（调规则组加工）</div>';
-      out += '<table style="width:100%;font-size:12px;margin-bottom:14px;border-collapse:collapse;">';
-      out += '<thead><tr style="background:#f5f7fa;">'
-        + '<th style="padding:6px 8px;text-align:left;">Job名称</th>'
-        + '</tr></thead><tbody>';
-      execJobs.forEach(function(j) {
-        out += '<tr style="border-bottom:1px solid #eee;">'
-          + '<td style="padding:6px 8px;font-weight:500;color:#1a73e8;">' + esc(j.name || '-') + '</td>'
-          + '</tr>';
-      });
-      out += '</tbody></table>';
+    // 执行 job 的描述按类型区分
+    var execLabel;
+    if (execJobs.length && execJobs[0].type === 'url') {
+      execLabel = '执行Job（调规则组加工）';
+    } else if (execJobs.length && (execJobs[0].type === 'database' || execJobs[0].type === 'sp')) {
+      execLabel = '执行Job（执行SQL脚本）';
+    } else {
+      execLabel = '执行Job';
     }
 
-    // 依赖 Job（调度依赖，对应来源表）
+    var out = '';
+    // 卡片容器
+    out += '<div style="margin-bottom:16px;border-left:3px solid ' + accent + ';background:' + bg
+      + ';border-radius:0 8px 8px 0;padding:12px 16px;">';
+
+    // 第一行：任务名 + 调度周期（行内紧凑）
+    out += '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;">';
+    out += '<span style="font-weight:600;font-size:14px;color:' + accent + ';">' + esc(task.task_name || '-') + '</span>';
+    out += '<span style="font-size:12px;color:#666;background:#fff;padding:2px 8px;border-radius:4px;">'
+      + '🕐 ' + esc(cronToText(task.schedule_cron)) + '</span>';
+    if (task.depends_prev_cycle && task.depends_prev_cycle !== '-') {
+      out += '<span style="font-size:11px;color:#999;">依赖上周期：' + esc(task.depends_prev_cycle) + '</span>';
+    }
+    out += '</div>';
+
+    // 第二行：执行Job + 调度依赖 并排（两列布局）
+    out += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
+
+    // 左列：执行 Job
+    out += '<div>';
+    out += '<div style="font-size:11px;color:#999;margin-bottom:4px;">' + execLabel + '</div>';
+    if (execJobs.length) {
+      execJobs.forEach(function(j) {
+        out += '<div style="font-size:13px;font-weight:500;color:' + accent + ';">'
+          + esc(j.name || '-') + '</div>';
+      });
+    } else {
+      out += '<div style="font-size:12px;color:#ccc;">无</div>';
+    }
+    out += '</div>';
+
+    // 右列：调度依赖
+    out += '<div>';
+    out += '<div style="font-size:11px;color:#999;margin-bottom:4px;">'
+      + '调度依赖' + (depJobs.length ? '（' + depJobs.length + '个，对应来源表）' : '') + '</div>';
     if (depJobs.length) {
-      out += '<div style="font-size:12px;color:#666;margin-bottom:6px;">'
-        + '调度依赖（' + depJobs.length + '个，一般对应来源表）</div>';
-      out += '<table style="width:100%;font-size:12px;margin-bottom:14px;border-collapse:collapse;">';
-      out += '<thead><tr style="background:#fff3e0;">'
-        + '<th style="padding:6px 8px;text-align:left;">依赖Job名称</th>'
-        + '<th style="padding:6px 8px;">依赖类型</th>'
-        + '</tr></thead><tbody>';
       depJobs.forEach(function(j) {
         var depType = j.type === 'tskdep' ? '宽依赖'
           : (j.type === 'url' ? '虚拟任务依赖' : j.type);
-        out += '<tr style="border-bottom:1px solid #eee;">'
-          + '<td style="padding:6px 8px;">' + esc(j.name || '-') + '</td>'
-          + '<td style="padding:6px 8px;text-align:center;">' + esc(depType) + '</td>'
-          + '</tr>';
+        out += '<div style="font-size:12px;margin-bottom:2px;">'
+          + esc(j.name || '-') + ' '
+          + '<span style="font-size:11px;color:#999;">' + esc(depType) + '</span></div>';
       });
-      out += '</tbody></table>';
-    }
-
-    // 任务参数（折叠）
-    if (params.length) {
-      out += '<details style="margin-top:8px;"><summary style="cursor:pointer;font-size:12px;color:#666;">'
-        + '任务参数 (' + params.length + ')</summary>';
-      out += '<table style="width:100%;font-size:12px;margin-top:6px;border-collapse:collapse;">';
-      params.forEach(function(p) {
-        out += '<tr style="border-bottom:1px solid #f0f0f0;">'
-          + '<td style="padding:4px 8px;font-weight:500;">' + esc(p.name || '-') + '</td>'
-          + '<td style="padding:4px 8px;color:#666;">' + esc(p.value || '-') + '</td></tr>';
-      });
-      out += '</table></details>';
+    } else {
+      out += '<div style="font-size:12px;color:#ccc;">无</div>';
     }
     out += '</div>';
-    return out;
-  }
 
-  function metricCard(label, value) {
-    return '<div class="metric-card" style="min-width:140px;"><div style="font-size:11px;color:#888;">'
-      + label + '</div><div style="font-size:14px;font-weight:600;margin-top:2px;">' + value + '</div></div>';
+    out += '</div>'; // grid 结束
+
+    // 任务参数（折叠，精简到一行）
+    if (params.length) {
+      var paramStr = params.map(function(p) {
+        return esc(p.name) + '=' + esc(p.value || '-');
+      }).join('，');
+      out += '<details style="margin-top:8px;"><summary style="cursor:pointer;font-size:11px;color:#999;">'
+        + '任务参数 (' + params.length + ')</summary>';
+      out += '<div style="font-size:11px;color:#666;margin-top:4px;">' + paramStr + '</div>';
+      out += '</details>';
+    }
+
+    out += '</div>';
+    return out;
   }
 
   // F 任务
