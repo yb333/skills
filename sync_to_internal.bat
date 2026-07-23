@@ -124,6 +124,11 @@ popd
 echo   内网分支: !INTERNAL_BRANCH!
 echo.
 
+REM 允许 push 到非 bare 仓的当前分支（否则报 branch is currently checked out）
+pushd "!INTERNAL_REPO!"
+git config receive.denyCurrentBranch updateInstead 2>nul
+popd
+
 REM 直接 force push（以外网为准，不 pull 不 merge，避免冲突）
 git push --force internal !BRANCH!:!INTERNAL_BRANCH! 2>&1
 if !errorlevel! neq 0 (
