@@ -1,13 +1,10 @@
 {
   "name": "analyzer-agent-telemetry-server",
   "version": "1.0.0",
-  "description": "Analyzer Agent 运营埋点接收服务端",
+  "description": "Analyzer Agent 运营埋点接收服务端（零外部依赖，用 Node 内置 node:sqlite）",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "setup": "npm install"
+    "start": "node server.js"
   },
-  "dependencies": {
-    "better-sqlite3": "^11.0.0"
-  }
+  "dependencies": {}
 }

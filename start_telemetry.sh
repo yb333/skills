@@ -1,9 +1,8 @@
 #!/bin/bash
 # ============================================================
 # start_telemetry.sh - Analyzer Agent Telemetry Server (macOS/Linux)
-#
-# Usage: bash start_telemetry.sh
-# Auto: check node -> npm install (fallback copy) -> start -> open browser
+# Zero dependencies (uses Node built-in node:sqlite).
+# Requires Node.js v22.5+ (v24 recommended).
 # ============================================================
 
 set -e
@@ -16,35 +15,22 @@ echo
 
 # --- Check Node.js ---
 if ! command -v node &>/dev/null; then
-    echo "[ERROR] Node.js not found. Install from https://nodejs.org/"
+    echo "[ERROR] Node.js not found. Install v22.5+ from https://nodejs.org/"
     exit 1
 fi
-echo "[OK] Node.js: $(node -v)"
+NODE_VER=$(node -v)
+echo "[OK] Node.js: $NODE_VER"
+
+# --- Check version >= 22 ---
+NODE_MAJOR=$(echo "$NODE_VER" | sed 's/v\([0-9]*\)\..*/\1/')
+if [ "$NODE_MAJOR" -lt 22 ]; then
+    echo "[ERROR] Node.js $NODE_VER is too old. Need v22.5+ for built-in sqlite."
+    echo "Download from https://nodejs.org/"
+    exit 1
+fi
 echo
 
-# --- Install deps if missing ---
-if [ ! -d node_modules ]; then
-    echo "Installing dependencies..."
-    npm install 2>&1 || true
-    if [ ! -d node_modules/better-sqlite3 ]; then
-        echo
-        echo "[WARN] npm install failed. Trying to copy from ETL_opencode_ai..."
-        REF="$HOME/ETL_opencode_ai/telemetry-server/node_modules"
-        if [ -d "$REF/better-sqlite3" ]; then
-            cp -R "$REF" ./node_modules
-            echo "[OK] Copied node_modules from ETL_opencode_ai"
-        else
-            echo "[ERROR] Cannot find prebuilt node_modules."
-            echo "Please manually run in telemetry-server: npm install"
-            exit 1
-        fi
-    fi
-    echo
-    echo "[OK] Dependencies ready"
-    echo
-fi
-
-# --- Start server ---
+# --- Start server (no npm install needed - zero dependencies) ---
 echo "Starting server on port 3000..."
 echo
 echo "  Dashboard: http://localhost:3000/"

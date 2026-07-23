@@ -18,7 +18,9 @@
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
-const Database = require('better-sqlite3');
+// 用 Node 内置 node:sqlite（v22.5+ 自带，零外部依赖，无需编译）
+// 替代 better-sqlite3 —— 后者是原生 C++ 模块，Windows 上常因缺编译工具链失败
+const { DatabaseSync } = require('node:sqlite');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const DATA_DIR = path.join(__dirname, 'data');
@@ -28,9 +30,9 @@ const DB_PATH = path.join(DATA_DIR, 'usage.db');
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.pragma('busy_timeout = 5000');
+const db = new DatabaseSync(DB_PATH);
+db.exec('PRAGMA journal_mode = WAL');
+db.exec('PRAGMA busy_timeout = 5000');
 
 // 固定列 schema（替代参考项目的 event+properties JSON 模式）
 // user 是 SQL 保留字，列名用 user_name
@@ -134,8 +136,10 @@ function handlePostUsage(payload) {
   const now = Date.now();
   let received = 0;
 
-  const insertMany = db.transaction((rows) => {
-    for (const r of rows) {
+  // node:sqlite 无 db.transaction() helper，手动 BEGIN/COMMIT/ROLLBACK
+  try {
+    db.exec('BEGIN');
+    for (const r of records) {
       if (!r || !r.run_id || !r.command) continue;
       const result = insertStmt.run(
         toStr(r.run_id), toStr(r.timestamp), toStr(r.install_id), toStr(r.user_name),
@@ -147,11 +151,9 @@ function handlePostUsage(payload) {
       );
       if (result.changes > 0) received++;
     }
-  });
-
-  try {
-    insertMany(records);
+    db.exec('COMMIT');
   } catch (err) {
+    try { db.exec('ROLLBACK'); } catch (e) { /* ignore */ }
     return { statusCode: 500, body: { ok: false, error: 'Database error: ' + err.message } };
   }
 
