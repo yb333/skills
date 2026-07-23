@@ -10,11 +10,13 @@ DWS 数据仓库 ETL 资产理解工具——帮你快速理解一个 ETL 资产
 
 ### 第 1 步：下载代码
 
+从内网代码仓 clone（地址问你的同事或管理员）：
+
 ```bash
-git clone https://github.com/yb333/analyzer-agent.git
+git clone <内网代码仓地址>
 ```
 
-或者直接在 GitHub 页面点 **Code → Download ZIP**，解压到任意目录。
+或者在内网代码仓页面下载 ZIP 包，解压到任意目录。
 
 ### 第 2 步：安装
 
