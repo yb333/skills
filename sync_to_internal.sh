@@ -58,7 +58,7 @@ echo ""
 echo "[Step 2] 同步到内网仓库..."
 rsync -a --delete \
     --exclude='.git' \
-    --exclude='tests' --exclude='docs' --exclude='release' \
+    --exclude='tests' --exclude='docs' --exclude='release' --exclude='dev' \
     --exclude='__pycache__' --exclude='.pytest_cache' \
     --exclude='telemetry-server' \
     --exclude='architecture.md' \

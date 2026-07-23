@@ -5,6 +5,9 @@ __pycache__/
 # 打包产物（不进 git）
 release/
 
+# 开发过程文件（工具脚本、测试数据等，不给用户）
+dev/
+
 # 汇报/演示材料（不属于 agent 本体）
 *汇报*.html
 *蓝图*.html
@@ -12,4 +15,3 @@ release/
 demo_*.html
 .zcode/
 output/
-schedule_tasks*

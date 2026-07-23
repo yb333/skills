@@ -77,7 +77,7 @@ REM ── Step 2: robocopy 同步到内网仓（排除开发文件，保留 .gi
 echo [Step 2] 同步到内网仓库...
 
 robocopy "%TEMP_DIR%" "!INTERNAL_REPO!" /MIR /NFL /NDL /NP /NJH /NJS ^
-    /XD tests docs release __pycache__ .pytest_cache .git telemetry-server ^
+    /XD tests docs release dev __pycache__ .pytest_cache .git telemetry-server ^
     /XF architecture.md sync_to_internal.sh sync_to_internal.bat start_telemetry.sh start_telemetry.bat stop_telemetry.bat sample_rule.yml .gitignore .DS_Store 2>nul
 
 if !errorlevel! GTR 7 (
