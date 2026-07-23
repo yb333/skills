@@ -59,23 +59,17 @@ echo "外网仓库: $EXTERNAL_REPO"
 echo "内网仓库: $INTERNAL_REPO"
 echo ""
 
-# ── Step 1: 从外网 clone 最新代码 ──
+# ── Step 1: 从外网 clone 最新代码（完整克隆，不用 --depth 1）──
 TEMP_DIR=$(mktemp -d)
 echo "[Step 1] 拉取外网最新代码..."
-git clone --depth 1 "$EXTERNAL_REPO" "$TEMP_DIR" 2>&1 | tail -3
+git clone "$EXTERNAL_REPO" "$TEMP_DIR" 2>&1 | tail -3
 COMMIT_SUBJECT=$(cd "$TEMP_DIR" && git log -1 --format="%s")
 COMMIT_HASH=$(cd "$TEMP_DIR" && git rev-parse --short HEAD)
 echo "  最新提交: $COMMIT_HASH $COMMIT_SUBJECT"
 echo ""
 
-# ── Step 2: 取消浅克隆（shallow clone 不能 push）──
-echo "[Step 2] 取消浅克隆..."
-cd "$TEMP_DIR"
-git fetch --unshallow 2>&1 || echo "  [INFO] unshallow 失败（可能已是完整克隆），继续..."
-echo ""
-
-# ── Step 3: 删掉不该给用户的文件 ──
-echo "[Step 3] 清理开发文件..."
+# ── Step 2: 删掉不该给用户的文件 ──
+echo "[Step 2] 清理开发文件..."
 cd "$TEMP_DIR"
 rm -rf tests docs release telemetry-server
 rm -f architecture.md sync_to_internal.sh sync_to_internal.bat
@@ -91,8 +85,8 @@ git commit -m "清理开发文件（同步前预处理）" --allow-empty 2>&1 | 
 echo "  已清理"
 echo ""
 
-# ── Step 4: 直接 git push 到内网仓 ──
-echo "[Step 4] 推送到内网仓库..."
+# ── Step 3: 直接 git push 到内网仓 ──
+echo "[Step 3] 推送到内网仓库..."
 
 # 添加内网仓为 remote
 git remote add internal "$INTERNAL_REPO" 2>/dev/null || git remote set-url internal "$INTERNAL_REPO"
@@ -106,10 +100,7 @@ INTERNAL_BRANCH=$(cd "$INTERNAL_REPO" && git rev-parse --abbrev-ref HEAD 2>/dev/
 echo "  内网分支: $INTERNAL_BRANCH"
 echo ""
 
-# 先 pull 内网仓的内容（合并历史，以内网仓分支名为准）
-git pull internal "$INTERNAL_BRANCH" --allow-unrelated-histories --no-edit 2>&1 | tail -3 || true
-
-# push 到内网仓（外网 main → 内网 master，--force 以外网代码为准）
+# 直接 force push（以外网为准，不 pull 不 merge，避免冲突）
 git push --force internal "$BRANCH:$INTERNAL_BRANCH" 2>&1 | tail -3
 
 echo ""

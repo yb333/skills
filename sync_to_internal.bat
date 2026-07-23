@@ -61,27 +61,18 @@ echo 外网仓库: %EXTERNAL_REPO%
 echo 内网仓库: !INTERNAL_REPO!
 echo.
 
-REM ── Step 1: 从外网 clone 最新代码 ──
+REM ── Step 1: 从外网 clone 最新代码（完整克隆，不用 --depth 1）──
 set "TEMP_DIR=%TEMP%\analyzer-agent-sync-%RANDOM%"
 echo [Step 1] 拉取外网最新代码...
-git clone --depth 1 %EXTERNAL_REPO% "%TEMP_DIR%" 2>&1
+git clone %EXTERNAL_REPO% "%TEMP_DIR%" 2>&1
 if not exist "%TEMP_DIR%\.git" (
     echo [ERROR] clone 失败，请检查网络或仓库地址
     goto :cleanup
 )
 echo.
 
-REM ── Step 2: 取消浅克隆（shallow clone 不能 push）──
-echo [Step 2] 取消浅克隆...
-cd /d "%TEMP_DIR%"
-git fetch --unshallow 2>&1
-if !errorlevel! neq 0 (
-    echo   [INFO] unshallow 失败（可能已经是完整克隆），继续...
-)
-echo.
-
-REM ── Step 3: 删掉不该给用户的文件 ──
-echo [Step 3] 清理开发文件...
+REM ── Step 2: 删掉不该给用户的文件 ──
+echo [Step 2] 清理开发文件...
 pushd "%TEMP_DIR%"
 for /d %%D in (tests docs release telemetry-server) do (
     if exist "%%D" rmdir /s /q "%%D" 2>nul
@@ -111,8 +102,8 @@ echo   外网最新: !COMMIT_HASH! !COMMIT_MSG!
 popd
 echo.
 
-REM ── Step 4: 直接 git push 到内网仓 ──
-echo [Step 4] 推送到内网仓库...
+REM ── Step 3: 直接 git push 到内网仓 ──
+echo [Step 3] 推送到内网仓库...
 pushd "%TEMP_DIR%"
 
 REM 添加内网仓为 remote
@@ -133,13 +124,7 @@ popd
 echo   内网分支: !INTERNAL_BRANCH!
 echo.
 
-REM 先 pull 内网仓的内容（合并历史，以内网仓分支名为准）
-git pull internal !INTERNAL_BRANCH! --allow-unrelated-histories --no-edit 2>&1
-if !errorlevel! neq 0 (
-    echo   [INFO] pull 失败（可能内网仓还没有此分支），直接 push...
-)
-
-REM push 到内网仓（外网 main → 内网 master，--force 以外网代码为准）
+REM 直接 force push（以外网为准，不 pull 不 merge，避免冲突）
 git push --force internal !BRANCH!:!INTERNAL_BRANCH! 2>&1
 if !errorlevel! neq 0 (
     echo   [ERROR] push 失败
