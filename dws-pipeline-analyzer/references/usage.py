@@ -134,11 +134,20 @@ def _is_enabled() -> bool:
 # ── 环境信息 ─────────────────────────────────────────────────────────────
 
 def _get_user() -> str:
-    """取系统用户名（内部团队工具，需知道谁在用）。"""
+    """取系统用户名（内部团队工具，需知道谁在用）。
+
+    优先用 getpass.getuser()（跨平台，Windows 走 GetUserName API），
+    比手动查环境变量可靠——子进程/AI agent 调用时环境变量可能没透传。
+    """
     try:
-        return os.environ.get("USER") or os.environ.get("USERNAME") or ""
+        import getpass
+        name = getpass.getuser()
+        return name or os.environ.get("USER") or os.environ.get("USERNAME") or ""
     except Exception:
-        return ""
+        try:
+            return os.environ.get("USER") or os.environ.get("USERNAME") or ""
+        except Exception:
+            return ""
 
 
 def _get_os() -> str:
