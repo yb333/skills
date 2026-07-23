@@ -68,8 +68,14 @@ COMMIT_HASH=$(cd "$TEMP_DIR" && git rev-parse --short HEAD)
 echo "  最新提交: $COMMIT_HASH $COMMIT_SUBJECT"
 echo ""
 
-# ── Step 2: 删掉不该给用户的文件 ──
-echo "[Step 2] 清理开发文件..."
+# ── Step 2: 取消浅克隆（shallow clone 不能 push）──
+echo "[Step 2] 取消浅克隆..."
+cd "$TEMP_DIR"
+git fetch --unshallow 2>&1 || echo "  [INFO] unshallow 失败（可能已是完整克隆），继续..."
+echo ""
+
+# ── Step 3: 删掉不该给用户的文件 ──
+echo "[Step 3] 清理开发文件..."
 cd "$TEMP_DIR"
 rm -rf tests docs release telemetry-server
 rm -f architecture.md sync_to_internal.sh sync_to_internal.bat
@@ -85,8 +91,8 @@ git commit -m "清理开发文件（同步前预处理）" --allow-empty 2>&1 | 
 echo "  已清理"
 echo ""
 
-# ── Step 3: 直接 git push 到内网仓 ──
-echo "[Step 3] 推送到内网仓库..."
+# ── Step 4: 直接 git push 到内网仓 ──
+echo "[Step 4] 推送到内网仓库..."
 
 # 添加内网仓为 remote
 git remote add internal "$INTERNAL_REPO" 2>/dev/null || git remote set-url internal "$INTERNAL_REPO"

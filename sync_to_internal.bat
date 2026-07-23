@@ -71,8 +71,17 @@ if not exist "%TEMP_DIR%\.git" (
 )
 echo.
 
-REM ── Step 2: 在 clone 的代码里删掉不该给用户的文件 ──
-echo [Step 2] 清理开发文件...
+REM ── Step 2: 取消浅克隆（shallow clone 不能 push）──
+echo [Step 2] 取消浅克隆...
+cd /d "%TEMP_DIR%"
+git fetch --unshallow 2>&1
+if !errorlevel! neq 0 (
+    echo   [INFO] unshallow 失败（可能已经是完整克隆），继续...
+)
+echo.
+
+REM ── Step 3: 删掉不该给用户的文件 ──
+echo [Step 3] 清理开发文件...
 pushd "%TEMP_DIR%"
 for /d %%D in (tests docs release telemetry-server) do (
     if exist "%%D" rmdir /s /q "%%D" 2>nul
@@ -102,8 +111,8 @@ echo   外网最新: !COMMIT_HASH! !COMMIT_MSG!
 popd
 echo.
 
-REM ── Step 3: 直接 git push 到内网仓 ──
-echo [Step 3] 推送到内网仓库...
+REM ── Step 4: 直接 git push 到内网仓 ──
+echo [Step 4] 推送到内网仓库...
 pushd "%TEMP_DIR%"
 
 REM 添加内网仓为 remote
