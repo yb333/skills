@@ -982,7 +982,14 @@ def build_report_data(knowledge):
             if not fname:
                 continue
             if fname not in field_usage_map:
-                field_usage_map[fname] = {"join": [], "where": [], "groupby": []}
+                field_usage_map[fname] = {"join": [], "where": [], "groupby": [],
+                                          "_join_seen": set()}
+            # 去重：同一字段同一 ON 条件只留一条
+            # （a.order_id=b.order_id 两端 field 都是 order_id，on_condition 相同，合并为一条）
+            dedup_key = (sid, ju.get("on_condition", ""), ju.get("join_type", ""))
+            if dedup_key in field_usage_map[fname]["_join_seen"]:
+                continue
+            field_usage_map[fname]["_join_seen"].add(dedup_key)
             field_usage_map[fname]["join"].append({
                 "step_id": sid, "step_name": sname, "scenario": scenario,
                 "join_type": ju.get("join_type", ""),
@@ -1047,6 +1054,10 @@ def build_report_data(knowledge):
                 "usage": usage,
                 "source_tables": sorted(source_tables),
             })
+
+    # 清理临时去重用的 set（不能序列化到 JSON）
+    for usage in field_usage_map.values():
+        usage.pop("_join_seen", None)
 
     return {
         "summary": summary,
