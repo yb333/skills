@@ -137,20 +137,34 @@ def _is_enabled() -> bool:
 # ── 环境信息 ─────────────────────────────────────────────────────────────
 
 def _get_user() -> str:
-    """取系统用户名（内部团队工具，需知道谁在用）。
+    """取用户标识（内部团队工具，需知道谁在用）。
 
-    优先用 getpass.getuser()（跨平台，Windows 走 GetUserName API），
-    比手动查环境变量可靠——子进程/AI agent 调用时环境变量可能没透传。
+    多层 fallback，确保无论如何都能拿到有意义的标识：
+    1. getpass.getuser()   — 用户名（AI agent 子进程里可能拿不到）
+    2. socket.gethostname() — 主机名（系统调用，子进程也能拿到，最可靠）
+    3. 环境变量 USER/USERNAME — 兜底
     """
+    import socket
+    # 1. 用户名
     try:
         import getpass
         name = getpass.getuser()
-        return name or os.environ.get("USER") or os.environ.get("USERNAME") or ""
+        if name:
+            return name
     except Exception:
-        try:
-            return os.environ.get("USER") or os.environ.get("USERNAME") or ""
-        except Exception:
-            return ""
+        pass
+    # 2. 主机名（系统级，不受环境变量透传影响，最可靠的兜底）
+    try:
+        host = socket.gethostname()
+        if host:
+            return host
+    except Exception:
+        pass
+    # 3. 环境变量兜底
+    try:
+        return os.environ.get("USER") or os.environ.get("USERNAME") or ""
+    except Exception:
+        return ""
 
 
 def _get_os() -> str:
