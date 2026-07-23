@@ -1350,9 +1350,20 @@ body {
     </div>
   </div>
 
-</div>
+  <!-- Section 8: Schedule -->
+  <div class="section-card" id="scheduleSection">
+    <button class="collapsible-toggle" id="scheduleToggle">
+      <span class="toggle-arrow">&#9654;</span>
+      <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      调度信息
+      <span class="section-count" id="scheduleCount"></span>
+    </button>
+    <div class="collapsible-body" id="scheduleBody">
+      <div class="section-body" id="scheduleContent"></div>
+    </div>
+  </div>
 
-<!-- Detail Panel -->
+</div>
 <div class="detail-overlay" id="detailOverlay"></div>
 <div class="detail-panel" id="detailPanel">
   <div class="detail-top">
@@ -2623,7 +2634,96 @@ function renderQuality() {
 }
 
 // ================================================================
-// Detail Panel
+// Schedule (LTS 调度信息)
+// ================================================================
+function renderSchedule() {
+  var s = REPORT_DATA.schedule;
+  if (!s || (!s.f_task && !s.i_task)) {
+    document.getElementById('scheduleSection').style.display = 'none';
+    return;
+  }
+
+  var html = '';
+
+  // 渲染单个调度任务卡片
+  function taskCard(task, label, isI) {
+    if (!task) return '';
+    var cronText = task.schedule_cron || '-';
+    var jobs = task.jobs || [];
+    var params = task.params || [];
+    var out = '';
+    out += '<div style="margin-bottom:20px;border:1px solid #e0e0e0;border-radius:8px;padding:16px;'
+      + (isI ? 'background:#faf5ff;' : '') + '">';
+    out += '<h3 style="font-size:14px;margin-bottom:12px;color:' + (isI ? '#7c3aed' : '#1a73e8') + ';">'
+      + label + '：' + esc(task.task_name || '-')
+      + '<span style="font-size:12px;color:#888;margin-left:8px;">' + esc(task.task_type || '') + '</span></h3>';
+
+    // 调度基本信息
+    out += '<div class="metric-cards" style="margin-bottom:14px;">';
+    out += metricCard('调度周期', esc(cronText));
+    out += metricCard('责任人', esc(task.owner || '-'));
+    out += metricCard('开始时间', esc(task.start_time || '-'));
+    out += metricCard('依赖上周期', esc(task.depends_prev_cycle || '-'));
+    out += '</div>';
+
+    // Job 依赖链
+    if (jobs.length) {
+      out += '<table style="width:100%;font-size:12px;margin-bottom:12px;border-collapse:collapse;">';
+      out += '<thead><tr style="background:#f5f7fa;">'
+        + '<th style="padding:6px 8px;text-align:left;">Job名称</th>'
+        + '<th style="padding:6px 8px;">类型</th>'
+        + '<th style="padding:6px 8px;">父节点</th>'
+        + '<th style="padding:6px 8px;">重试</th>'
+        + '<th style="padding:6px 8px;">超时(分)</th>'
+        + '<th style="padding:6px 8px;">异常处理</th>'
+        + '</tr></thead><tbody>';
+      jobs.forEach(function(j) {
+        out += '<tr style="border-bottom:1px solid #eee;">'
+          + '<td style="padding:6px 8px;">' + esc(j.name || '-') + '</td>'
+          + '<td style="padding:6px 8px;text-align:center;">' + esc(j.type || '-') + '</td>'
+          + '<td style="padding:6px 8px;text-align:center;">' + esc(j.parent || '-') + '</td>'
+          + '<td style="padding:6px 8px;text-align:center;">' + esc(j.retry_count || '-')
+            + '次/' + esc(j.retry_interval || '-') + 's</td>'
+          + '<td style="padding:6px 8px;text-align:center;">' + esc(j.timeout || '-') + '</td>'
+          + '<td style="padding:6px 8px;text-align:center;">' + esc(j.error_handler || '-') + '</td>'
+          + '</tr>';
+      });
+      out += '</tbody></table>';
+    }
+
+    // 任务参数
+    if (params.length) {
+      out += '<details style="margin-top:8px;"><summary style="cursor:pointer;font-size:12px;color:#666;">'
+        + '任务参数 (' + params.length + ')</summary>';
+      out += '<table style="width:100%;font-size:12px;margin-top:6px;border-collapse:collapse;">';
+      params.forEach(function(p) {
+        out += '<tr style="border-bottom:1px solid #f0f0f0;">'
+          + '<td style="padding:4px 8px;font-weight:500;">' + esc(p.name || '-') + '</td>'
+          + '<td style="padding:4px 8px;color:#666;">' + esc(p.value || '-') + '</td></tr>';
+      });
+      out += '</table></details>';
+    }
+    out += '</div>';
+    return out;
+  }
+
+  function metricCard(label, value) {
+    return '<div class="metric-card" style="min-width:140px;"><div style="font-size:11px;color:#888;">'
+      + label + '</div><div style="font-size:14px;font-weight:600;margin-top:2px;">' + value + '</div></div>';
+  }
+
+  // F 任务
+  html += taskCard(s.f_task, 'F 调度任务（加工）', false);
+  // I 任务
+  if (s.i_task) {
+    html += '<div style="text-align:center;color:#aaa;font-size:12px;margin:-8px 0 12px;">↓ I 依赖 F</div>';
+    html += taskCard(s.i_task, 'I 调度任务（对外消费）', true);
+  } else {
+    html += '<div class="no-results">未发现 I 调度任务</div>';
+  }
+
+  document.getElementById('scheduleContent').innerHTML = html;
+}
 // ================================================================
 function openDetail(fieldName, scenario) {
   // 从 fields 列表找指定场景的字段
@@ -3333,6 +3433,12 @@ document.getElementById('qualityToggle').addEventListener('click', function() {
   document.getElementById('qualityBody').classList.toggle('open');
 });
 
+// Schedule collapsible — default collapsed
+document.getElementById('scheduleToggle').addEventListener('click', function() {
+  this.classList.toggle('open');
+  document.getElementById('scheduleBody').classList.toggle('open');
+});
+
 // Field Mapping collapsible — default collapsed
 document.getElementById('fieldMappingToggle').addEventListener('click', function() {
   this.classList.toggle('open');
@@ -3380,6 +3486,7 @@ renderLineage();
 renderSteps();
 renderFieldMapping();
 renderQuality();
+renderSchedule();
 </script>
 
 </body>

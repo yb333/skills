@@ -703,6 +703,118 @@ def _auto_discover_ddl_from_repo(yml_dir: Path, rules: list) -> str:
     return ""
 
 
+def _parse_lts_task(yml_path: Path) -> dict | None:
+    """解析一个 LTS 任务 yml，提取关键调度信息。
+
+    容错解析：yml 损坏或格式不符返回 None。
+    """
+    import yaml
+    try:
+        data = yaml.safe_load(yml_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+    except Exception:
+        return None
+
+    # 任务名（key 带星号前缀 '*任务名称'）
+    task_name = (data.get("*任务名称") or data.get("任务名称") or "").strip()
+
+    # 任务参数：找 V_GROUP_CODE（关联规则组的关键字段）
+    group_code = ""
+    params = []
+    raw_params = data.get("taskParams") or data.get("任务参数") or []
+    if isinstance(raw_params, list):
+        for p in raw_params:
+            if not isinstance(p, dict):
+                continue
+            pname = (p.get("*参数名称") or p.get("参数名称") or "").strip()
+            pval = p.get("参数值") or ""
+            params.append({"name": pname, "value": str(pval)})
+            if pname == "V_GROUP_CODE":
+                group_code = str(pval).strip()
+
+    # Jobs：提取关键字段（名称/类型/父节点/重试/超时）
+    jobs = []
+    raw_jobs = data.get("Jobs") or []
+    if isinstance(raw_jobs, list):
+        for j in raw_jobs:
+            if not isinstance(j, dict):
+                continue
+            jobs.append({
+                "name": (j.get("*job名称") or j.get("job名称") or "").strip(),
+                "type": (j.get("*job类型") or j.get("job类型") or "").strip(),
+                "parent": (j.get("*job的父节点名称") or j.get("job的父节点名称") or "").strip(),
+                "retry_count": str(j.get("job重试次数") or ""),
+                "retry_interval": str(j.get("job重试间隔") or ""),
+                "timeout": str(j.get("job超时时间") or ""),
+                "error_handler": str(j.get("job异常处理方式") or ""),
+            })
+
+    return {
+        "task_name": task_name,
+        "task_type": str(data.get("*任务类型") or data.get("任务类型") or ""),
+        "schedule_cron": str(data.get("调度周期") or ""),
+        "owner": str(data.get("*责任人") or data.get("责任人") or ""),
+        "start_time": str(data.get("开始时间") or ""),
+        "depends_prev_cycle": str(data.get("依赖上一周期") or ""),
+        "task_group": str(data.get("*任务组名称") or data.get("任务组名称") or ""),
+        "project": str(data.get("*项目名称") or data.get("项目名称") or ""),
+        "group_code": group_code,
+        "jobs": jobs,
+        "params": params,
+        "lts_file": str(yml_path),
+    }
+
+
+def _discover_lts_from_repo(yml_dir: Path, rule_group_code: str) -> dict | None:
+    """从代码仓 LTS/ 目录发现规则组对应的调度任务（F + I）。
+
+    匹配逻辑：
+    1. 扫所有 LTS/**/*.yml，找 taskParams 里 V_GROUP_CODE == rule_group_code 的 → F 任务
+    2. 从 F 任务名推导 I 任务名（_F → _I），再找对应的 I 任务
+    3. 返回 {f_task, i_task} 或 None（找不到不阻塞）
+
+    Returns: {"f_task": {...}, "i_task": {...} 或 None} 或 None
+    """
+    if not rule_group_code:
+        return None
+
+    repo_root = _find_repo_root(yml_dir)
+    if not repo_root:
+        return None
+
+    lts_root = repo_root / "LTS"
+    if not lts_root.is_dir():
+        return None
+
+    # 扫所有 LTS yml，建索引：按 V_GROUP_CODE 和 task_name
+    import yaml
+    by_group_code = {}   # V_GROUP_CODE → task dict
+    by_task_name = {}    # task_name → task dict
+
+    for yml_path in lts_root.rglob("*.yml"):
+        task = _parse_lts_task(yml_path)
+        if not task or not task["task_name"]:
+            continue
+        by_task_name[task["task_name"]] = task
+        if task["group_code"]:
+            by_group_code[task["group_code"]] = task
+
+    # 1. 按 rule_group_code 找 F 任务
+    f_task = by_group_code.get(rule_group_code)
+    if not f_task:
+        return None
+
+    # 2. 从 F 任务名推导 I 任务名（_F → _I），找 I 任务
+    i_task = None
+    f_name = f_task["task_name"]
+    if f_name.endswith("_F"):
+        i_name = f_name[:-2] + "_I"
+        i_task = by_task_name.get(i_name)
+
+    return {"f_task": f_task, "i_task": i_task}
+
+
 def _find_ddl_file(table_dir: Path, table_lower: str) -> Path | None:
     """在 DDL 目录里找目标表的 DDL 文件（包含匹配 + 多扩展名）。
 
@@ -1282,6 +1394,17 @@ def main():
         # yml 场景：从规则组目录向上找代码仓根，再定位 DDL
         ddl_dir = _auto_discover_ddl_from_repo(input_path, rules)
 
+    # yml 场景：自动发现 LTS 调度任务（F+I 双任务，按 V_GROUP_CODE 匹配规则组）
+    schedule_info = None
+    if is_yml_mode and raw.get("rule_group_code"):
+        try:
+            schedule_info = _discover_lts_from_repo(input_path, raw["rule_group_code"])
+            if schedule_info:
+                print(f"  [LTS] 发现调度任务: {schedule_info['f_task']['task_name']}"
+                      + (f" + {schedule_info['i_task']['task_name']}" if schedule_info.get('i_task') else ""))
+        except Exception:
+            pass
+
     # ── Step 3~7: 核心解析（与批量路径共用 analyze_pipeline，避免两套逻辑漂移）──
     print("Step 3-7: 解析 + 组装 knowledge...")
     knowledge, parsed_map = analyze_pipeline(
@@ -1307,6 +1430,9 @@ def main():
                 break
         i_view_info["view_step"] = view_step
         knowledge["meta"]["asset_info"] = i_view_info
+    # 注入 LTS 调度信息（和 asset_info 同样的模式：main 发现，注入 meta）
+    if schedule_info:
+        knowledge["meta"]["schedule"] = schedule_info
     stats = field_mappings["statistics"]
     print(f"  步骤数: {len(rules)}, 字段数: {stats['total_in_sql']}, "
           f"问题数: {len(quality['issues'])}")
@@ -1782,6 +1908,24 @@ def main_chain():
         except Exception:
             ddl_dir = ""
 
+    # LTS 调度任务发现（用最终 F 组的 rule_group_code 匹配）
+    schedule_info = None
+    if repo_root:
+        # 最终 F 组的 rule_group_code（chain_groups 里 depth 最大的）
+        final_group_code = ""
+        for g in sorted(result["groups"], key=lambda x: -x["depth"]):
+            if g.get("rule_group_code"):
+                final_group_code = g["rule_group_code"]
+                break
+        if final_group_code:
+            try:
+                schedule_info = _discover_lts_from_repo(final_group_dir, final_group_code)
+                if schedule_info:
+                    print(f"  [LTS] 发现调度任务: {schedule_info['f_task']['task_name']}"
+                          + (f" + {schedule_info['i_task']['task_name']}" if schedule_info.get('i_task') else ""))
+            except Exception:
+                pass
+
     # 分析
     print(f"\n[Step 3] 分析完整链路...")
     dialect = detect_dialect(merged_rules)
@@ -1799,6 +1943,9 @@ def main_chain():
          "depth": g["depth"]}
         for g in sorted(result["groups"], key=lambda x: x["depth"])
     ]
+    # 注入 LTS 调度信息
+    if schedule_info:
+        knowledge["meta"]["schedule"] = schedule_info
 
     # 输出
     safe_name = "chain_" + final_group_dir.name
