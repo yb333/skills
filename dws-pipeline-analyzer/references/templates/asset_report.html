@@ -2696,34 +2696,23 @@ function renderSchedule() {
     out += '<h3 style="font-size:14px;margin-bottom:12px;color:' + (isI ? '#7c3aed' : '#1a73e8') + ';">'
       + label + '：' + esc(task.task_name || '-') + '</h3>';
 
-    // 调度基本信息
+    // 调度基本信息（精简：只留调度周期和依赖上周期）
     out += '<div class="metric-cards" style="margin-bottom:14px;">';
     out += metricCard('调度周期', esc(cronToText(task.schedule_cron)));
-    out += metricCard('原始表达式', esc(task.schedule_cron || '-'));
-    out += metricCard('责任人', esc(task.owner || '-'));
     out += metricCard('依赖上周期', esc(task.depends_prev_cycle || '-'));
     out += '</div>';
 
-    // 执行 Job（执行规则组的 job，一般只有1个）
+    // 执行 Job（执行规则组的 job，一般只有1个，只显示名称）
     if (execJobs.length) {
       out += '<div style="font-size:12px;color:#666;margin-bottom:6px;">'
         + '执行Job（调规则组加工）</div>';
       out += '<table style="width:100%;font-size:12px;margin-bottom:14px;border-collapse:collapse;">';
       out += '<thead><tr style="background:#f5f7fa;">'
         + '<th style="padding:6px 8px;text-align:left;">Job名称</th>'
-        + '<th style="padding:6px 8px;">类型</th>'
-        + '<th style="padding:6px 8px;">重试</th>'
-        + '<th style="padding:6px 8px;">超时(分)</th>'
-        + '<th style="padding:6px 8px;">异常处理</th>'
         + '</tr></thead><tbody>';
       execJobs.forEach(function(j) {
         out += '<tr style="border-bottom:1px solid #eee;">'
           + '<td style="padding:6px 8px;font-weight:500;color:#1a73e8;">' + esc(j.name || '-') + '</td>'
-          + '<td style="padding:6px 8px;text-align:center;">' + esc(j.type || '-') + '</td>'
-          + '<td style="padding:6px 8px;text-align:center;">' + esc(j.retry_count || '-')
-            + '次/' + esc(j.retry_interval || '-') + 's</td>'
-          + '<td style="padding:6px 8px;text-align:center;">' + esc(j.timeout || '-') + '</td>'
-          + '<td style="padding:6px 8px;text-align:center;">' + esc(j.error_handler || '-') + '</td>'
           + '</tr>';
       });
       out += '</tbody></table>';
@@ -2736,15 +2725,14 @@ function renderSchedule() {
       out += '<table style="width:100%;font-size:12px;margin-bottom:14px;border-collapse:collapse;">';
       out += '<thead><tr style="background:#fff3e0;">'
         + '<th style="padding:6px 8px;text-align:left;">依赖Job名称</th>'
-        + '<th style="padding:6px 8px;">类型</th>'
-        + '<th style="padding:6px 8px;">父节点</th>'
+        + '<th style="padding:6px 8px;">依赖类型</th>'
         + '</tr></thead><tbody>';
       depJobs.forEach(function(j) {
-        var depType = j.type === 'url' ? '虚拟依赖' : j.type;
+        var depType = j.type === 'tskdep' ? '宽依赖'
+          : (j.type === 'url' ? '虚拟任务依赖' : j.type);
         out += '<tr style="border-bottom:1px solid #eee;">'
           + '<td style="padding:6px 8px;">' + esc(j.name || '-') + '</td>'
           + '<td style="padding:6px 8px;text-align:center;">' + esc(depType) + '</td>'
-          + '<td style="padding:6px 8px;text-align:center;">' + esc(j.parent || '-') + '</td>'
           + '</tr>';
       });
       out += '</tbody></table>';
