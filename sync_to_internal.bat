@@ -73,22 +73,10 @@ if not exist "%TEMP_DIR%\.git" (
 )
 echo.
 
-REM ── Step 2: 白名单同步（只同步用户成品）──
-REM 策略：和 pack_release.py 用同一份 INCLUDE 白名单。
-REM       默认什么都不传，只有显式加入 INCLUDE 的才同步。
-REM       这样加任何新文件（服务端/测试/内部工具）都不会误传内网。
-echo [Step 2] 白名单同步到内网仓库（只同步用户成品）...
-
-REM 从 pack_release.py 读 INCLUDE 列表（保证打包和同步一致）
-pushd "%TEMP_DIR%"
-for /f "delims=" %%I in ('python -c "import pack_release; print(\" \".join(pack_release.INCLUDE))" 2^>nul') do set "INCLUDE=%%I"
-popd
-if "!INCLUDE!"=="" (
-    echo [ERROR] 无法读取 pack_release.py 的 INCLUDE 列表
-    goto :cleanup
-)
-echo   同步清单: !INCLUDE!
-echo.
+REM ── Step 2: 全量同步（排除开发文件）──
+REM 策略：默认全部同步，只排除已知开发文件。
+REM       新增不传内网的文件时，记得加到排除列表。
+echo [Step 2] 全量同步到内网仓库（排除开发文件）...
 
 REM 先清空内网仓库（保留 .git）
 pushd "!INTERNAL_REPO!"
@@ -104,17 +92,18 @@ for /f "delims=" %%F in ('dir /a /b ^| findstr /v "^\.git$"') do (
 )
 popd
 
-REM 按白名单复制（只复制 INCLUDE 里的）
-pushd "%TEMP_DIR%"
-for %%I in (!INCLUDE!) do (
-    if exist "%%I" (
-        xcopy "%%I" "!INTERNAL_REPO!\%%I\" /E /I /Q /Y >nul 2>&1
-        echo   + %%I
-    ) else (
-        echo   - %%I（不存在，跳过）
-    )
+REM 排除列表（开发文件不同步给用户）
+REM 用 robocopy 全量复制 + /XF 排除文件 + /XD 排除目录
+robocopy "%TEMP_DIR%" "!INTERNAL_REPO!" /E /NFL /NDL /NP /NJH /NJS ^
+    /XD tests docs release __pycache__ .pytest_cache .git telemetry-server ^
+    /XF architecture.md pack_release.py sync_to_internal.sh sync_to_internal.bat start_telemetry.sh start_telemetry.bat stop_telemetry.bat sample_rule.yml .gitignore .DS_Store 2>nul
+
+REM robocopy 返回码 0-7 都是正常的（0=无变更 1=有复制）
+if !errorlevel! GTR 7 (
+    echo [ERROR] robocopy 失败
+    goto :cleanup
 )
-popd
+echo   + 全量同步完成（排除开发文件）
 
 REM 清理垃圾
 for /d /r "!INTERNAL_REPO!" %%D in (__pycache__) do (

@@ -71,36 +71,33 @@ EXTERNAL_VERSION=$(cd "$TEMP_DIR" && git log --oneline -1)
 echo "  最新提交: $EXTERNAL_VERSION"
 echo ""
 
-# ── Step 2: 白名单同步（只同步用户成品）──
-# 策略：和 pack_release.py 用同一份 INCLUDE 白名单。
-#       默认什么都不传，只有显式加入 INCLUDE 的才同步。
-#       这样加任何新文件（服务端/测试/内部工具）都不会误传内网。
-echo "[Step 2] 白名单同步到内网仓库（只同步用户成品）..."
+# ── Step 2: 全量同步（排除开发文件）──
+# 策略：默认全部同步，只排除已知开发文件。
+#       新增不传内网的文件时，记得加到排除列表。
+echo "[Step 2] 全量同步到内网仓库（排除开发文件）..."
 
-# 从 pack_release.py 读 INCLUDE 列表（保证打包和同步一致）
-INCLUDE=$(cd "$TEMP_DIR" && python3 -c "
-import pack_release
-print(' '.join(pack_release.INCLUDE))
-" 2>/dev/null)
-if [ -z "$INCLUDE" ]; then
-    echo "[ERROR] 无法读取 pack_release.py 的 INCLUDE 列表"
-    exit 1
-fi
-echo "  同步清单: $INCLUDE"
-echo ""
+# 排除列表（这些文件/目录不给用户）
+EXCLUDES="tests docs release __pycache__ .pytest_cache .git .gitignore architecture.md pack_release.py sync_to_internal.sh sync_to_internal.bat start_telemetry.sh start_telemetry.bat stop_telemetry.bat telemetry-server sample_rule.yml"
 
-# 先清空内网仓库（保留 .git），再按白名单复制
+# 先清空内网仓库（保留 .git），再全部复制（排除开发文件）
 cd "$INTERNAL_REPO"
 find . -not -path './.git/*' -not -path './.git' -not -name '.' -delete 2>/dev/null || true
 
 cd "$TEMP_DIR"
-for item in $INCLUDE; do
-    if [ -e "$item" ]; then
-        cp -r "$item" "$INTERNAL_REPO/"
-        echo "  + $item"
-    else
-        echo "  - $item（不存在，跳过）"
+for item in *; do
+    skip=false
+    for ex in $EXCLUDES; do
+        if [ "$item" = "$ex" ]; then
+            skip=true
+            break
+        fi
+    done
+    if $skip; then
+        echo "  - $item（开发文件，跳过）"
+        continue
     fi
+    cp -r "$item" "$INTERNAL_REPO/"
+    echo "  + $item"
 done
 
 # 清理垃圾文件
