@@ -2,17 +2,13 @@
 # ============================================================
 # sync_to_internal.sh — 一键同步外网代码到内网 git 仓库
 #
+# 原理：clone 外网仓 → 删掉开发文件 → git push --force 到内网仓
+# 用 git 自己处理 diff，不用 rsync，不会"看不出变化"
+#
 # 用法（在内网电脑上运行）：
-#   ./sync_to_internal.sh                  # 用默认配置
-#   ./sync_to_internal.sh /path/to/internal/repo  # 指定内网仓库路径
-#   ./sync_to_internal.sh --config /path/to/internal/repo  # 设置默认路径
-#
-# 功能：
-#   1. 从外网 GitHub clone/pull 最新代码到临时目录
-#   2. 把成品文件同步到内网 git 仓库（排除开发文件）
-#   3. git add + commit + push 到内网远端
-#
-# 只同步成品文件（用户需要的），不同步开发文件（tests/docs/architecture 等）
+#   ./sync_to_internal.sh
+#   ./sync_to_internal.sh /path/to/internal/repo
+#   ./sync_to_internal.sh --config /path/to/internal/repo
 # ============================================================
 
 set -e
@@ -63,77 +59,54 @@ echo "外网仓库: $EXTERNAL_REPO"
 echo "内网仓库: $INTERNAL_REPO"
 echo ""
 
-# ── Step 1: 从外网拉最新代码 ──
+# ── Step 1: 从外网 clone 最新代码 ──
 TEMP_DIR=$(mktemp -d)
 echo "[Step 1] 拉取外网最新代码..."
 git clone --depth 1 "$EXTERNAL_REPO" "$TEMP_DIR" 2>&1 | tail -3
-EXTERNAL_VERSION=$(cd "$TEMP_DIR" && git log --oneline -1)
-echo "  最新提交: $EXTERNAL_VERSION"
+COMMIT_SUBJECT=$(cd "$TEMP_DIR" && git log -1 --format="%s")
+COMMIT_HASH=$(cd "$TEMP_DIR" && git rev-parse --short HEAD)
+echo "  最新提交: $COMMIT_HASH $COMMIT_SUBJECT"
 echo ""
 
-# ── Step 2: 同步外网代码到内网仓（以外网为准）──
-# 策略：rsync --delete 镜像同步（以外网为准，内网多余的删掉），保留 .git
-echo "[Step 2] 同步到内网仓库（以外网为准）..."
+# ── Step 2: 删掉不该给用户的文件 ──
+echo "[Step 2] 清理开发文件..."
+cd "$TEMP_DIR"
+rm -rf tests docs release telemetry-server
+rm -f architecture.md sync_to_internal.sh sync_to_internal.bat
+rm -f start_telemetry.sh start_telemetry.bat stop_telemetry.bat
+rm -f sample_rule.yml .gitignore
+find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+find . -name "*.pyc" -delete 2>/dev/null || true
+find . -name ".DS_Store" -delete 2>/dev/null || true
 
-# 排除列表（这些文件/目录不给用户）
-EXCLUDES="tests docs release __pycache__ .pytest_cache .git .gitignore architecture.md sync_to_internal.sh sync_to_internal.bat start_telemetry.sh start_telemetry.bat stop_telemetry.bat telemetry-server sample_rule.yml"
-
-# rsync --delete 镜像同步：以外网为准，内网多余的删除（保留 .git）
-rsync -a --delete \
-    --exclude='.git' \
-    $(for ex in $EXCLUDES; do echo "--exclude='$ex'"; done) \
-    "$TEMP_DIR/" "$INTERNAL_REPO/"
-
-echo "  + 同步完成（以外网为准）"
-
-# 清理垃圾文件
-find "$INTERNAL_REPO" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-find "$INTERNAL_REPO" -name "*.pyc" -delete 2>/dev/null || true
-find "$INTERNAL_REPO" -name ".DS_Store" -delete 2>/dev/null || true
-
-echo ""
-
-# ── Step 3: git commit + push ──
-echo "[Step 3] 提交到内网 git..."
-cd "$INTERNAL_REPO"
-
-# 强制以外网内容为准（丢弃内网仓的本地修改）
-git checkout -- . 2>/dev/null || true
-
+# 提交这些删除
 git add -A
+git commit -m "清理开发文件（同步前预处理）" --allow-empty 2>&1 | tail -1
+echo "  已清理"
+echo ""
 
-# 检查有没有变更
-if git diff --cached --quiet; then
-    echo "  无变更，内容已是最新。"
-else
-    # 用外网最新 commit 的原始 message 做提交信息（不加"同步"前缀）
-    # 从临时目录取完整 commit message
-    cd "$TEMP_DIR"
-    COMMIT_SUBJECT=$(git log -1 --format="%s")
-    COMMIT_HASH=$(git rev-parse --short HEAD)
-    COMMIT_BODY=$(git log -1 --format="%b")
-    cd "$INTERNAL_REPO"
+# ── Step 3: 直接 git push 到内网仓 ──
+echo "[Step 3] 推送到内网仓库..."
 
-    echo "  提交信息: $COMMIT_SUBJECT"
-    echo ""
+# 添加内网仓为 remote
+git remote add internal "$INTERNAL_REPO" 2>/dev/null || git remote set-url internal "$INTERNAL_REPO"
 
-    # 用外网原始 commit message（带 hash 标注来源）
-    if [ -z "$COMMIT_BODY" ]; then
-        git commit -m "$COMMIT_SUBJECT ($COMMIT_HASH)" 2>&1 | tail -3
-    else
-        git commit -m "$COMMIT_SUBJECT ($COMMIT_HASH)" -m "$COMMIT_BODY" 2>&1 | tail -3
-    fi
-    echo ""
-    echo "[Step 4] 推送到内网远端..."
-    # 先 pull 内网仓可能有的变更（rebase 避免无谓 merge commit）
-    git pull --rebase 2>&1 | tail -3
-    git push 2>&1 | tail -3
-    echo ""
-    echo "═══════════════════════════════════════════════"
-    echo "  ✅ 同步完成"
-    echo "  $COMMIT_HASH $COMMIT_SUBJECT"
-    echo "═══════════════════════════════════════════════"
-fi
+# 检测当前分支
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+echo "  分支: $BRANCH"
+echo ""
+
+# 先 pull 内网仓的内容（合并历史）
+git pull internal "$BRANCH" --allow-unrelated-histories --no-edit 2>&1 | tail -3 || true
+
+# push 到内网仓（--force 以外网代码为准）
+git push --force internal "$BRANCH" 2>&1 | tail -3
+
+echo ""
+echo "═══════════════════════════════════════════════"
+echo "  ✅ 同步完成"
+echo "  $COMMIT_HASH $COMMIT_SUBJECT"
+echo "═══════════════════════════════════════════════"
 
 # 清理临时目录
 rm -rf "$TEMP_DIR"

@@ -5,15 +5,13 @@ chcp 65001 >nul 2>&1
 REM ============================================================
 REM sync_to_internal.bat — 一键同步外网代码到内网 git 仓库
 REM
+REM 原理：clone 外网仓 → 删掉开发文件 → git push --force 到内网仓
+REM 用 git 自己处理 diff，不用 robocopy，不会"看不出变化"
+REM
 REM 用法（在内网 Windows 电脑上运行）：
 REM   sync_to_internal.bat                          REM 用默认配置
 REM   sync_to_internal.bat D:\path\to\repo          REM 指定内网仓库路径
 REM   sync_to_internal.bat --config D:\path\to\repo REM 设置默认路径（记住）
-REM
-REM 自动完成：
-REM   1. git clone --depth 1 外网GitHub最新代码
-REM   2. 同步成品文件到内网仓库（排除开发文件）
-REM   3. git add + commit + push 到内网远端
 REM ============================================================
 
 REM ── 配置 ──
@@ -63,7 +61,7 @@ echo 外网仓库: %EXTERNAL_REPO%
 echo 内网仓库: !INTERNAL_REPO!
 echo.
 
-REM ── Step 1: 从外网拉最新代码 ──
+REM ── Step 1: 从外网 clone 最新代码 ──
 set "TEMP_DIR=%TEMP%\analyzer-agent-sync-%RANDOM%"
 echo [Step 1] 拉取外网最新代码...
 git clone --depth 1 %EXTERNAL_REPO% "%TEMP_DIR%" 2>&1
@@ -73,78 +71,72 @@ if not exist "%TEMP_DIR%\.git" (
 )
 echo.
 
-REM ── Step 2: 同步外网代码到内网仓（以外网为准）──
-REM 策略：robocopy /MIR 镜像同步（源覆盖目标，源没有的删除），保留 .git
-echo [Step 2] 同步到内网仓库（以外网为准）...
-
-REM 用 robocopy /MIR 镜像同步（排除 .git 和开发文件）
-REM /MIR = /E + /PURGE（复制+删除目标多余的），以外网为准
-robocopy "%TEMP_DIR%" "!INTERNAL_REPO!" /MIR /NFL /NDL /NP /NJH /NJS ^
-    /XD tests docs release __pycache__ .pytest_cache .git telemetry-server ^
-    /XF architecture.md sync_to_internal.sh sync_to_internal.bat start_telemetry.sh start_telemetry.bat stop_telemetry.bat sample_rule.yml .gitignore .DS_Store 2>nul
-
-REM robocopy 返回码 0-7 都是正常的（0=无变更 1=有复制）
-if !errorlevel! GTR 7 (
-    echo [ERROR] robocopy 失败
-    goto :cleanup
-)
-echo   + 同步完成（以外网为准）
-
-REM 清理垃圾文件（robocopy 可能带过来的）
-for /d /r "!INTERNAL_REPO!" %%D in (__pycache__) do (
+REM ── Step 2: 在 clone 的代码里删掉不该给用户的文件 ──
+echo [Step 2] 清理开发文件...
+pushd "%TEMP_DIR%"
+for /d %%D in (tests docs release telemetry-server) do (
     if exist "%%D" rmdir /s /q "%%D" 2>nul
 )
-del /s /q "!INTERNAL_REPO!\*.pyc" 2>nul
-del /s /q "!INTERNAL_REPO!\.DS_Store" 2>nul
+if exist architecture.md del /q architecture.md 2>nul
+if exist sync_to_internal.sh del /q sync_to_internal.sh 2>nul
+if exist sync_to_internal.bat del /q sync_to_internal.bat 2>nul
+if exist start_telemetry.sh del /q start_telemetry.sh 2>nul
+if exist start_telemetry.bat del /q start_telemetry.bat 2>nul
+if exist stop_telemetry.bat del /q stop_telemetry.bat 2>nul
+if exist sample_rule.yml del /q sample_rule.yml 2>nul
+if exist .gitignore del /q .gitignore 2>nul
+for /d /r "%TEMP_DIR%" %%D in (__pycache__) do (
+    if exist "%%D" rmdir /s /q "%%D" 2>nul
+)
+del /s /q "%TEMP_DIR%\*.pyc" 2>nul
+del /s /q "%TEMP_DIR%\\.DS_Store" 2>nul
 
+REM 提交这些删除（让 git 记录变化）
+git add -A
+git commit -m "清理开发文件（同步前预处理）" --allow-empty 2>nul
+
+REM 取外网最新 commit 信息（用于显示）
+for /f "delims=" %%H in ('git log -1 --format^="%%s"') do set "COMMIT_MSG=%%H"
+for /f "delims=" %%H in ('git rev-parse --short HEAD') do set "COMMIT_HASH=%%H"
+echo   外网最新: !COMMIT_HASH! !COMMIT_MSG!
+popd
 echo.
 
-REM ── Step 3: git commit + push ──
-echo [Step 3] 提交到内网 git...
-pushd "!INTERNAL_REPO!"
+REM ── Step 3: 直接 git push 到内网仓 ──
+echo [Step 3] 推送到内网仓库...
+pushd "%TEMP_DIR%"
 
-REM 强制以外网内容为准（丢弃内网仓的本地修改）
-git checkout -- . 2>nul
-
-REM 先 pull 内网仓可能有的远端变更（rebase）
-git pull --rebase 2>&1
-
-git add -A
-
-REM 检查有没有变更
-git diff --cached --quiet
-if !errorlevel! equ 0 (
-    echo   无变更，内容已是最新。
-) else (
-    REM 提取外网最新 commit 的完整 message（用原始提交信息，不加"同步"前缀）
-    pushd "%TEMP_DIR%"
-    REM 取最新 commit 的 subject（第一行 message）
-    for /f "delims=" %%H in ('git log -1 --format^="%%s"') do set "COMMIT_MSG=%%H"
-    REM 取最新 commit 的完整 hash 短缩
-    for /f "delims=" %%H in ('git rev-parse --short HEAD') do set "COMMIT_HASH=%%H"
-    REM 取 body（如果有多行 message）
-    for /f "delims=" %%H in ('git log -1 --format^="%%b"') do set "COMMIT_BODY=%%H"
-    popd
-    echo   提交信息: !COMMIT_MSG!
-    echo.
-    REM 用外网的原始 commit message 做提交信息（带 hash 标注来源）
-    if "!COMMIT_BODY!"=="" (
-        git commit -m "!COMMIT_MSG! (!COMMIT_HASH!)" 2>&1
-    ) else (
-        git commit -m "!COMMIT_MSG! (!COMMIT_HASH!)" -m "!COMMIT_BODY!" 2>&1
-    )
-    echo.
-    echo [Step 4] 推送到内网远端...
-    REM 先 pull 内网仓可能有的变更（rebase 避免无谓 merge commit）
-    git pull --rebase 2>&1
-    git push 2>&1
-    echo.
-    echo ═══════════════════════════════════════════════
-    echo   同步完成
-    echo   !COMMIT_HASH! !COMMIT_MSG!
-    echo ═══════════════════════════════════════════════
+REM 添加内网仓为 remote
+git remote add internal "!INTERNAL_REPO!" 2>nul
+if !errorlevel! neq 0 (
+    git remote set-url internal "!INTERNAL_REPO!"
 )
+
+REM 检测当前分支名
+for /f "delims=" %%B in ('git rev-parse --abbrev-ref HEAD') do set "BRANCH=%%B"
+echo   分支: !BRANCH!
+echo.
+
+REM 先 pull 内网仓的内容（让 git 做合并，以内网仓已有历史为基础）
+git pull internal !BRANCH! --allow-unrelated-histories --no-edit 2>&1
+if !errorlevel! neq 0 (
+    echo   [INFO] pull 失败（可能内网仓还没有此分支），直接 push...
+)
+
+REM push 到内网仓（--force 以外网代码为准）
+git push --force internal !BRANCH! 2>&1
+if !errorlevel! neq 0 (
+    echo   [ERROR] push 失败
+    popd
+    goto :cleanup
+)
+
 popd
+echo.
+echo ═══════════════════════════════════════════════
+echo   同步完成
+echo   !COMMIT_HASH! !COMMIT_MSG!
+echo ═══════════════════════════════════════════════
 
 :cleanup
 if exist "%TEMP_DIR%" rmdir /s /q "%TEMP_DIR%" 2>nul
