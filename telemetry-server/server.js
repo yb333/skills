@@ -23,7 +23,14 @@ const fs = require('fs');
 const { DatabaseSync } = require('node:sqlite');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const DATA_DIR = path.join(__dirname, 'data');
+
+// 数据库路径：独立于代码目录，避免代码更新（git pull / 全量同步）覆盖用户数据。
+// 默认放 ~/.analyzer-agent/（与客户端 usage.csv 同级），可用环境变量 USAGE_DB_PATH 覆盖。
+const os = require('os');
+const DEFAULT_DATA_DIR = path.join(os.homedir(), '.analyzer-agent');
+const DATA_DIR = process.env.USAGE_DATA_DIR
+  ? path.resolve(process.env.USAGE_DATA_DIR)
+  : DEFAULT_DATA_DIR;
 const DB_PATH = path.join(DATA_DIR, 'usage.db');
 
 // ── 数据库初始化 ──────────────────────────────────────────────────────────
