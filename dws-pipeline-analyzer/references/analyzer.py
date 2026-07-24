@@ -733,6 +733,31 @@ def _parse_lts_task(yml_path: Path) -> dict | None:
     return result
 
 
+def _extract_jobs_from_text(text):
+    """从 block scalar 字符串（额外信息）里提取 Jobs 列表。
+
+    真实 yml 里 Jobs 被「额外信息: |」的 block scalar 吞掉，
+    成了一段字符串文本。这里按 *job名称 分块提取。
+    """
+    import re
+    jobs = []
+    job_starts = [(m.start(), m.group(1).strip())
+                  for m in re.finditer(r"\*?job名称['\"]?\s*[:：]\s*(\S+)", text)]
+    for i, (start, name) in enumerate(job_starts):
+        end = job_starts[i + 1][0] if i + 1 < len(job_starts) else len(text)
+        block = text[start:end]
+        jobs.append({
+            "name": name,
+            "type": _find_block(block, r"\*?job类型['\"]?\s*[:：]\s*(\S+)"),
+            "parent": _find_block(block, r"\*?job的父节点名称['\"]?\s*[:：]\s*(\S+)"),
+            "retry_count": _find_block(block, r"job重试次数\s*[:：]\s*'?(\d+)"),
+            "retry_interval": _find_block(block, r"job重试间隔\s*[:：]\s*'?(\d+)"),
+            "timeout": _find_block(block, r"job超时时间\s*[:：]\s*'?(\d+)"),
+            "error_handler": _find_block(block, r"job异常处理方式\s*[:：]\s*(\S+)"),
+        })
+    return jobs
+
+
 def _parse_lts_from_dict(data: dict) -> dict | None:
     """从标准 YAML dict 解析 LTS 任务信息。"""
     # 任务名（key 带星号前缀 '*任务名称'）
@@ -752,22 +777,36 @@ def _parse_lts_from_dict(data: dict) -> dict | None:
             if pname == "V_GROUP_CODE":
                 group_code = str(pval).strip()
 
-    # Jobs：提取关键字段（名称/类型/父节点/重试/超时）
+    # Jobs：优先从顶层 Jobs 取；取不到则从「额外信息」block scalar 里二次提取
     jobs = []
     raw_jobs = data.get("Jobs") or []
+    # Jobs 可能被「额外信息」的 block scalar 吞掉，从字符串里恢复
+    if not raw_jobs:
+        import re as _re
+        for k in data:
+            v = data[k]
+            if isinstance(v, str) and "job名称" in v:
+                # 从 block scalar 字符串里提取 Jobs
+                raw_jobs = _extract_jobs_from_text(v)
+                break
     if isinstance(raw_jobs, list):
         for j in raw_jobs:
             if not isinstance(j, dict):
                 continue
-            jobs.append({
-                "name": (j.get("*job名称") or j.get("job名称") or "").strip(),
-                "type": (j.get("*job类型") or j.get("job类型") or "").strip(),
-                "parent": (j.get("*job的父节点名称") or j.get("job的父节点名称") or "").strip(),
-                "retry_count": str(j.get("job重试次数") or ""),
-                "retry_interval": str(j.get("job重试间隔") or ""),
-                "timeout": str(j.get("job超时时间") or ""),
-                "error_handler": str(j.get("job异常处理方式") or ""),
-            })
+            # 如果已经有 name key（来自 _extract_jobs_from_text），直接用
+            if "name" in j:
+                jobs.append(j)
+            else:
+                # 来自标准 YAML dict，用中文 key 提取
+                jobs.append({
+                    "name": (j.get("*job名称") or j.get("job名称") or "").strip(),
+                    "type": (j.get("*job类型") or j.get("job类型") or "").strip(),
+                    "parent": (j.get("*job的父节点名称") or j.get("job的父节点名称") or "").strip(),
+                    "retry_count": str(j.get("job重试次数") or ""),
+                    "retry_interval": str(j.get("job重试间隔") or ""),
+                    "timeout": str(j.get("job超时时间") or ""),
+                    "error_handler": str(j.get("job异常处理方式") or ""),
+                })
 
     return _build_lts_result(data, task_name, group_code, params, jobs)
 
