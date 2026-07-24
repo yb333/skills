@@ -33,24 +33,9 @@
 
 ## v1.3 — 2026-07-23
 
-### 新功能
-- **运营埋点**：记录每次命令执行情况，用于运营统计
-  - 本地 JSONL 存档 + 内网上报
-  - 服务端看板（ECharts）：日活趋势/命令热度/用户活跃/资产 Top10/错误类型/完整分析链路
-  - 分阶段耗时统计（解析/DDL发现/LTS发现/视图生成）
-  - trace_id 关联 analyze → AI推理 → view-generator 完整链路
-  - 半自动扩展机制（新字段/新命令零维护成本）
-
 ### 优化
-- 数据库独立到家目录，代码更新不覆盖用户数据
-- 服务端零依赖（Node 内置 node:sqlite，不需要编译）
 - sync 脚本改用 git push 直推内网仓
-
-### Bug 修复
-- 修复 better-sqlite3 编译失败（改用 node:sqlite）
-- 修复用户名 unknown（字段名 user vs user_name 不匹配）
-- 修复统计次数重复（按 trace_id 去重）
-- 修复 CSV 标题和列错位（换成 JSONL）
+- 性能优化（SQL AST 缓存、DDL 目录扫描缓存）
 
 ---
 
