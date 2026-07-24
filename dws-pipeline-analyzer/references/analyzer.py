@@ -992,24 +992,31 @@ def _discover_lts_from_repo(yml_dir: Path, rule_group_code: str) -> dict | None:
     if not lts_root.is_dir():
         return None
 
-    # 扫所有 LTS yml，建索引
-    # by_group_code: V_GROUP_CODE → [task dict, ...]（一对多）
-    # by_task_name: task_name → task dict
-    by_group_code = {}    # V_GROUP_CODE → list of tasks
-    by_task_name = {}     # task_name → task
-
+    # 两阶段定位：先快速 grep 找含 rule_group_code 的文件，再只解析这几个
+    # 避免全量解析所有 LTS yml（可能几百个），从十几秒降到毫秒级
+    candidate_files = []
     for yml_path in lts_root.rglob("*.yml"):
+        # 快速文本搜索（不做 YAML 解析），找含 rule_group_code 的文件
+        try:
+            content = yml_path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        if rule_group_code in content:
+            candidate_files.append(yml_path)
+
+    if not candidate_files:
+        return None
+
+    # 只解析命中的文件（通常 1-5 个）
+    matched = []
+    by_task_name = {}
+    for yml_path in candidate_files:
         task = _parse_lts_task(yml_path)
         if not task or not task["task_name"]:
             continue
         by_task_name[task["task_name"]] = task
-        if task["group_code"]:
-            by_group_code.setdefault(task["group_code"], []).append(task)
-
-    # 按 rule_group_code 找所有匹配的任务
-    matched = by_group_code.get(rule_group_code)
-    if not matched:
-        return None
+        if task["group_code"] == rule_group_code:
+            matched.append(task)
 
     # 按任务名后缀分类
     f_tasks = [t for t in matched if t["task_name"].endswith("_F")]
@@ -1017,12 +1024,20 @@ def _discover_lts_from_repo(yml_dir: Path, rule_group_code: str) -> dict | None:
     other_tasks = [t for t in matched
                    if not t["task_name"].endswith("_F") and not t["task_name"].endswith("_I")]
 
-    # F 任务关联的 I 任务（按命名推导 _F → _I，可能找到额外的 I 任务不在 matched 里）
+    # F 任务关联的 I 任务（按命名推导 _F → _I）
+    # I 任务通常不含 V_GROUP_CODE，不会被 grep 命中，需要按文件名额外查找
     for f_task in f_tasks:
         f_name = f_task["task_name"]
         if f_name.endswith("_F"):
             i_name = f_name[:-2] + "_I"
+            # 先看候选文件里有没有
             i_task = by_task_name.get(i_name)
+            if not i_task:
+                # 按文件名在同目录找 I 任务文件（文件名通常是 TASK_XXX_I.yml）
+                f_file = Path(f_task["lts_file"])
+                i_file = f_file.parent / (i_name + ".yml")
+                if i_file.exists():
+                    i_task = _parse_lts_task(i_file)
             if i_task and i_task not in i_tasks:
                 i_tasks.append(i_task)
 
