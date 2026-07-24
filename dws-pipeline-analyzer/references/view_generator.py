@@ -2361,18 +2361,6 @@ def main():
     with open(input_path, "r", encoding="utf-8") as f:
         knowledge = json.load(f)
 
-    # 从家目录读 trace_id（关联同一次分析的解析阶段）
-    _target_table = knowledge.get("meta", {}).get("target_table", "")
-    try:
-        import json as _json_usage
-        _trace_file = Path.home() / ".analyzer-agent" / f"trace_{_target_table}.json"
-        if _trace_file.exists():
-            _trace_info = _json_usage.loads(_trace_file.read_text(encoding="utf-8"))
-            _trace_id = _trace_info.get("trace_id", "")
-            _parse_end_ts = _trace_info.get("parse_end_ts")
-    except Exception:
-        pass
-
     # 合并 AI 增强结果（可选）
     if args.ai_input:
         ai_path = Path(args.ai_input)

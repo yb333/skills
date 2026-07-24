@@ -1701,23 +1701,6 @@ def main():
     summary_file.write_text(summary_text, encoding="utf-8", newline="\n")
     _t_json_summary = round(_t_usage.time() - _t_json0, 2)
 
-    # 写 trace_id 到用户家目录（供 view_generator 读取，关联同一次分析的两次命令）
-    # 不写到输出目录，保持用户交付件干净
-    try:
-        import json as _json_usage
-        _trace_dir = Path.home() / ".analyzer-agent"
-        _trace_dir.mkdir(parents=True, exist_ok=True)
-        _trace_file = _trace_dir / f"trace_{target_name or safe_group_en}.json"
-        _trace_file.write_text(
-            _json_usage.dumps({
-                "trace_id": _trace_id,
-                "parse_end_ts": _t_usage.time(),
-                "parse_elapsed": round(_t_usage.time() - _t0_usage, 2),
-                "output_dir": str(output_dir),
-            }), encoding="utf-8"
-        )
-    except Exception:
-        pass
 
     print(f"\n=== 完成 ===")
     print(f"输出: {output_file}")
