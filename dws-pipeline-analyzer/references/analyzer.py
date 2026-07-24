@@ -797,19 +797,24 @@ def _parse_lts_from_text(text: str) -> dict | None:
     task_group = _find(r"\*?任务组名称['\"]?\s*[:：]\s*(\S+)")
     project = _find(r"\*?项目名称['\"]?\s*[:：]\s*(\S+)")
 
-    # 任务参数：找 V_GROUP_CODE
+    # 任务参数：按行扫描成对提取（参数名称→参数值）
     group_code = ""
     params = []
-    # 参数值行：参数值:XXX
-    for m in re.finditer(r"\*?参数名称['\"]?\s*[:：]\s*(\S+)", text):
-        pname = m.group(1).strip()
-        # 找紧跟的参数值（同一块里下一行的 参数值:XXX）
-        pos = m.end()
-        val_match = re.search(r"参数值\s*[:：]\s*(\S+)", text[pos:pos + 200])
-        pval = val_match.group(1).strip() if val_match else ""
-        params.append({"name": pname, "value": pval})
-        if pname == "V_GROUP_CODE":
-            group_code = pval
+    _cur_param_name = ""
+    for line in text.split("\n"):
+        # 匹配 参数名称:XXX 或 *参数名称:XXX
+        m_name = re.search(r"\*?参数名称['\"]?\s*[:：]\s*(\S+)", line)
+        if m_name:
+            _cur_param_name = m_name.group(1).strip()
+            continue
+        # 匹配 参数值:XXX
+        m_val = re.search(r"参数值\s*[:：]\s*(.*)", line)
+        if m_val and _cur_param_name:
+            pval = m_val.group(1).strip().rstrip("'\"")
+            params.append({"name": _cur_param_name, "value": pval})
+            if _cur_param_name == "V_GROUP_CODE":
+                group_code = pval
+            _cur_param_name = ""
 
     # Jobs：按 *job名称 分块提取
     jobs = []
