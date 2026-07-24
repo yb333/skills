@@ -1626,18 +1626,24 @@ def main():
     # yml 场景：从代码仓根定位 DDL/{DWS_EDW|DWS_RT_EDW}/{schema}/table/{target_table}.sql
     # xlsx 场景：不自动发现（xlsx 是临时导出，DDL 位置不统一），需 --ddl-dir 显式指定
     ddl_dir = args.ddl_dir
+    _t_ddl = 0
     if not ddl_dir and is_yml_mode:
-        # yml 场景：从规则组目录向上找代码仓根，再定位 DDL
+        _t_ddl0 = _t_usage.time()
         ddl_dir = _auto_discover_ddl_from_repo(input_path, rules)
+        _t_ddl = round(_t_usage.time() - _t_ddl0, 2)
 
-    # yml 场景：自动发现 LTS 调度任务（F+I 双任务，按 V_GROUP_CODE 匹配规则组）
+    # yml 场景：自动发现 LTS 调度任务
     schedule_info = None
+    _t_lts = 0
     if is_yml_mode and raw.get("rule_group_code"):
         try:
+            _t_lts0 = _t_usage.time()
             schedule_info = _discover_lts_from_repo(input_path, raw["rule_group_code"])
+            _t_lts = round(_t_usage.time() - _t_lts0, 2)
             if schedule_info:
-                print(f"  [LTS] 发现调度任务: {schedule_info['f_task']['task_name']}"
-                      + (f" + {schedule_info['i_task']['task_name']}" if schedule_info.get('i_task') else ""))
+                f_names = [t["task_name"] for t in schedule_info.get("f_tasks", [])]
+                i_names = [t["task_name"] for t in schedule_info.get("i_tasks", [])]
+                print(f"  [LTS] 调度任务: F={f_names} I={i_names} ({_t_lts}s)")
         except Exception:
             pass
 
@@ -1720,11 +1726,21 @@ def main():
     # 性能诊断：输出慢阶段（>0.5s 的才显示，避免正常情况刷屏）
     slow = sorted(timings.items(), key=lambda x: -x[1])
     slow_filtered = [(n, t) for n, t in slow if t > 0.5]
+    # 把 DDL 发现和 LTS 发现也纳入慢阶段
+    if _t_ddl > 0.5:
+        slow_filtered.append(("ddl_discovery", _t_ddl))
+    if _t_lts > 0.5:
+        slow_filtered.append(("lts_discovery", _t_lts))
+    slow_filtered.sort(key=lambda x: -x[1])
     total_t = sum(timings.values()) if timings else 0
     if slow_filtered:
-        print(f"\n分析耗时: {total_t:.1f}s（慢阶段:）")
+        all_t = total_t + _t_ddl + _t_lts
+        print(f"\n分析耗时: {all_t:.1f}s（慢阶段:）")
         for name, t in slow_filtered:
             print(f"  {name}: {t:.1f}s")
+    elif _t_ddl > 0 or _t_lts > 0:
+        all_t = total_t + _t_ddl + _t_lts
+        print(f"\n分析耗时: {all_t:.1f}s")
 
     print(f"\n下一步: AI 读 knowledge_summary.md，输出自然语言补充，保存为 knowledge_ai.md")
     print(f"        然后: python run.py view_generator --input knowledge_draft.json --ai-input knowledge_ai.md ...")
@@ -1743,6 +1759,8 @@ def main():
             "elapsed_sec": round(_t_usage.time() - _t0_usage, 2),
             "elapsed_detail": {
                 "parse": _t_parse,
+                "ddl_discovery": _t_ddl,
+                "lts_discovery": _t_lts,
                 "write_json_and_summary": _t_json_summary,
             },
             "status": "error" if _usage_exc is not None else "ok",
@@ -2138,14 +2156,18 @@ def main_chain():
 
     # DDL 发现
     ddl_dir = args.ddl_dir
+    _t_ddl = 0
     if not ddl_dir and repo_root:
         try:
+            _t_ddl0 = _t_usage.time()
             ddl_dir = _auto_discover_ddl_from_repo(final_group_dir, merged_rules) or ""
+            _t_ddl = round(_t_usage.time() - _t_ddl0, 2)
         except Exception:
             ddl_dir = ""
 
     # LTS 调度任务发现（用最终 F 组的 rule_group_code 匹配）
     schedule_info = None
+    _t_lts = 0
     if repo_root:
         # 最终 F 组的 rule_group_code（chain_groups 里 depth 最大的）
         final_group_code = ""
@@ -2155,10 +2177,13 @@ def main_chain():
                 break
         if final_group_code:
             try:
+                _t_lts0 = _t_usage.time()
                 schedule_info = _discover_lts_from_repo(final_group_dir, final_group_code)
+                _t_lts = round(_t_usage.time() - _t_lts0, 2)
                 if schedule_info:
-                    print(f"  [LTS] 发现调度任务: {schedule_info['f_task']['task_name']}"
-                          + (f" + {schedule_info['i_task']['task_name']}" if schedule_info.get('i_task') else ""))
+                    f_names = [t["task_name"] for t in schedule_info.get("f_tasks", [])]
+                    i_names = [t["task_name"] for t in schedule_info.get("i_tasks", [])]
+                    print(f"  [LTS] 调度任务: F={f_names} I={i_names} ({_t_lts}s)")
             except Exception:
                 pass
 
@@ -2251,6 +2276,8 @@ def main_chain():
             "elapsed_sec": round(_t_usage.time() - _t0_usage, 2),
             "elapsed_detail": {
                 "parse": _t_parse,
+                "ddl_discovery": _t_ddl,
+                "lts_discovery": _t_lts,
                 "write_json_and_summary": _t_json_summary,
                 "view_generation": _t_view,
             },
