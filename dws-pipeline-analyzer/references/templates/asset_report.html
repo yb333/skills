@@ -1268,13 +1268,13 @@ body {
 
   <!-- Schedule -->
   <div class="section-card" id="scheduleSection">
-    <button class="collapsible-toggle" id="scheduleToggle">
-      <span class="toggle-arrow">&#9654;</span>
+    <button class="collapsible-toggle open" id="scheduleToggle">
+      <span class="toggle-arrow">&#9660;</span>
       <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
       调度信息
       <span class="section-count" id="scheduleCount"></span>
     </button>
-    <div class="collapsible-body" id="scheduleBody">
+    <div class="collapsible-body open" id="scheduleBody">
       <div class="section-body" id="scheduleContent"></div>
     </div>
   </div>
@@ -2735,12 +2735,18 @@ function renderSchedule() {
     out += '</div>';
 
     // 右列：调度依赖（折叠，避免依赖太多撑长页面）
+    // I 任务的依赖通常只有 F 表，不和来源表对比；只有 F 任务才对比
     var srcCount = (REPORT_DATA.summary && REPORT_DATA.summary.source_count) || 0;
-    var depHint = depJobs.length > 0 && srcCount > 0
-      ? '（' + depJobs.length + '个依赖 / ' + srcCount + '个来源表'
-        + (depJobs.length === srcCount ? ' ✓' : ' ⚠数量不一致')
-        + '）'
-      : (depJobs.length > 0 ? '（' + depJobs.length + '个）' : '');
+    var depHint;
+    if (isI) {
+      depHint = depJobs.length > 0 ? '（' + depJobs.length + '个）' : '';
+    } else {
+      depHint = depJobs.length > 0 && srcCount > 0
+        ? '（' + depJobs.length + '个依赖 / ' + srcCount + '个来源表'
+          + (depJobs.length === srcCount ? ' ✓' : ' ⚠数量不一致')
+          + '）'
+        : (depJobs.length > 0 ? '（' + depJobs.length + '个）' : '');
+    }
     out += '<div>';
     if (depJobs.length) {
       out += '<details style="margin-top:0;"><summary style="cursor:pointer;font-size:11px;color:#999;">'

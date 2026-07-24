@@ -192,11 +192,13 @@ def clear_sql_ast_cache():
 # build_table_catalog 遍历多个表时会重复调，缓存目录扫描+文件内容避免重复 IO。
 # key: 目录绝对路径; value: [(sql_file, content, content_lower), ...]
 _DDL_DIR_CACHE: dict = {}
+_DDL_RESULT_CACHE: dict = {}  # 表名(小写) → 解析结果，避免重复解析同一张表
 
 
 def clear_ddl_dir_cache():
-    """清空 DDL 目录扫描缓存（batch 场景每组后调，防内存增长）。"""
+    """清空 DDL 目录扫描缓存和结果缓存（batch 场景每组后调，防内存增长）。"""
     _DDL_DIR_CACHE.clear()
+    _DDL_RESULT_CACHE.clear()
 
 # ═══════════════════════════════════════════════════════════════
 # 数据类
@@ -5204,6 +5206,11 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
     if not ddl_dir:
         return {}
 
+    # 结果缓存：同一张表不重复解析（build_table_catalog 可能多次调同表）
+    result_cache_key = (str(Path(ddl_dir).resolve()), target_table.lower())
+    if result_cache_key in _DDL_RESULT_CACHE:
+        return _DDL_RESULT_CACHE[result_cache_key]
+
     ddl_path = Path(ddl_dir)
     if not ddl_path.exists():
         return {}
@@ -5390,6 +5397,7 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
         if tbl_cm:
             result["__table_comment__"] = tbl_cm.group(1).strip()
 
+    _DDL_RESULT_CACHE[result_cache_key] = result
     return result
 
 
