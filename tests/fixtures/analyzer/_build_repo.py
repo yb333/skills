@@ -162,57 +162,70 @@ def build_mock_repo(base_dir):
         encoding="utf-8")
 
     # LTS：调度任务（真实结构：LTS/项目/任务组/任务.yml）
-    # 造 F+I 双任务匹配 GR_TRADE_ORDER，外加一个不匹配的干扰项
+    # 用真实非标准格式（Excel转yml的实际格式）：
+    # - 冒号后无空格（'*任务名称':TASK_F）
+    # - block scalar（额外信息：|）吞掉 Jobs 和 taskParams 子表
+    # 这样测试才能真正覆盖文本解析兜底逻辑
     lts_group_dir = repo / "LTS" / "BCNB_DAILY" / "GROUP_TRADE"
     lts_group_dir.mkdir(parents=True, exist_ok=True)
-    # F 任务（匹配 GR_TRADE_ORDER）
+    # F 任务（匹配 GR_TRADE_ORDER）—— 非标准格式，模拟真实 Excel 转 yml
     (lts_group_dir / "TASK_TRADE_ORDER_F.yml").write_text(
-        yaml.dump({
-            "*任务名称": "TASK_TRADE_ORDER_F",
-            "*任务类型": "周期任务",
-            "*任务组名称": "GROUP_TRADE",
-            "*责任人": "test_user",
-            "*项目名称": "BCNB_DAILY",
-            "调度周期": "0 30 2 * * ?",
-            "开始时间": "2026/01/01 02:30:00",
-            "依赖上一周期": "是",
-            "Jobs": [
-                {"*job名称": "Pjob_trade_f", "*job类型": "url",
-                 "*job的父节点名称": "start",
-                 "job重试次数": "3", "job重试间隔": "60",
-                 "job超时时间": "60", "job异常处理方式": "fail"},
-                {"*job名称": "Pjob_dep_f", "*job类型": "tskdep",
-                 "*job的父节点名称": "Pjob_trade_f",
-                 "job重试次数": "3", "job重试间隔": "60"},
-            ],
-            "taskParams": [
-                {"*参数名称": "V_GROUP_CODE", "参数值": "GR_TRADE_ORDER"},
-                {"*参数名称": "V_CYCLE_ID", "参数值": ""},
-            ],
-        }, allow_unicode=True, sort_keys=False),
+        "'*任务名称':TASK_TRADE_ORDER_F\n"
+        "'*任务类型': 周期任务\n"
+        "'*任务组名称':GROUP_TRADE\n"
+        "'*责任人':test_user\n"
+        "'*项目名称':BCNB_DAILY\n"
+        "调度周期: 0 30 2 * * ?\n"
+        "开始时间: 2026/01/01 02:30:00\n"
+        "依赖上一周期: 是\n"
+        "是否一天多调: 否\n"
+        "额外信息（其他sheet页信息）：|\n"
+        "Jobs:|\n"
+        "- '*job名称': Pjob_trade_f\n"
+        "  '*job的父节点名称': start\n"
+        "  '*job类型': url\n"
+        "  job重试次数:'3'\n"
+        "  job重试间隔:'60'\n"
+        "  job超时时间:'60'\n"
+        "  job异常处理方式:fail\n"
+        "- '*job名称': Pjob_dep_f\n"
+        "  '*job的父节点名称': Pjob_trade_f\n"
+        "  '*job类型': tskdep\n"
+        "  job重试次数:'3'\n"
+        "  job重试间隔:'60'\n"
+        "taskParams:|\n"
+        "- '*任务名称':TASK_TRADE_ORDER_F\n"
+        "  '*参数名称':V_GROUP_CODE\n"
+        "  参数值:GR_TRADE_ORDER\n"
+        "- '*任务名称':TASK_TRADE_ORDER_F\n"
+        "  '*参数名称':V_CYCLE_ID\n"
+        "  参数值:\n",
         encoding="utf-8")
-    # I 任务（命名推导：TASK_TRADE_ORDER_I，依赖 F）
+    # I 任务（命名推导：TASK_TRADE_ORDER_I，依赖 F）—— 同样非标准格式
     (lts_group_dir / "TASK_TRADE_ORDER_I.yml").write_text(
-        yaml.dump({
-            "*任务名称": "TASK_TRADE_ORDER_I",
-            "*任务类型": "周期任务",
-            "*任务组名称": "GROUP_TRADE",
-            "*责任人": "test_user",
-            "*项目名称": "BCNB_DAILY",
-            "调度周期": "0 40 2 * * ?",
-            "开始时间": "2026/01/01 02:40:00",
-            "依赖上一周期": "是",
-            "Jobs": [
-                {"*job名称": "Pjob_trade_i", "*job类型": "database",
-                 "*job的父节点名称": "start",
-                 "job重试次数": "1", "job重试间隔": "60"},
-                {"*job名称": "Pjob_trade_f", "*job类型": "tskdep",
-                 "*job的父节点名称": "Pjob_trade_i"},
-            ],
-            "taskParams": [
-                {"*参数名称": "V_SUCCESS_VALUE", "参数值": "v_code==0"},
-            ],
-        }, allow_unicode=True, sort_keys=False),
+        "'*任务名称':TASK_TRADE_ORDER_I\n"
+        "'*任务类型': 周期任务\n"
+        "'*任务组名称':GROUP_TRADE\n"
+        "'*责任人':test_user\n"
+        "'*项目名称':BCNB_DAILY\n"
+        "调度周期: 0 40 2 * * ?\n"
+        "开始时间: 2026/01/01 02:40:00\n"
+        "依赖上一周期: 是\n"
+        "是否一天多调: 否\n"
+        "额外信息（其他sheet页信息）：|\n"
+        "Jobs:|\n"
+        "- '*job名称': Pjob_trade_i\n"
+        "  '*job的父节点名称': start\n"
+        "  '*job类型': database\n"
+        "  job重试次数:'1'\n"
+        "  job重试间隔:'60'\n"
+        "- '*job名称': Pjob_trade_f\n"
+        "  '*job的父节点名称': Pjob_trade_i\n"
+        "  '*job类型': tskdep\n"
+        "taskParams:|\n"
+        "- '*任务名称':TASK_TRADE_ORDER_I\n"
+        "  '*参数名称':V_SUCCESS_VALUE\n"
+        "  参数值:v_code==0\n",
         encoding="utf-8")
     # 干扰项：不匹配任何规则组的任务
     other_lts_dir = repo / "LTS" / "BCNB_DAILY" / "GROUP_OTHER"
