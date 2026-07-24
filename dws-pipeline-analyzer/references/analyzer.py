@@ -758,16 +758,53 @@ def _extract_jobs_from_text(text):
     return jobs
 
 
+def _extract_params_from_text(text):
+    """从 block scalar 字符串提取任务参数（参数名称→参数值 成对）。
+
+    返回 (params_list, group_code)。
+    """
+    import re
+    params = []
+    group_code = ""
+    cur_name = ""
+    for line in text.split("\n"):
+        m_name = re.search(r"\*?参数名称['\"]?\s*[:：]\s*(\S+)", line)
+        if m_name:
+            cur_name = m_name.group(1).strip().rstrip("'")
+            continue
+        m_val = re.search(r"参数值\s*[:：]\s*(.*)", line)
+        if m_val and cur_name:
+            pval = m_val.group(1).strip().rstrip("'\"")
+            params.append({"name": cur_name, "value": pval})
+            if cur_name == "V_GROUP_CODE":
+                group_code = pval
+            cur_name = ""
+    return params, group_code
+
+
 def _parse_lts_from_dict(data: dict) -> dict | None:
-    """从标准 YAML dict 解析 LTS 任务信息。"""
+    """从标准 YAML dict 解析 LTS 任务信息。
+
+    真实 yml 里 Jobs 和 taskParams 可能在「额外信息」的 block scalar 里
+    （整个被吞成一段字符串），需要从字符串二次提取。
+    """
     # 任务名（key 带星号前缀 '*任务名称'）
     task_name = (data.get("*任务名称") or data.get("任务名称") or "").strip()
 
-    # 任务参数：找 V_GROUP_CODE（关联规则组的关键字段）
+    # 找 block scalar 字符串（Jobs 和 taskParams 可能都在里面）
+    block_scalar_text = ""
+    for k in data:
+        v = data[k]
+        if isinstance(v, str) and ("job名称" in v or "参数名称" in v):
+            block_scalar_text = v
+            break
+
+    # 任务参数：优先从顶层 taskParams 取，取不到则从 block scalar 提取
     group_code = ""
     params = []
     raw_params = data.get("taskParams") or data.get("任务参数") or []
-    if isinstance(raw_params, list):
+    if isinstance(raw_params, list) and raw_params:
+        # 顶层 taskParams 是结构化 list
         for p in raw_params:
             if not isinstance(p, dict):
                 continue
@@ -776,19 +813,18 @@ def _parse_lts_from_dict(data: dict) -> dict | None:
             params.append({"name": pname, "value": str(pval)})
             if pname == "V_GROUP_CODE":
                 group_code = str(pval).strip()
+    elif block_scalar_text:
+        # 从 block scalar 字符串提取参数
+        params, gc = _extract_params_from_text(block_scalar_text)
+        if params:
+            if gc:
+                group_code = gc
 
-    # Jobs：优先从顶层 Jobs 取；取不到则从「额外信息」block scalar 里二次提取
+    # Jobs：优先从顶层 Jobs 取，取不到则从 block scalar 提取
     jobs = []
     raw_jobs = data.get("Jobs") or []
-    # Jobs 可能被「额外信息」的 block scalar 吞掉，从字符串里恢复
-    if not raw_jobs:
-        import re as _re
-        for k in data:
-            v = data[k]
-            if isinstance(v, str) and "job名称" in v:
-                # 从 block scalar 字符串里提取 Jobs
-                raw_jobs = _extract_jobs_from_text(v)
-                break
+    if not raw_jobs and block_scalar_text:
+        raw_jobs = _extract_jobs_from_text(block_scalar_text)
     if isinstance(raw_jobs, list):
         for j in raw_jobs:
             if not isinstance(j, dict):
