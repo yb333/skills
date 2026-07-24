@@ -1051,6 +1051,119 @@ def _discover_lts_from_repo(yml_dir: Path, rule_group_code: str) -> dict | None:
             "all_tasks": all_tasks}
 
 
+def _parse_dq_yml(yml_path: Path) -> dict | None:
+    """解析一个 DQ 规则 yml，提取关键字段。
+
+    DQ yml 是规范 YAML（无 *前缀问题），但容错处理。
+    """
+    import yaml
+    try:
+        data = yaml.safe_load(yml_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+    except Exception:
+        # YAML 解析失败，尝试文本解析
+        return _parse_dq_from_text(yml_path.read_text(encoding="utf-8"))
+
+    return {
+        "rule_number": str(data.get("规则Number") or data.get("规则编号") or ""),
+        "rule_name": str(data.get("规则中文名") or data.get("规则名称") or ""),
+        "rule_desc": str(data.get("规则中文描述") or data.get("规则描述") or ""),
+        "check_type": str(data.get("检查类型") or ""),
+        "alert_level": str(data.get("告警级别") or ""),
+        "sql": str(data.get("SQL") or data.get("sql") or ""),
+        "target_table": str(data.get("目标表") or data.get("目标表编码") or ""),
+        "owner": str(data.get("规则负责人") or ""),
+        "dq_file": str(yml_path),
+    }
+
+
+def _parse_dq_from_text(text: str) -> dict | None:
+    """DQ yml YAML 解析失败时的文本兜底解析。"""
+    import re
+
+    def _find(pattern, default=""):
+        m = re.search(pattern, text)
+        return m.group(1).strip() if m else default
+
+    rule_number = _find(r"规则Number\s*[:：]\s*(\S+)")
+    if not rule_number:
+        rule_number = _find(r"规则编号\s*[:：]\s*(\S+)")
+    if not rule_number:
+        return None
+
+    # SQL 是 block scalar，取 |- 后到下一个顶层 key 的内容
+    sql = ""
+    sql_match = re.search(r"SQL\s*[:：]\s*\|-?\s*\n((?:\s+.*\n)*)", text)
+    if sql_match:
+        sql = sql_match.group(1).strip()
+
+    return {
+        "rule_number": rule_number,
+        "rule_name": _find(r"规则中文名\s*[:：]\s*(.+)", ),
+        "rule_desc": _find(r"规则中文描述\s*[:：]\s*(.+)"),
+        "check_type": _find(r"检查类型\s*[:：]\s*(\S+)"),
+        "alert_level": _find(r"告警级别\s*[:：]\s*'?(\S+)"),
+        "sql": sql,
+        "target_table": _find(r"目标表\s*[:：]\s*(\S+)"),
+        "owner": _find(r"规则负责人\s*[:：]\s*(\S+)"),
+        "dq_file": "",
+    }
+
+
+def _discover_dq_from_repo(yml_dir: Path, target_table: str) -> list | None:
+    """从代码仓 DQ/ 目录发现资产对应的 DQ 质量检查规则。
+
+    定位逻辑：目录+目标表字段双确认
+    1. 快速文本搜索找含 target_table 的 DQ yml 文件
+    2. 解析确认「目标表」字段匹配
+    3. 返回所有匹配的 DQ 规则列表
+
+    Args:
+        yml_dir: 规则组目录（用于向上找代码仓根）
+        target_table: 资产目标表名（I 视图名或 F 表名）
+
+    Returns: [dq_rule_dict, ...] 或 None（找不到不阻塞）
+    """
+    if not target_table:
+        return None
+
+    repo_root = _find_repo_root(yml_dir)
+    if not repo_root:
+        return None
+
+    dq_root = repo_root / "DQ"
+    if not dq_root.is_dir():
+        return None
+
+    target_lower = target_table.lower()
+
+    # 两阶段定位：先快速文本搜索，再解析确认
+    candidate_files = []
+    for yml_path in dq_root.rglob("*.yml"):
+        try:
+            content = yml_path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        if target_lower in content.lower():
+            candidate_files.append(yml_path)
+
+    if not candidate_files:
+        return None
+
+    # 解析候选文件，确认目标表字段匹配
+    rules = []
+    for yml_path in candidate_files:
+        rule = _parse_dq_yml(yml_path)
+        if not rule or not rule["rule_number"]:
+            continue
+        # 双确认：目标表字段匹配（容错大小写）
+        if rule["target_table"].lower() == target_lower:
+            rules.append(rule)
+
+    return rules if rules else None
+
+
 def _find_ddl_file(table_dir: Path, table_lower: str) -> Path | None:
     """在 DDL 目录里找目标表的 DDL 文件（包含匹配 + 多扩展名）。
 
@@ -1675,6 +1788,19 @@ def main():
     # 注入 LTS 调度信息（和 asset_info 同样的模式：main 发现，注入 meta）
     if schedule_info:
         knowledge["meta"]["schedule"] = schedule_info
+    # 发现并注入 DQ 质量检查规则（此时 target_name 已有，用 I视图名/F表名关联）
+    dq_rules = None
+    _t_dq = 0
+    if is_yml_mode and target_name:
+        try:
+            _t_dq0 = _t_usage.time()
+            dq_rules = _discover_dq_from_repo(input_path, target_name)
+            _t_dq = round(_t_usage.time() - _t_dq0, 2)
+            if dq_rules:
+                knowledge["meta"]["dq_rules"] = dq_rules
+                print(f"  [DQ] 发现 {len(dq_rules)} 条质量检查规则 ({_t_dq}s)")
+        except Exception:
+            pass
     stats = field_mappings["statistics"]
     print(f"  步骤数: {len(rules)}, 字段数: {stats['total_in_sql']}, "
           f"问题数: {len(quality['issues'])}")
@@ -2194,6 +2320,17 @@ def main_chain():
     # 注入 LTS 调度信息
     if schedule_info:
         knowledge["meta"]["schedule"] = schedule_info
+    # 发现并注入 DQ 质量检查规则
+    _chain_target = knowledge.get("meta", {}).get("target_table", "")
+    if _chain_target:
+        try:
+            _t_dq0 = _t_usage.time()
+            dq_rules = _discover_dq_from_repo(final_group_dir, _chain_target)
+            if dq_rules:
+                knowledge["meta"]["dq_rules"] = dq_rules
+                print(f"  [DQ] 发现 {len(dq_rules)} 条质量检查规则")
+        except Exception:
+            pass
 
     # 输出
     safe_name = "chain_" + final_group_dir.name

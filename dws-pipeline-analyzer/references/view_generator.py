@@ -1074,6 +1074,7 @@ def build_report_data(knowledge):
         "auxiliary_fields": auxiliary_fields,
         "quality": quality_out,
         "schedule": knowledge.get("meta", {}).get("schedule"),
+        "dq_rules": knowledge.get("meta", {}).get("dq_rules"),
     }
 
 
@@ -2307,6 +2308,24 @@ def generate_tech_design(knowledge, output_dir):
             lines.append("")
     else:
         lines.append("*无调度信息（非代码仓 yml 模式，或未找到匹配的 LTS 任务）*")
+    lines.append("")
+
+    # ── 11. DQ 质量检查 ──
+    lines.append("## 11. DQ 质量检查")
+    lines.append("")
+    dq_rules = knowledge.get("meta", {}).get("dq_rules")
+    if dq_rules:
+        lines.append(f"本资产有 **{len(dq_rules)}** 条 DQ 质量检查规则：")
+        lines.append("")
+        lines.append("| 规则编码 | 规则名称 | 描述 |")
+        lines.append("|---------|---------|------|")
+        for r in dq_rules:
+            lines.append(f"| {r.get('rule_number', '-')} | {r.get('rule_name', '-')} | "
+                         f"{r.get('rule_desc', '-')} |")
+        lines.append("")
+        lines.append("> 修改加工逻辑时，请注意同步更新相关 DQ 规则。")
+    else:
+        lines.append("*无 DQ 质量检查规则（非代码仓 yml 模式，或未找到匹配的 DQ 规则）*")
     lines.append("")
 
     # 写入

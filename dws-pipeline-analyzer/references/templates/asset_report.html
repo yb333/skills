@@ -1279,6 +1279,19 @@ body {
     </div>
   </div>
 
+  <!-- DQ Rules -->
+  <div class="section-card" id="dqSection">
+    <button class="collapsible-toggle" id="dqToggle">
+      <span class="toggle-arrow">&#9654;</span>
+      <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4"/><path d="M21 12c0 4.97-4.03 9-9 9s-9-4.03-9-9 4.03-9 9-9 9 4.03 9 9z"/></svg>
+      DQ 质量检查
+      <span class="section-count" id="dqCount"></span>
+    </button>
+    <div class="collapsible-body" id="dqBody">
+      <div class="section-body" id="dqContent"></div>
+    </div>
+  </div>
+
   <!-- Section 3: Lineage -->
   <div class="section-card">
     <div class="section-header">
@@ -2806,8 +2819,66 @@ function renderSchedule() {
 
   document.getElementById('scheduleContent').innerHTML = html;
 }
+
 // ================================================================
-function openDetail(fieldName, scenario) {
+// DQ Rules (质量检查)
+// ================================================================
+function renderDq() {
+  var rules = REPORT_DATA.dq_rules;
+  if (!rules || !rules.length) {
+    document.getElementById('dqSection').style.display = 'none';
+    return;
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function(c) {
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+    });
+  }
+
+  document.getElementById('dqCount').textContent = rules.length + ' 条';
+
+  var html = '<div style="font-size:12px;color:#666;margin-bottom:12px;">'
+    + '本资产有以下 DQ 质量检查规则，修改加工逻辑时请注意同步更新。</div>';
+
+  // 规则表格
+  html += '<table style="width:100%;font-size:13px;border-collapse:collapse;margin-bottom:8px;">';
+  html += '<thead><tr style="background:#f5f7fa;">'
+    + '<th style="padding:8px 10px;text-align:left;">规则编码</th>'
+    + '<th style="padding:8px 10px;text-align:left;">规则名称</th>'
+    + '<th style="padding:8px 10px;text-align:left;">描述</th>'
+    + '</tr></thead><tbody>';
+  rules.forEach(function(r, i) {
+    html += '<tr style="border-bottom:1px solid #eee;cursor:pointer;" '
+      + 'onclick="document.getElementById(\'dq_detail_' + i + '\').classList.toggle(\'open\')">'
+      + '<td style="padding:8px 10px;font-weight:500;color:#1a73e8;">' + esc(r.rule_number || '-') + '</td>'
+      + '<td style="padding:8px 10px;">' + esc(r.rule_name || '-') + '</td>'
+      + '<td style="padding:8px 10px;color:#666;">' + esc(r.rule_desc || '-') + '</td>'
+      + '</tr>';
+    // 折叠详情
+    html += '<tr id="dq_detail_' + i + '" class="collapsible-body" style="max-height:0;overflow:hidden;">'
+      + '<td colspan="3" style="padding:0;">'
+      + '<div style="padding:12px 16px;background:#fafbfc;">';
+    if (r.sql) {
+      html += '<div style="font-size:11px;color:#888;margin-bottom:4px;">检查SQL</div>'
+        + '<pre style="background:#fff;border:1px solid #e0e0e0;border-radius:4px;'
+        + 'padding:8px;font-size:11px;overflow-x:auto;max-height:200px;margin-bottom:8px;">'
+        + esc(r.sql) + '</pre>';
+    }
+    var meta = [];
+    if (r.check_type) meta.push('检查类型: ' + r.check_type);
+    if (r.alert_level) meta.push('告警级别: ' + r.alert_level);
+    if (r.owner) meta.push('负责人: ' + r.owner);
+    if (r.target_table) meta.push('目标表: ' + r.target_table);
+    if (meta.length) {
+      html += '<div style="font-size:11px;color:#999;">' + meta.join(' · ') + '</div>';
+    }
+    html += '</div></td></tr>';
+  });
+  html += '</tbody></table>';
+
+  document.getElementById('dqContent').innerHTML = html;
+}
   // 从 fields 列表找指定场景的字段
   var fieldEntry = (REPORT_DATA.fields || []).find(function(f) {
     return f.target_field === fieldName && (!scenario || f.scenario === scenario);
@@ -3521,6 +3592,12 @@ document.getElementById('scheduleToggle').addEventListener('click', function() {
   document.getElementById('scheduleBody').classList.toggle('open');
 });
 
+// DQ collapsible
+document.getElementById('dqToggle').addEventListener('click', function() {
+  this.classList.toggle('open');
+  document.getElementById('dqBody').classList.toggle('open');
+});
+
 // Field Mapping collapsible — default collapsed
 document.getElementById('fieldMappingToggle').addEventListener('click', function() {
   this.classList.toggle('open');
@@ -3569,6 +3646,7 @@ renderSteps();
 renderFieldMapping();
 renderQuality();
 renderSchedule();
+renderDq();
 </script>
 
 </body>

@@ -152,13 +152,36 @@ def build_mock_repo(base_dir):
     # ════════════════════════════════════════════════════════════
     # 5. 干扰项：DQ / LTS / ADMS / Release
     # ════════════════════════════════════════════════════════════
-    # DQ：数据质量规则 yml（结构类似但不是我们的执行平台数据）
-    dq_dir = repo / "DQ" / "P_TRADE" / "SUB_TRADE" / "DQ_TRADE_ORDER"
+    # DQ：数据质量规则（真实格式，目标表匹配 dwb_trade_order_d）
+    dq_dir = repo / "DQ" / "FIN_DWB" / "FIN_DWB_COMMEN" / "dwb_trade_order_d"
     dq_dir.mkdir(parents=True, exist_ok=True)
-    (dq_dir / "DQ0001.yml").write_text(
-        yaml.dump({"规则编码": "DQ0001", "规则类型": "1",
-                   "(生成的)查询语句": "SELECT count(*) FROM dws.dwb_trade_order_d"},
-                  allow_unicode=True, sort_keys=False),
+    (dq_dir / "DQ_000001.yml").write_text(
+        yaml.dump({
+            "规则Number": "DQ_000001",
+            "规则中文名": "空值检查",
+            "规则中文描述": "检查关键字段是否为空",
+            "检查类型": "NULL",
+            "告警级别": "2",
+            "SQL": "SELECT count(*) FROM fin_dwb.dwb_trade_order_d WHERE order_id IS NULL",
+            "目标表": "dwb_trade_order_d",
+            "目标表编码": "dwb_trade_order_d",
+            "目标表schema": "fin_dwb",
+            "规则负责人": "test_user",
+        }, allow_unicode=True, sort_keys=False),
+        encoding="utf-8")
+    (dq_dir / "DQ_000002.yml").write_text(
+        yaml.dump({
+            "规则Number": "DQ_000002",
+            "规则中文名": "金额一致性检查",
+            "规则中文描述": "校验订单金额与支付金额一致",
+            "检查类型": "CONSISTENCY",
+            "告警级别": "3",
+            "SQL": "SELECT * FROM fin_dwb.dwb_trade_order_d WHERE amount != paid_amount",
+            "目标表": "dwb_trade_order_d",
+            "目标表编码": "dwb_trade_order_d",
+            "目标表schema": "fin_dwb",
+            "规则负责人": "test_user",
+        }, allow_unicode=True, sort_keys=False),
         encoding="utf-8")
 
     # LTS：调度任务（真实结构：LTS/项目/任务组/任务.yml）
