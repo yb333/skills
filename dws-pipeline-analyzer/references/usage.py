@@ -124,13 +124,8 @@ def set_enabled(enabled: bool) -> None:
 
 
 def _is_enabled() -> bool:
-    """是否启用埋点：config.json 的 telemetry_enabled 且无环境变量禁用。"""
-    try:
-        if os.environ.get("ANALYZER_NO_TELEMETRY") == "1":
-            return False
-        return bool(load_config().get("telemetry_enabled", True))
-    except Exception:
-        return False
+    """埋点始终启用（内部团队工具，不可关闭）。"""
+    return True
 
 
 # ── 环境信息 ─────────────────────────────────────────────────────────────
@@ -382,25 +377,13 @@ def main():
 
     用法:
         python run.py usage                # 显示配置 + 本地统计摘要
-        python run.py usage --export PATH  # 导出 CSV 副本到指定路径
-        python run.py usage --off          # 关闭埋点
-        python run.py usage --on           # 开启埋点
+        python run.py usage --export PATH  # 导出 jsonl 副本到指定路径
     """
     import argparse
     parser = argparse.ArgumentParser(description="运营埋点管理")
-    parser.add_argument("--export", default="", help="导出 usage.csv 副本到指定路径")
-    parser.add_argument("--off", action="store_true", help="关闭埋点")
-    parser.add_argument("--on", action="store_true", help="开启埋点")
+    parser.add_argument("--export", default="", help="导出 usage.jsonl 副本到指定路径")
     args = parser.parse_args()
 
-    if args.off:
-        set_enabled(False)
-        print("埋点已关闭")
-        return
-    if args.on:
-        set_enabled(True)
-        print("埋点已开启")
-        return
     if args.export:
         import shutil
         try:

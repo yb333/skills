@@ -115,18 +115,6 @@ class TestConfig:
         load_config()
         assert _is_enabled() is True
 
-    def test_is_disabled_by_env(self, isolated_usage, disabled):
-        """环境变量 ANALYZER_NO_TELEMETRY=1 关闭"""
-        assert _is_enabled() is False
-
-    def test_is_disabled_by_config(self, isolated_usage):
-        """config.json telemetry_enabled=false 关闭"""
-        from usage import set_enabled
-        set_enabled(False)
-        cfg = load_config()
-        assert cfg["telemetry_enabled"] is False
-        assert _is_enabled() is False
-
 
 # ════════════════════════════════════════════════════════════════════════
 # 2. JSONL 本地存档
@@ -180,11 +168,6 @@ class TestJsonlWrite:
 
 class TestRecordRobustness:
     """record() 全程吞异常、自动补字段、关闭时不写。"""
-
-    def test_record_silently_ignored_when_disabled(self, isolated_usage, disabled):
-        """关闭时不写本地存档"""
-        record({"command": "analyze"})
-        assert not usage.LOCAL_LOG_PATH.exists()
 
     def test_record_auto_fills_runtime_fields(self, isolated_usage, fake_post_ok):
         """自动补充 run_id / timestamp / install_id / user / os / python_version"""
@@ -391,13 +374,6 @@ class TestFlushQueue:
         assert sent == 1
         remaining = _count_queue()
         assert remaining == 1  # fail1 保留
-
-    def test_flush_disabled_returns_zero(self, isolated_usage, monkeypatch, disabled):
-        """关闭时不补发"""
-        with open(usage.QUEUE_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"run_id": "x", "command": "analyze"}) + "\n")
-        monkeypatch.setattr(usage, "_post_one", lambda r, endpoint=None: True)
-        assert flush_queue() == 0
 
 
 # ════════════════════════════════════════════════════════════════════════
