@@ -4,6 +4,8 @@ DWS 数据仓库 ETL 资产理解工具——帮你快速理解一个 ETL 资产
 
 在 AI 对话工具（codeagent / opencode）里用斜杠命令触发，比如输入 `/analyze` 就能分析一个 ETL 资产。
 
+> 📋 **[更新日志](CHANGELOG.md)** — 每次更新了什么，看这里
+
 ---
 
 ## 快速开始（3 步上手）
