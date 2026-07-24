@@ -2640,7 +2640,7 @@ function renderQuality() {
 // ================================================================
 function renderSchedule() {
   var s = REPORT_DATA.schedule;
-  if (!s || (!s.f_task && !s.i_task)) {
+  if (!s || (!s.f_tasks && !s.i_tasks && !s.all_tasks)) {
     document.getElementById('scheduleSection').style.display = 'none';
     return;
   }
@@ -2768,14 +2768,26 @@ function renderSchedule() {
     return out;
   }
 
-  // F 任务
-  html += taskCard(s.f_task, 'F 调度任务（加工）', false);
-  // I 任务
-  if (s.i_task) {
+  // F 任务（可能有多个）
+  var fTasks = s.f_tasks || [];
+  fTasks.forEach(function(ft, idx) {
+    html += taskCard(ft, idx === 0 ? 'F 调度任务（加工）' : 'F 调度任务（加工·额外）', false);
+  });
+  // I 任务（可能有多个）
+  var iTasks = s.i_tasks || [];
+  if (iTasks.length && fTasks.length) {
     html += '<div style="text-align:center;color:#aaa;font-size:12px;margin:-8px 0 12px;">↓ I 依赖 F</div>';
-    html += taskCard(s.i_task, 'I 调度任务（对外消费）', true);
-  } else {
-    html += '<div class="no-results">未发现 I 调度任务</div>';
+  }
+  iTasks.forEach(function(it) {
+    html += taskCard(it, 'I 调度任务（对外消费）', true);
+  });
+  // 其他任务（非 F/I 命名的）
+  var otherTasks = s.other_tasks || [];
+  otherTasks.forEach(function(ot) {
+    html += taskCard(ot, '其他调度任务', false);
+  });
+  if (!fTasks.length && !iTasks.length && !otherTasks.length) {
+    html += '<div class="no-results">未发现调度任务</div>';
   }
 
   document.getElementById('scheduleContent').innerHTML = html;

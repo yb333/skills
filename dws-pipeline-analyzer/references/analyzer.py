@@ -970,14 +970,16 @@ def _build_lts_result(data, task_name, group_code, params, jobs):
 
 
 def _discover_lts_from_repo(yml_dir: Path, rule_group_code: str) -> dict | None:
-    """从代码仓 LTS/ 目录发现规则组对应的调度任务（F + I）。
+    """从代码仓 LTS/ 目录发现规则组对应的调度任务（支持多调度匹配同一规则组）。
 
     匹配逻辑：
-    1. 扫所有 LTS/**/*.yml，找 taskParams 里 V_GROUP_CODE == rule_group_code 的 → F 任务
-    2. 从 F 任务名推导 I 任务名（_F → _I），再找对应的 I 任务
-    3. 返回 {f_task, i_task} 或 None（找不到不阻塞）
+    1. 扫所有 LTS/**/*.yml，找 taskParams 里 V_GROUP_CODE == rule_group_code 的所有任务
+    2. 按任务名分类：_F 结尾的是 F 任务，_I 结尾的是 I 任务，其他归为其他
+    3. 返回 {f_tasks: [...], i_tasks: [...], other_tasks: [...]} 或 None
 
-    Returns: {"f_task": {...}, "i_task": {...} 或 None} 或 None
+    一个规则组可能被多个调度任务调用（临时/特殊场景），全部收集。
+
+    Returns: {"f_tasks": [...], "i_tasks": [...]} 或 None
     """
     if not rule_group_code:
         return None
@@ -990,10 +992,11 @@ def _discover_lts_from_repo(yml_dir: Path, rule_group_code: str) -> dict | None:
     if not lts_root.is_dir():
         return None
 
-    # 扫所有 LTS yml，建索引：按 V_GROUP_CODE 和 task_name
-    import yaml
-    by_group_code = {}   # V_GROUP_CODE → task dict
-    by_task_name = {}    # task_name → task dict
+    # 扫所有 LTS yml，建索引
+    # by_group_code: V_GROUP_CODE → [task dict, ...]（一对多）
+    # by_task_name: task_name → task dict
+    by_group_code = {}    # V_GROUP_CODE → list of tasks
+    by_task_name = {}     # task_name → task
 
     for yml_path in lts_root.rglob("*.yml"):
         task = _parse_lts_task(yml_path)
@@ -1001,21 +1004,36 @@ def _discover_lts_from_repo(yml_dir: Path, rule_group_code: str) -> dict | None:
             continue
         by_task_name[task["task_name"]] = task
         if task["group_code"]:
-            by_group_code[task["group_code"]] = task
+            by_group_code.setdefault(task["group_code"], []).append(task)
 
-    # 1. 按 rule_group_code 找 F 任务
-    f_task = by_group_code.get(rule_group_code)
-    if not f_task:
+    # 按 rule_group_code 找所有匹配的任务
+    matched = by_group_code.get(rule_group_code)
+    if not matched:
         return None
 
-    # 2. 从 F 任务名推导 I 任务名（_F → _I），找 I 任务
-    i_task = None
-    f_name = f_task["task_name"]
-    if f_name.endswith("_F"):
-        i_name = f_name[:-2] + "_I"
-        i_task = by_task_name.get(i_name)
+    # 按任务名后缀分类
+    f_tasks = [t for t in matched if t["task_name"].endswith("_F")]
+    i_tasks = [t for t in matched if t["task_name"].endswith("_I")]
+    other_tasks = [t for t in matched
+                   if not t["task_name"].endswith("_F") and not t["task_name"].endswith("_I")]
 
-    return {"f_task": f_task, "i_task": i_task}
+    # F 任务关联的 I 任务（按命名推导 _F → _I，可能找到额外的 I 任务不在 matched 里）
+    for f_task in f_tasks:
+        f_name = f_task["task_name"]
+        if f_name.endswith("_F"):
+            i_name = f_name[:-2] + "_I"
+            i_task = by_task_name.get(i_name)
+            if i_task and i_task not in i_tasks:
+                i_tasks.append(i_task)
+
+    # 合并：所有匹配的任务（去重）
+    all_tasks = list(matched)
+    for t in i_tasks:
+        if t not in all_tasks:
+            all_tasks.append(t)
+
+    return {"f_tasks": f_tasks, "i_tasks": i_tasks, "other_tasks": other_tasks,
+            "all_tasks": all_tasks}
 
 
 def _find_ddl_file(table_dir: Path, table_lower: str) -> Path | None:

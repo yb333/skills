@@ -454,9 +454,9 @@ def _get_schedule_type(schedule):
 
     判断依据：F 任务的"是否一天多调"字段 + cron 表达式。
     """
-    if not schedule or not schedule.get("f_task"):
+    if not schedule or not schedule.get("f_tasks"):
         return ""
-    ft = schedule["f_task"]
+    ft = schedule["f_tasks"][0]
     multi_day = str(ft.get("multi_day", "") or ft.get("是否一天多调", ""))
     if multi_day in ("是", "Y", "true", "True"):
         return "一天多调"
@@ -2270,49 +2270,40 @@ def generate_tech_design(knowledge, output_dir):
     lines.append("")
     schedule = knowledge.get("meta", {}).get("schedule")
     if schedule:
-        # F 任务
-        ft = schedule.get("f_task")
-        if ft:
-            lines.append("### F 调度任务（加工）")
+        all_tasks = schedule.get("all_tasks") or []
+        f_tasks = schedule.get("f_tasks") or []
+        i_tasks = schedule.get("i_tasks") or []
+
+        def _task_table(t, title):
+            lines.append(f"### {title}")
             lines.append("")
             lines.append("| 配置项 | 值 |")
             lines.append("|--------|-----|")
-            lines.append(f"| 任务名称 | {ft.get('task_name', '-')} |")
-            lines.append(f"| 任务类型 | {ft.get('task_type', '-')} |")
-            lines.append(f"| 调度周期 | {ft.get('schedule_cron', '-')} |")
-            lines.append(f"| 责任人 | {ft.get('owner', '-')} |")
-            lines.append(f"| 开始时间 | {ft.get('start_time', '-')} |")
-            lines.append(f"| 依赖上一周期 | {ft.get('depends_prev_cycle', '-')} |")
-            lines.append(f"| 任务组 | {ft.get('task_group', '-')} |")
-            lines.append(f"| 项目 | {ft.get('project', '-')} |")
+            lines.append(f"| 任务名称 | {t.get('task_name', '-')} |")
+            lines.append(f"| 任务类型 | {t.get('task_type', '-')} |")
+            lines.append(f"| 调度周期 | {t.get('schedule_cron', '-')} |")
+            lines.append(f"| 依赖上一周期 | {t.get('depends_prev_cycle', '-')} |")
+            lines.append(f"| 任务组 | {t.get('task_group', '-')} |")
             lines.append("")
-            # Jobs
+
+        # F 任务（可能有多个）
+        for ft in f_tasks:
+            _task_table(ft, f"F 调度任务（加工）: {ft.get('task_name', '-')}")
             f_jobs = ft.get("jobs", [])
             if f_jobs:
-                lines.append("**Job 依赖链：**")
+                lines.append("**Job：**")
                 lines.append("")
-                lines.append("| Job名称 | 类型 | 父节点 | 重试 | 超时(分) |")
-                lines.append("|---------|------|--------|------|---------|")
                 for j in f_jobs:
-                    retry = f"{j.get('retry_count', '-')}/{j.get('retry_interval', '-')}s"
-                    lines.append(f"| {j.get('name', '-')} | {j.get('type', '-')} | "
-                                 f"{j.get('parent', '-')} | {retry} | {j.get('timeout', '-')} |")
+                    lines.append(f"- {j.get('name', '-')} ({j.get('type', '-')})")
                 lines.append("")
         # I 任务
-        it = schedule.get("i_task")
-        if it:
-            lines.append("### I 调度任务（对外消费，依赖 F）")
-            lines.append("")
-            lines.append("| 配置项 | 值 |")
-            lines.append("|--------|-----|")
-            lines.append(f"| 任务名称 | {it.get('task_name', '-')} |")
-            lines.append(f"| 任务类型 | {it.get('task_type', '-')} |")
-            lines.append(f"| 调度周期 | {it.get('schedule_cron', '-')} |")
-            lines.append(f"| 责任人 | {it.get('owner', '-')} |")
-            lines.append(f"| 开始时间 | {it.get('start_time', '-')} |")
-            lines.append("")
-        elif ft:
-            lines.append("*未发现 I 调度任务*")
+        for it in i_tasks:
+            _task_table(it, f"I 调度任务（对外消费）: {it.get('task_name', '-')}")
+        # 其他任务（非 F/I 命名的）
+        for ot in schedule.get("other_tasks") or []:
+            _task_table(ot, f"其他调度任务: {ot.get('task_name', '-')}")
+        if not all_tasks:
+            lines.append("*无调度信息*")
             lines.append("")
     else:
         lines.append("*无调度信息（非代码仓 yml 模式，或未找到匹配的 LTS 任务）*")

@@ -40,21 +40,25 @@ class TestDiscoverLts:
         group_dir = mock_repo["group_dir"]
         result = _discover_lts_from_repo(group_dir, "GR_TRADE_ORDER")
         assert result is not None
-        assert result["f_task"]["task_name"] == "TASK_TRADE_ORDER_F"
-        assert result["f_task"]["group_code"] == "GR_TRADE_ORDER"
+        assert len(result["f_tasks"]) >= 1
+        assert result["f_tasks"][0]["task_name"] == "TASK_TRADE_ORDER_F"
+        assert result["f_tasks"][0]["group_code"] == "GR_TRADE_ORDER"
 
     def test_find_i_task_by_naming(self, mock_repo):
         """从 F 任务名推导 I 任务（_F → _I）"""
         group_dir = mock_repo["group_dir"]
         result = _discover_lts_from_repo(group_dir, "GR_TRADE_ORDER")
-        assert result["i_task"] is not None
-        assert result["i_task"]["task_name"] == "TASK_TRADE_ORDER_I"
+        assert len(result["i_tasks"]) >= 1
+        i_names = [t["task_name"] for t in result["i_tasks"]]
+        assert "TASK_TRADE_ORDER_I" in i_names
 
     def test_i_task_depends_on_f(self, mock_repo):
         """I 任务的 job 依赖指向 F"""
         group_dir = mock_repo["group_dir"]
         result = _discover_lts_from_repo(group_dir, "GR_TRADE_ORDER")
-        i_jobs = result["i_task"]["jobs"]
+        i_tasks = result["i_tasks"]
+        assert len(i_tasks) >= 1
+        i_jobs = i_tasks[0]["jobs"]
         # I 任务的第二个 job 是 tskdep 依赖
         dep_jobs = [j for j in i_jobs if j["type"] == "tskdep"]
         assert len(dep_jobs) >= 1
@@ -82,8 +86,9 @@ class TestDiscoverLts:
         group_dir = mock_repo["group_dir"]
         # GR_OTHER_NOT_MATCHED 存在于干扰 yml 里，但不该匹配 GR_TRADE_ORDER
         result = _discover_lts_from_repo(group_dir, "GR_TRADE_ORDER")
-        assert result["f_task"]["task_name"] == "TASK_TRADE_ORDER_F"
-        assert result["f_task"]["task_name"] != "TASK_OTHER_F"
+        f_names = [t["task_name"] for t in result["f_tasks"]]
+        assert "TASK_TRADE_ORDER_F" in f_names
+        assert "TASK_OTHER_F" not in f_names
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -143,8 +148,8 @@ class TestLtsInAnalysis:
 
         assert "schedule" in knowledge.get("meta", {}), "knowledge.meta 应含 schedule"
         sched = knowledge["meta"]["schedule"]
-        assert sched["f_task"]["task_name"] == "TASK_TRADE_ORDER_F"
-        assert sched["i_task"]["task_name"] == "TASK_TRADE_ORDER_I"
+        assert sched["f_tasks"][0]["task_name"] == "TASK_TRADE_ORDER_F"
+        assert any(t["task_name"] == "TASK_TRADE_ORDER_I" for t in sched["i_tasks"])
 
     def test_no_schedule_when_xlsx_mode(self, tmp_path):
         """xlsx 模式不发现 LTS（只有 yml 模式才发现）"""
