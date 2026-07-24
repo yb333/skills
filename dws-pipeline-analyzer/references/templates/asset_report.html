@@ -2734,11 +2734,18 @@ function renderSchedule() {
     }
     out += '</div>';
 
-    // 右列：调度依赖
+    // 右列：调度依赖（折叠，避免依赖太多撑长页面）
+    var srcCount = (REPORT_DATA.summary && REPORT_DATA.summary.source_count) || 0;
+    var depHint = depJobs.length > 0 && srcCount > 0
+      ? '（' + depJobs.length + '个依赖 / ' + srcCount + '个来源表'
+        + (depJobs.length === srcCount ? ' ✓' : ' ⚠数量不一致')
+        + '）'
+      : (depJobs.length > 0 ? '（' + depJobs.length + '个）' : '');
     out += '<div>';
-    out += '<div style="font-size:11px;color:#999;margin-bottom:4px;">'
-      + '调度依赖' + (depJobs.length ? '（' + depJobs.length + '个，对应来源表）' : '') + '</div>';
     if (depJobs.length) {
+      out += '<details style="margin-top:0;"><summary style="cursor:pointer;font-size:11px;color:#999;">'
+        + '调度依赖' + depHint + '</summary>';
+      out += '<div style="margin-top:4px;">';
       depJobs.forEach(function(j) {
         var depType = j.type === 'tskdep' ? '宽依赖'
           : (j.type === 'url' ? '虚拟任务依赖' : j.type);
@@ -2746,8 +2753,9 @@ function renderSchedule() {
           + esc(j.name || '-') + ' '
           + '<span style="font-size:11px;color:#999;">' + esc(depType) + '</span></div>';
       });
+      out += '</div></details>';
     } else {
-      out += '<div style="font-size:12px;color:#ccc;">无</div>';
+      out += '<div style="font-size:11px;color:#999;margin-bottom:4px;">调度依赖: 无</div>';
     }
     out += '</div>';
 
