@@ -162,70 +162,63 @@ def build_mock_repo(base_dir):
         encoding="utf-8")
 
     # LTS：调度任务（真实结构：LTS/项目/任务组/任务.yml）
-    # 用真实非标准格式（Excel转yml的实际格式）：
-    # - 冒号后无空格（'*任务名称':TASK_F）
-    # - block scalar（额外信息：|）吞掉 Jobs 和 taskParams 子表
-    # 这样测试才能真正覆盖文本解析兜底逻辑
+    # 用真实格式（平台转出来的）：*前缀字段名（*任务名称等），
+    # YAML规范里 * 是alias符号，yaml.safe_load会报错，必须靠文本解析兜底
     lts_group_dir = repo / "LTS" / "BCNB_DAILY" / "GROUP_TRADE"
     lts_group_dir.mkdir(parents=True, exist_ok=True)
-    # F 任务（匹配 GR_TRADE_ORDER）—— 非标准格式，模拟真实 Excel 转 yml
+    # F 任务（匹配 GR_TRADE_ORDER）
     (lts_group_dir / "TASK_TRADE_ORDER_F.yml").write_text(
-        "'*任务名称':TASK_TRADE_ORDER_F\n"
-        "'*任务类型': 周期任务\n"
-        "'*任务组名称':GROUP_TRADE\n"
-        "'*责任人':test_user\n"
-        "'*项目名称':BCNB_DAILY\n"
+        "*任务名称: TASK_TRADE_ORDER_F\n"
+        "*任务类型: 周期任务\n"
+        "*任务组名称: GROUP_TRADE\n"
+        "*责任人: test_user\n"
+        "*项目名称: BCNB_DAILY\n"
         "调度周期: 0 30 2 * * ?\n"
         "开始时间: 2026/01/01 02:30:00\n"
         "依赖上一周期: 是\n"
         "是否一天多调: 否\n"
-        "额外信息（其他sheet页信息）：|\n"
-        "Jobs:|\n"
-        "- '*job名称': Pjob_trade_f\n"
-        "  '*job的父节点名称': start\n"
-        "  '*job类型': url\n"
-        "  job重试次数:'3'\n"
-        "  job重试间隔:'60'\n"
-        "  job超时时间:'60'\n"
-        "  job异常处理方式:fail\n"
-        "- '*job名称': Pjob_dep_f\n"
-        "  '*job的父节点名称': Pjob_trade_f\n"
-        "  '*job类型': tskdep\n"
-        "  job重试次数:'3'\n"
-        "  job重试间隔:'60'\n"
-        "taskParams:|\n"
-        "- '*任务名称':TASK_TRADE_ORDER_F\n"
-        "  '*参数名称':V_GROUP_CODE\n"
-        "  参数值:GR_TRADE_ORDER\n"
-        "- '*任务名称':TASK_TRADE_ORDER_F\n"
-        "  '*参数名称':V_CYCLE_ID\n"
-        "  参数值:\n",
+        "Jobs:\n"
+        "- *job名称: Pjob_trade_f\n"
+        "  *job的父节点名称: start\n"
+        "  *job类型: url\n"
+        "  job重试次数: 3\n"
+        "  job重试间隔: 60\n"
+        "  job超时时间: 60\n"
+        "  job异常处理方式: fail\n"
+        "- *job名称: Pjob_dep_f\n"
+        "  *job的父节点名称: Pjob_trade_f\n"
+        "  *job类型: tskdep\n"
+        "  job重试次数: 3\n"
+        "  job重试间隔: 60\n"
+        "taskParams:\n"
+        "- *参数名称: V_GROUP_CODE\n"
+        "  参数值: GR_TRADE_ORDER\n"
+        "- *参数名称: V_CYCLE_ID\n"
+        "  参数值: ''\n",
         encoding="utf-8")
-    # I 任务（命名推导：TASK_TRADE_ORDER_I，依赖 F）—— 同样非标准格式
+    # I 任务（命名推导：TASK_TRADE_ORDER_I，依赖 F）
     (lts_group_dir / "TASK_TRADE_ORDER_I.yml").write_text(
-        "'*任务名称':TASK_TRADE_ORDER_I\n"
-        "'*任务类型': 周期任务\n"
-        "'*任务组名称':GROUP_TRADE\n"
-        "'*责任人':test_user\n"
-        "'*项目名称':BCNB_DAILY\n"
+        "*任务名称: TASK_TRADE_ORDER_I\n"
+        "*任务类型: 周期任务\n"
+        "*任务组名称: GROUP_TRADE\n"
+        "*责任人: test_user\n"
+        "*项目名称: BCNB_DAILY\n"
         "调度周期: 0 40 2 * * ?\n"
         "开始时间: 2026/01/01 02:40:00\n"
         "依赖上一周期: 是\n"
         "是否一天多调: 否\n"
-        "额外信息（其他sheet页信息）：|\n"
-        "Jobs:|\n"
-        "- '*job名称': Pjob_trade_i\n"
-        "  '*job的父节点名称': start\n"
-        "  '*job类型': database\n"
-        "  job重试次数:'1'\n"
-        "  job重试间隔:'60'\n"
-        "- '*job名称': Pjob_trade_f\n"
-        "  '*job的父节点名称': Pjob_trade_i\n"
-        "  '*job类型': tskdep\n"
-        "taskParams:|\n"
-        "- '*任务名称':TASK_TRADE_ORDER_I\n"
-        "  '*参数名称':V_SUCCESS_VALUE\n"
-        "  参数值:v_code==0\n",
+        "Jobs:\n"
+        "- *job名称: Pjob_trade_i\n"
+        "  *job的父节点名称: start\n"
+        "  *job类型: database\n"
+        "  job重试次数: 1\n"
+        "  job重试间隔: 60\n"
+        "- *job名称: Pjob_trade_f\n"
+        "  *job的父节点名称: Pjob_trade_i\n"
+        "  *job类型: tskdep\n"
+        "taskParams:\n"
+        "- *参数名称: V_SUCCESS_VALUE\n"
+        "  参数值: v_code==0\n",
         encoding="utf-8")
     # 干扰项：不匹配任何规则组的任务
     other_lts_dir = repo / "LTS" / "BCNB_DAILY" / "GROUP_OTHER"
